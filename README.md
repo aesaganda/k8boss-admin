@@ -42,8 +42,15 @@ every cluster you register and write to none of them. That is deliberate — see
 [Turning on writes](#turning-on-writes).
 
 If you have a kubeconfig at `~/.kube/config`, compose mounts it read-only and the
-console administers your current context with no further setup. That fallback is
-for development only and is used **only while no cluster is registered**.
+console falls back to your current context. That fallback is for development
+only, and is used **only while no cluster is registered** — register a cluster
+and it is ignored entirely.
+
+> The backend runs as uid 10001, and a kubeconfig is usually mode `600` owned by
+> you, so the container often cannot read it. `chmod 644 ~/.kube/config` fixes it
+> on a development machine and is a bad idea anywhere else; registering a cluster
+> properly is the better answer. The symptom is the console starting fine and
+> reporting no clusters — which is accurate, not a failure to look.
 
 ### Register a cluster
 
@@ -233,10 +240,11 @@ flowchart TB
             end
 
             clients["ClusterClientManager<br/>per-cluster clients, deadlines, decrypted tokens"]
-            mw --> read
-            mw --> write
-            read --> clients
-            write --> clients
+            mw --> catalog
+            mw --> gate
+            reader --> clients
+            pre --> clients
+            apply --> clients
         end
 
         db[("SQLite / PostgreSQL<br/>registered clusters — tokens encrypted<br/>audit trail — append-only")]
