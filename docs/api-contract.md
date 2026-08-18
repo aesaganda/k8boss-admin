@@ -99,6 +99,10 @@ Stable `error` codes:
 | `not_found` | 404 | object or API resource does not exist |
 | `conflict` | 409 | `resourceVersion` mismatch, or the API server rejected the write as conflicting |
 | `invalid` | 422 | submitted YAML failed schema/admission validation |
+| `authentication_required` | 401 | no valid application session was presented |
+| `invalid_credentials` | 401 | login was rejected without revealing whether the username exists |
+| `permission_denied` | 403 | the authenticated console role does not permit the action |
+| `identity_provider_unavailable` | 502 | LDAP could not answer or its secure transport is misconfigured |
 | `mutations_disabled` | 403 | the deployment is running read-only |
 | `unsupported` | 501 | the API resource is not served by this cluster |
 | `upstream_error` | 502 | any other API server failure |
@@ -550,8 +554,9 @@ Row:
 `outcome` ∈ `applied` | `dry_run` | `denied` | `failed` | `conflict`.
 Records are append-only; there is no delete endpoint.
 
-Actor comes from the `X-K8Boss-User` header (advisory, as in k8boss) and
-defaults to `anonymous`.
+With `AUTH_ENABLED=true`, actor is the verified session username and an inbound
+`X-K8Boss-User` cannot override it. With auth disabled, actor comes from the
+legacy advisory `X-K8Boss-User` header and defaults to `anonymous`.
 
 ---
 
@@ -569,3 +574,44 @@ defaults to `anonymous`.
    action exists and why it is unavailable.
 5. When `health.mutations === "disabled"`, the app renders a read-only banner
    and disables write affordances globally.
+
+---
+
+## 12. Console authentication and users
+
+Authentication is disabled by default for compatibility with deployments that
+already put an authenticating proxy in front. When `AUTH_ENABLED=true`, every
+HTTP and WebSocket API except `GET /api/health`, `GET /api/auth/config`, and
+`POST /api/auth/login` requires a valid opaque session cookie. Unsafe HTTP
+methods also require the session's `X-CSRF-Token`. Session bearer tokens are
+HttpOnly cookies and only their SHA-256 digests are stored.
+
+### `GET /api/auth/config`
+
+Public discovery: `{ "enabled":true, "localEnabled":true,
+"ldapEnabled":true, "methods":["local","ldap"] }`.
+
+### `POST /api/auth/login`
+
+Body `{ "username":"erens", "password":"...", "source":"auto|local|ldap" }`.
+Success sets the session cookie and returns `{enabled, authenticated, user,
+csrfToken, expiresAt}`. Every credential rejection is `401 invalid_credentials`;
+the response never reveals whether the username exists. An unavailable directory
+is `502 identity_provider_unavailable`, not invalid credentials.
+
+### `GET /api/auth/me` / `POST /api/auth/logout`
+
+`me` returns the current session body and CSRF token. `logout` revokes the
+server-side session and clears the cookie.
+
+### `/api/auth/users`
+
+Administrator-only. `GET` returns the standard list envelope; `POST` creates a
+local user; `PUT /{id}` updates profile, role, state, or a local password;
+`DELETE /{id}` deactivates the account and revokes all sessions. Password hashes
+never appear in responses. The current user and final active administrator
+cannot be deactivated. LDAP passwords and roles are directory-managed and are
+refreshed after a successful search-and-bind login. The `admin` role gates this
+user-administration surface; both `admin` and `user` identities retain the
+console's normal cluster capabilities, still constrained by preflight and the
+deployment-wide mutation gate.

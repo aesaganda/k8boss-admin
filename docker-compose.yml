@@ -43,6 +43,30 @@ services:
       # whichever way this is set.
       - SECRET_REVEAL_ENABLED=${SECRET_REVEAL_ENABLED:-false}
 
+      # ── Console identity ────────────────────────────────────────────────
+      # Opt-in for compatibility. When enabled, every API and WebSocket request
+      # except health/login requires an HttpOnly session cookie. The bootstrap
+      # password is consumed only when the users table is empty.
+      - AUTH_ENABLED=${AUTH_ENABLED:-false}
+      - AUTH_SESSION_TTL_HOURS=${AUTH_SESSION_TTL_HOURS:-12}
+      - AUTH_COOKIE_SECURE=${AUTH_COOKIE_SECURE:-false}
+      - AUTH_BOOTSTRAP_USERNAME=${AUTH_BOOTSTRAP_USERNAME:-}
+      - AUTH_BOOTSTRAP_PASSWORD=${AUTH_BOOTSTRAP_PASSWORD:-}
+      - LDAP_ENABLED=${LDAP_ENABLED:-false}
+      - LDAP_URL=${LDAP_URL:-}
+      - LDAP_START_TLS=${LDAP_START_TLS:-false}
+      - LDAP_TLS_VALIDATE=${LDAP_TLS_VALIDATE:-true}
+      - LDAP_CA_CERTIFICATE_FILE=${LDAP_CA_CERTIFICATE_FILE:-}
+      - LDAP_BIND_DN=${LDAP_BIND_DN:-}
+      - LDAP_BIND_PASSWORD=${LDAP_BIND_PASSWORD:-}
+      - LDAP_USER_SEARCH_BASE=${LDAP_USER_SEARCH_BASE:-}
+      - LDAP_USER_SEARCH_FILTER=${LDAP_USER_SEARCH_FILTER:-(uid={username})}
+      - LDAP_USERNAME_ATTRIBUTE=${LDAP_USERNAME_ATTRIBUTE:-uid}
+      - LDAP_DISPLAY_NAME_ATTRIBUTE=${LDAP_DISPLAY_NAME_ATTRIBUTE:-cn}
+      - LDAP_EMAIL_ATTRIBUTE=${LDAP_EMAIL_ATTRIBUTE:-mail}
+      - LDAP_ADMIN_GROUP_DN=${LDAP_ADMIN_GROUP_DN:-}
+      - LDAP_CONNECT_TIMEOUT_SECONDS=${LDAP_CONNECT_TIMEOUT_SECONDS:-5}
+
       # ── State ────────────────────────────────────────────────────────────
       # Registered clusters and the audit trail. Cluster CONTENTS are never
       # cached here — every resource the UI shows is read live — so this volume

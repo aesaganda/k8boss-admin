@@ -22,6 +22,8 @@ import contextvars
 import logging
 from urllib.parse import parse_qs
 
+from app.config import settings
+
 logger = logging.getLogger(__name__)
 
 # None means "no cluster named on this request" — the manager then falls back to
@@ -30,13 +32,13 @@ _current_cluster_id: contextvars.ContextVar[int | None] = contextvars.ContextVar
     "current_cluster_id", default=None
 )
 
-# Caller identity from X-K8Boss-User. There is no auth layer in front of this
-# console, so the value is advisory and is used for audit attribution only.
+# Verified session identity when application auth is enabled; otherwise the
+# legacy advisory X-K8Boss-User value used by authenticating-proxy deployments.
 _current_user: contextvars.ContextVar[str] = contextvars.ContextVar(
     "current_user", default="anonymous"
 )
 
-# Peer address, recorded on audit rows alongside the (spoofable) actor.
+# Peer address, recorded on audit rows alongside the actor.
 _current_source_ip: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "current_source_ip", default=None
 )
@@ -65,7 +67,7 @@ def reset_current_user(token) -> None:
 
 
 def get_current_user() -> str:
-    """Caller identity from X-K8Boss-User, or 'anonymous'."""
+    """Verified caller identity, or the legacy advisory actor when auth is off."""
     return _current_user.get()
 
 
@@ -113,18 +115,17 @@ class ClusterContextMiddleware:
                     "active cluster.", scope.get("path"),
                 )
 
-        user = "anonymous"
-        for key, value in scope.get("headers", []):
-            if key == b"x-k8boss-user":
-                # Bounded and latin-1 decoded: the header is caller-controlled and
-                # lands in AuditRecord.actor (String(255)). An oversized value
-                # used to fail the audit INSERT on PostgreSQL, and because the
-                # audit writer is best-effort that made the write itself succeed
-                # with no record of who made it.
-                candidate = value.decode("latin-1").strip()
-                if candidate:
-                    user = candidate[:255]
-                break
+        principal = scope.get("state", {}).get("auth_principal")
+        user = principal.username[:255] if settings.auth_enabled and principal else "anonymous"
+        if not settings.auth_enabled:
+            for key, value in scope.get("headers", []):
+                if key == b"x-k8boss-user":
+                    # Bounded and latin-1 decoded: the legacy header is
+                    # caller-controlled and lands in AuditRecord.actor.
+                    candidate = value.decode("latin-1").strip()
+                    if candidate:
+                        user = candidate[:255]
+                    break
 
         client = scope.get("client")
         source_ip = client[0] if client else None

@@ -29,6 +29,14 @@ const USER_KEY = 'k8boss-admin.user';
 
 const isDev = Boolean(import.meta.env && import.meta.env.DEV);
 
+let applicationAuthEnabled = false;
+let csrfToken = null;
+
+export function setAuthentication({ enabled, csrfToken: nextToken = null }) {
+  applicationAuthEnabled = Boolean(enabled);
+  csrfToken = nextToken || null;
+}
+
 /* ── Error type ─────────────────────────────────────────────────────────── */
 
 /**
@@ -96,11 +104,9 @@ export function getActiveClusterId() {
 
 /* ── Actor identity ─────────────────────────────────────────────────────── */
 
-// §10: the audit actor comes from the `X-K8Boss-User` header and is advisory —
-// there is no auth layer in this console. It is sent on every request, reads
-// included, because a `get secrets?reveal=true` is an audited privileged act
-// and an audit row reading `anonymous` for a known operator is worse than
-// useless.
+// Legacy proxy mode: the audit actor comes from the advisory X-K8Boss-User
+// header. Application-authenticated deployments ignore it and derive the actor
+// from the verified session instead.
 export function getUser() {
   try {
     return (localStorage.getItem(USER_KEY) || '').trim() || 'anonymous';
@@ -281,7 +287,13 @@ async function attempt(url, init, expect) {
       },
     );
   }
-  if (!response.ok) throw await toApiError(response);
+  if (!response.ok) {
+    const error = await toApiError(response);
+    if (error.code === 'authentication_required' && typeof window !== 'undefined') {
+      window.dispatchEvent(new Event('k8boss-authentication-required'));
+    }
+    throw error;
+  }
   return readBody(response, expect);
 }
 
@@ -299,10 +311,16 @@ export async function request(path, options = {}) {
   const url = buildUrl(path, options.params);
   const headers = {
     Accept: options.expect === 'text' ? 'text/plain, application/json' : 'application/json',
-    'X-K8Boss-User': getUser(),
     ...options.headers,
   };
-  const init = { method, headers, signal: options.signal };
+  if (applicationAuthEnabled && csrfToken && !['GET', 'HEAD', 'OPTIONS'].includes(method)) {
+    headers['X-CSRF-Token'] = csrfToken;
+  } else if (!applicationAuthEnabled) {
+    // Legacy authenticating-proxy mode. The backend ignores this header as
+    // soon as application authentication is enabled.
+    headers['X-K8Boss-User'] = getUser();
+  }
+  const init = { method, headers, signal: options.signal, credentials: 'same-origin' };
   if (options.body !== undefined) {
     headers['Content-Type'] = 'application/json';
     init.body = JSON.stringify(options.body);
@@ -378,6 +396,22 @@ const gvp = (group, version, plural) =>
 
 export const health = {
   get: () => api.get('/health'),
+};
+
+/* ── Console authentication and users ─────────────────────────────────── */
+
+export const auth = {
+  config: () => api.get('/auth/config'),
+  me: () => api.get('/auth/me'),
+  login: (body) => request('/auth/login', { method: 'POST', body, retry: false }),
+  logout: () => request('/auth/logout', { method: 'POST', expect: 'none', retry: false }),
+};
+
+export const users = {
+  list: () => api.get('/auth/users'),
+  create: (body) => api.post('/auth/users', body),
+  update: (id, body) => api.put(`/auth/users/${id}`, body),
+  deactivate: (id) => request(`/auth/users/${id}`, { method: 'DELETE', expect: 'none' }),
 };
 
 /* ── §3 Clusters ────────────────────────────────────────────────────────── */

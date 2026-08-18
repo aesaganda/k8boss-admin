@@ -54,9 +54,9 @@ def get_audit(
     actor: str | None = Query(
         None,
         description=(
-            "Exact match on the X-K8Boss-User value recorded with the write. "
-            "Advisory, as §10 says: there is no auth layer in front of this console, "
-            "so the actor is attribution, not identity."
+            "Exact match on the actor recorded with the write. This is the verified "
+            "session username when application auth is enabled, or the advisory "
+            "X-K8Boss-User value in legacy proxy mode."
         ),
     ),
     outcome: str | None = Query(

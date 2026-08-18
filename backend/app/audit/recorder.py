@@ -133,6 +133,7 @@ def record(
     detail: str | None = None,
     diff_digest: str | None = None,
     error: str | None = None,
+    cluster_scoped: bool = True,
 ) -> int | None:
     """Append one audit record. Returns its id, or ``None`` if it could not be written.
 
@@ -163,7 +164,7 @@ def record(
         # too. The mutation funnel runs outside any FastAPI dependency, so there
         # is no injected session to use.
         db = database.SessionLocal()
-        cluster_id, cluster_name = _cluster_identity(db)
+        cluster_id, cluster_name = _cluster_identity(db) if cluster_scoped else (None, None)
         row = AuditRecord(
             ts=utcnow(),
             actor=get_current_user()[:255],

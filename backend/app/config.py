@@ -13,7 +13,7 @@ Credentials are never logged. ``encryption_key`` is read here and consumed by
 
 from __future__ import annotations
 
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -94,6 +94,48 @@ class Settings(BaseSettings):
             "other. Every reveal is audited regardless."
         ),
     )
+
+    # -- console authentication ------------------------------------------
+    auth_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("AUTH_ENABLED", "auth_enabled"),
+        description=(
+            "Require a managed local or LDAP identity for every API request. "
+            "False preserves the legacy authenticating-proxy deployment model."
+        ),
+    )
+    auth_session_ttl_hours: int = Field(default=12, ge=1, le=168)
+    auth_cookie_name: str = Field(default="k8boss_admin_session", min_length=1, max_length=64)
+    auth_cookie_secure: bool = Field(
+        default=False,
+        description="Mark the session cookie Secure. Enable for every HTTPS deployment.",
+    )
+    auth_bootstrap_username: str = Field(default="", max_length=255)
+    auth_bootstrap_password: SecretStr = Field(
+        default=SecretStr(""),
+        description=(
+            "Initial local administrator password. Used only when the users table is empty; "
+            "it never overwrites an existing account."
+        ),
+    )
+
+    # LDAP is an alternate login provider. Authorization remains local: a
+    # configured LDAP group maps its members to the admin role, and every other
+    # successful LDAP login maps to user.
+    ldap_enabled: bool = Field(default=False)
+    ldap_url: str = Field(default="", max_length=2048)
+    ldap_start_tls: bool = Field(default=False)
+    ldap_tls_validate: bool = Field(default=True)
+    ldap_ca_certificate_file: str = Field(default="", max_length=2048)
+    ldap_bind_dn: str = Field(default="", max_length=1024)
+    ldap_bind_password: SecretStr = Field(default=SecretStr(""))
+    ldap_user_search_base: str = Field(default="", max_length=1024)
+    ldap_user_search_filter: str = Field(default="(uid={username})", max_length=1024)
+    ldap_username_attribute: str = Field(default="uid", max_length=128)
+    ldap_display_name_attribute: str = Field(default="cn", max_length=128)
+    ldap_email_attribute: str = Field(default="mail", max_length=128)
+    ldap_admin_group_dn: str = Field(default="", max_length=1024)
+    ldap_connect_timeout_seconds: float = Field(default=5.0, gt=0, le=60)
 
     # -- Kubernetes transport --------------------------------------------
     # There were no deadlines on the k8boss client at first, and a black-holed

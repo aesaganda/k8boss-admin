@@ -37,6 +37,13 @@ const OVERVIEW_UNAVAILABLE = [
 ];
 
 const FIXTURES = {
+  authConfig: {
+    enabled: false,
+    localEnabled: true,
+    ldapEnabled: false,
+    methods: ['local'],
+  },
+
   health: {
     status: 'ok',
     version: '0.1.0',
@@ -171,17 +178,74 @@ const FIXTURES = {
     unavailable: [],
   },
 
+  users: {
+    items: [
+      {
+        id: 7,
+        username: 'directory.admin',
+        display_name: 'Directory Admin',
+        email: 'directory.admin@example.test',
+        role: 'admin',
+        auth_source: 'ldap',
+        active: true,
+        last_login: '2026-08-18T12:00:00Z',
+        created_at: '2026-08-18T12:00:00Z',
+        updated_at: '2026-08-18T12:00:00Z',
+      },
+    ],
+    continue: null,
+    remaining: null,
+    partial: false,
+    unavailable: [],
+  },
+
   emptyList: { items: [], continue: null, remaining: null, partial: false, unavailable: [] },
 };
 
 /** Answer every /api call from the fixtures above. */
-async function mockApi(page, { health = FIXTURES.health } = {}) {
+async function mockApi(page, { health = FIXTURES.health, auth = null } = {}) {
+  let signedIn = Boolean(auth?.authenticated);
+  const authUser = auth?.user ?? {
+    id: 7,
+    username: 'directory.admin',
+    display_name: 'Directory Admin',
+    email: 'directory.admin@example.test',
+    role: 'admin',
+    auth_source: 'ldap',
+  };
+
   await page.route('**/api/**', async (route) => {
     const path = new URL(route.request().url()).pathname.replace(/^\/api/, '');
 
     const json = (body, status = 200) =>
       route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
 
+    if (path === '/auth/config') {
+      return json(
+        auth
+          ? {
+              enabled: true,
+              localEnabled: true,
+              ldapEnabled: Boolean(auth.ldapEnabled),
+              methods: auth.ldapEnabled ? ['local', 'ldap'] : ['local'],
+            }
+          : FIXTURES.authConfig,
+      );
+    }
+    if (path === '/auth/me') {
+      return signedIn
+        ? json({ enabled: true, authenticated: true, user: authUser, csrfToken: 'csrf-test', expiresAt: '2026-08-19T00:00:00Z' })
+        : json({ error: 'authentication_required', message: 'Sign in to continue.', detail: null, hint: null, context: {} }, 401);
+    }
+    if (path === '/auth/login') {
+      signedIn = true;
+      return json({ enabled: true, authenticated: true, user: authUser, csrfToken: 'csrf-test', expiresAt: '2026-08-19T00:00:00Z' });
+    }
+    if (path === '/auth/logout') {
+      signedIn = false;
+      return route.fulfill({ status: 204, body: '' });
+    }
+    if (path === '/auth/users') return json(FIXTURES.users);
     if (path === '/health') return json(health);
     if (path === '/clusters') return json(FIXTURES.clusters);
     if (/^\/clusters\/\d+\/overview$/.test(path)) return json(FIXTURES.overview);
@@ -258,6 +322,37 @@ test.describe('shell', () => {
     // would expire while the operator is still wondering why Delete is greyed.
     await expect(page.getByTestId('read-only-banner')).toBeVisible();
     await expect(page.getByTestId('read-only-badge')).toBeVisible();
+  });
+});
+
+test.describe('console authentication', () => {
+  test('signs in through LDAP and opens administrator user management', async ({ page }) => {
+    await mockApi(page, { auth: { ldapEnabled: true } });
+    await page.goto('/users');
+
+    await expect(page.getByRole('heading', { name: 'Sign in' })).toBeVisible();
+    await page.getByLabel('Username').fill('directory.admin');
+    await page.getByLabel('Password').fill('directory-password');
+    await page.getByLabel('Account source').selectOption('ldap');
+    await page.getByRole('button', { name: 'Sign in' }).click();
+
+    await expect(page.getByRole('heading', { name: 'Users' })).toBeVisible();
+    await expect(page.getByText('LDAP authentication enabled')).toBeVisible();
+    await expect(page.getByRole('grid', { name: 'Console users' })).toContainText('Directory Admin');
+    await expect(page.getByRole('navigation', { name: 'Console navigation' }).getByRole('link', { name: 'Users' })).toBeVisible();
+  });
+
+  test('opens the local-user form and signs out through the masthead', async ({ page }) => {
+    await mockApi(page, { auth: { authenticated: true, ldapEnabled: true } });
+    await page.goto('/users');
+
+    await page.getByRole('button', { name: 'Add local user' }).click();
+    await expect(page.getByRole('dialog', { name: 'Console user' })).toBeVisible();
+    await page.getByRole('button', { name: 'Cancel' }).click();
+
+    await page.getByRole('button', { name: 'User menu' }).click();
+    await page.getByRole('menuitem', { name: 'Sign out' }).click();
+    await expect(page.getByRole('heading', { name: 'Sign in' })).toBeVisible();
   });
 });
 

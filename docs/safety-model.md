@@ -303,13 +303,12 @@ Conversely, a failed INSERT never fails the write: by the time the recorder runs
 on a real write, the cluster has already changed, and turning a logging problem
 into a 500 would tell the operator their action failed when it did not.
 
-*Who the actor is.* `X-K8Boss-User`, defaulting to `anonymous`. It is
-**advisory** — this console has no authentication of its own, so the header is
-whatever the caller sends. That is a deliberate, documented limitation, not an
-oversight: the intended deployment puts an authenticating proxy in front and has
-it set the header. `main.py` logs a warning at startup when mutations are enabled
-saying exactly this, because the difference has to be visible in the logs of the
-pod it is happening in.
+*Who the actor is.* With `AUTH_ENABLED=true`, the actor is the verified local or
+LDAP session username; `X-K8Boss-User` is ignored and cannot spoof it. With auth
+disabled, the console remains in legacy proxy mode and the header is advisory,
+defaulting to `anonymous`. `main.py` emits the stronger startup warning when
+mutations are enabled in that mode because the difference has to be visible in
+the logs of the pod where it is happening.
 
 ---
 
@@ -364,9 +363,11 @@ the page believes they read a secret.
 
 Being honest about the edges is part of the model:
 
-* **There is no authentication.** Anyone who can reach the port has whatever the
-  console can do. Put an authenticating proxy in front of it. The audit actor is
-  spoofable by design and is labelled advisory everywhere it appears.
+* **Authentication is opt-in.** With `AUTH_ENABLED=false`, anyone who can reach
+  the port has whatever the console can do and the audit actor is advisory. Keep
+  the port private or put an authenticating proxy in front. Built-in local/LDAP
+  auth removes that limitation, but does not replace Kubernetes preflight or the
+  deployment-wide mutation gate.
 * **There is no undo.** This is the reason the whole flow is dry-run-first rather
   than optimistic-with-rollback; see [`adr-0001-dry-run-first.md`](adr-0001-dry-run-first.md).
   A deleted StatefulSet's PersistentVolumeClaims are not recreated by any button

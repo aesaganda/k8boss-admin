@@ -15,11 +15,10 @@ metadata:
     app.kubernetes.io/component: backend
 spec:
   type: ClusterIP
-  # Deliberately NOT exposed through the Ingress. The console has no
-  # authentication of its own — the audit actor comes from the advisory
-  # X-K8Boss-User header — so the API is reachable only from inside the cluster,
-  # and the SPA's nginx is the one thing in front of it. Publish this directly
-  # only behind an authenticating proxy.
+  # Deliberately NOT exposed through the Ingress. Authentication is opt-in, so
+  # the API stays reachable only from inside the cluster and the SPA's nginx is
+  # the one thing in front of it. Publish this directly only with built-in auth
+  # enabled or behind an authenticating proxy.
   selector:
     app.kubernetes.io/name: k8boss-admin
     app.kubernetes.io/component: backend

@@ -23,6 +23,7 @@ from sqlalchemy import (
     Boolean,
     Column,
     DateTime,
+    ForeignKey,
     Index,
     Integer,
     String,
@@ -144,6 +145,51 @@ class Cluster(Base):
         return public
 
 
+class User(Base):
+    """A console identity, sourced locally or synchronized from LDAP."""
+
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    username = Column(String(255), nullable=False, unique=True, index=True)
+    display_name = Column(String(255), nullable=True)
+    email = Column(String(320), nullable=True)
+    role = Column(String(32), nullable=False, default="user")
+    auth_source = Column(String(32), nullable=False, default="local")
+    password_hash = Column(Text, nullable=True)
+    active = Column(Boolean, nullable=False, default=True)
+    last_login = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=utcnow)
+    updated_at = Column(DateTime, nullable=False, default=utcnow, onupdate=utcnow)
+
+    def to_public_dict(self) -> dict[str, Any]:
+        """Serialize identity metadata without password material."""
+        return {
+            "id": self.id,
+            "username": self.username,
+            "display_name": self.display_name,
+            "email": self.email,
+            "role": self.role,
+            "auth_source": self.auth_source,
+            "active": bool(self.active),
+            "last_login": rfc3339(self.last_login),
+            "created_at": rfc3339(self.created_at),
+            "updated_at": rfc3339(self.updated_at),
+        }
+
+
+class AuthSession(Base):
+    """A revocable browser session; the bearer token itself is never stored."""
+
+    __tablename__ = "auth_sessions"
+
+    token_hash = Column(String(64), primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    csrf_token = Column(String(64), nullable=False)
+    expires_at = Column(DateTime, nullable=False, index=True)
+    created_at = Column(DateTime, nullable=False, default=utcnow)
+
+
 class AuditRecord(Base):
     """One attempted write, recorded whether or not it reached the cluster.
 
@@ -157,9 +203,8 @@ class AuditRecord(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     ts = Column(DateTime, nullable=False, default=utcnow)
 
-    # From the advisory X-K8Boss-User header; "anonymous" when absent. Advisory
-    # is stated plainly rather than implied, because a spoofable actor field
-    # presented as an identity is a wrong answer with a confident face.
+    # Verified session username when application auth is enabled. In legacy
+    # proxy mode this is the advisory X-K8Boss-User value, or "anonymous".
     actor = Column(String(255), nullable=False, default="anonymous")
     source_ip = Column(String(64), nullable=True)
 

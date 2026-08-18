@@ -47,6 +47,8 @@ import CubeIcon from '@patternfly/react-icons/dist/esm/icons/cube-icon';
 import MoonIcon from '@patternfly/react-icons/dist/esm/icons/moon-icon';
 import SunIcon from '@patternfly/react-icons/dist/esm/icons/sun-icon';
 import LockIcon from '@patternfly/react-icons/dist/esm/icons/lock-icon';
+import SignOutAltIcon from '@patternfly/react-icons/dist/esm/icons/sign-out-alt-icon';
+import UserIcon from '@patternfly/react-icons/dist/esm/icons/user-icon';
 import AppNav from './AppNav';
 import ErrorBoundary from './ErrorBoundary';
 import { LoadingState } from './ui';
@@ -54,6 +56,7 @@ import { useCluster } from '../contexts/ClusterContext';
 import { useHealth } from '../contexts/HealthContext';
 import { useNamespace } from '../contexts/NamespaceContext';
 import { useTheme } from '../contexts/ThemeContext';
+import { useAuth } from '../contexts/AuthContext';
 
 const STATUS_COLOR = {
   connected: 'var(--pf-t--global--icon--color--status--success--default, #3e8635)',
@@ -249,6 +252,40 @@ function ReadOnlyBadge() {
   );
 }
 
+function UserMenu() {
+  const { enabled, user, logout } = useAuth();
+  const [open, setOpen] = useState(false);
+  if (!enabled || !user) return null;
+
+  return (
+    <Dropdown
+      isOpen={open}
+      onOpenChange={setOpen}
+      onSelect={() => setOpen(false)}
+      toggle={(ref) => (
+        <MenuToggle
+          ref={ref}
+          variant="plainText"
+          icon={<UserIcon />}
+          onClick={() => setOpen((value) => !value)}
+          isExpanded={open}
+          aria-label="User menu"
+        >
+          {user.display_name || user.username}
+        </MenuToggle>
+      )}
+    >
+      <DropdownList>
+        <DropdownItem isDisabled description={user.role === 'admin' ? 'Administrator' : 'User'}>
+          {user.username}
+        </DropdownItem>
+        <Divider component="li" />
+        <DropdownItem icon={<SignOutAltIcon />} onClick={logout}>Sign out</DropdownItem>
+      </DropdownList>
+    </Dropdown>
+  );
+}
+
 function AppMasthead() {
   return (
     <Masthead>
@@ -278,6 +315,9 @@ function AppMasthead() {
             <ToolbarGroup align={{ default: 'alignEnd' }}>
               <ToolbarItem>
                 <ReadOnlyBadge />
+              </ToolbarItem>
+              <ToolbarItem>
+                <UserMenu />
               </ToolbarItem>
               <ToolbarItem>
                 <ThemeToggle />

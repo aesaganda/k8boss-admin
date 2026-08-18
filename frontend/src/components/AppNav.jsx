@@ -15,6 +15,7 @@
 import { useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { Nav, NavExpandable, NavItem, NavList } from '@patternfly/react-core';
+import { useAuth } from '../contexts/AuthContext';
 
 function RouterNavItem({ to, end = false, children }) {
   const { pathname } = useLocation();
@@ -71,6 +72,10 @@ function NavSection({ id, title, routes, children }) {
 }
 
 export default function AppNav() {
+  const { enabled, user } = useAuth();
+  const canManageUsers = enabled && user?.role === 'admin';
+  const administrationRoutes = ['/clusters', '/audit', ...(canManageUsers ? ['/users'] : [])];
+
   return (
     <Nav aria-label="Console navigation">
       <NavList>
@@ -101,9 +106,10 @@ export default function AppNav() {
 
         <RouterNavItem to="/explorer">API explorer</RouterNavItem>
 
-        <NavSection id="administration" title="Administration" routes={['/clusters', '/audit']}>
+        <NavSection id="administration" title="Administration" routes={administrationRoutes}>
           <RouterNavItem to="/clusters">Clusters</RouterNavItem>
           <RouterNavItem to="/audit">Audit log</RouterNavItem>
+          {canManageUsers && <RouterNavItem to="/users">Users</RouterNavItem>}
         </NavSection>
       </NavList>
     </Nav>

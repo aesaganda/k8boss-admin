@@ -10,13 +10,11 @@
 # which is the deployment shape this project explicitly does not want — see
 # service.yaml.
 #
-# BEFORE APPLYING, know what you are publishing. This console has no
-# authentication. Anyone who can reach this host can read every resource in every
-# registered cluster, including Secrets if the reader role's Secret rule is kept;
-# and if ADMIN_ALLOW_MUTATIONS is on, can change them. Put an authenticating
-# proxy in front of it — OAuth2 Proxy, an ingress-controller auth annotation, or
-# your own — and have it set X-K8Boss-User so the audit trail (§10) names a
-# person instead of `anonymous`.
+# BEFORE APPLYING, know what you are publishing. AUTH_ENABLED is false in the
+# base deployment. Either enable the console's local/LDAP authentication with an
+# HTTPS ingress, or put an authenticating proxy in front and have it set
+# X-K8Boss-User. Without one of those, anyone who can reach this host can read
+# every registered cluster and, when ADMIN_ALLOW_MUTATIONS is on, change it.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:

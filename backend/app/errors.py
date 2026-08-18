@@ -166,6 +166,38 @@ class Invalid(AdminError):
     default_message = "The request was not valid."
 
 
+class AuthenticationRequired(AdminError):
+    """The console requires a valid application session for this request."""
+
+    code = "authentication_required"
+    http_status = 401
+    default_message = "Sign in to continue."
+
+
+class InvalidCredentials(AdminError):
+    """A login failed without revealing whether the username exists."""
+
+    code = "invalid_credentials"
+    http_status = 401
+    default_message = "The username or password was not accepted."
+
+
+class PermissionDenied(AdminError):
+    """The authenticated console user lacks an application-level role."""
+
+    code = "permission_denied"
+    http_status = 403
+    default_message = "Your console role does not permit that action."
+
+
+class IdentityProviderUnavailable(AdminError):
+    """LDAP could not answer, which is distinct from rejecting credentials."""
+
+    code = "identity_provider_unavailable"
+    http_status = 502
+    default_message = "The configured identity provider could not be reached."
+
+
 class MutationsDisabled(AdminError):
     """``ADMIN_ALLOW_MUTATIONS`` is false and the request was a write.
 
@@ -214,6 +246,10 @@ _UNAVAILABLE_REASON: dict[str, str] = {
     "mutations_disabled": "forbidden",
     "conflict": "unreachable",
     "invalid": "unreachable",
+    "authentication_required": "forbidden",
+    "invalid_credentials": "forbidden",
+    "permission_denied": "forbidden",
+    "identity_provider_unavailable": "unreachable",
     "upstream_error": "unreachable",
 }
 

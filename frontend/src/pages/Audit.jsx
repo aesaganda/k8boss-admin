@@ -40,6 +40,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { audit as auditApi, getActiveClusterId } from '../api/client';
 import { PageHeader } from '../components/ui';
+import { useAuth } from '../contexts/AuthContext';
 import { useCluster } from '../contexts/ClusterContext';
 import { formatTimestamp } from '../utils/format';
 
@@ -84,6 +85,7 @@ function targetText(target) {
 
 export default function Audit() {
   const { clusters, activeCluster } = useCluster();
+  const { enabled: authenticationEnabled } = useAuth();
 
   const [actor, setActor] = useState('');
   const [actorInput, setActorInput] = useState('');
@@ -171,8 +173,9 @@ export default function Audit() {
         cell: (row) => (
           <Tooltip
             content={
-              `From the X-K8Boss-User header, which is advisory (§10) — there is no auth layer in front of ` +
-              `this console, so this is attribution, not identity.${row.source_ip ? ` Source ${row.source_ip}.` : ''}`
+              authenticationEnabled
+                ? `Verified console session identity.${row.source_ip ? ` Source ${row.source_ip}.` : ''}`
+                : `From the advisory X-K8Boss-User header in proxy mode; this is attribution, not verified identity.${row.source_ip ? ` Source ${row.source_ip}.` : ''}`
             }
           >
             <span>{row.actor}</span>
@@ -263,7 +266,7 @@ export default function Audit() {
           ),
       },
     ],
-    [],
+    [authenticationEnabled],
   );
 
   const scopeSentence = clusterFilter

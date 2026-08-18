@@ -92,7 +92,7 @@ Not "not yet". These are out of scope for what this product is.
 | **GitOps / continuous delivery** — Argo CD verification, change requests, stop levers | K8Boss verifies that other people's delivery tools did what they claimed. This console is the thing an operator uses when they are going around delivery on purpose — and everything it does is dry-run-first and audited for exactly that reason |
 | **The commercial licensing module**, entitlement states, the operator | The reason the monorepo cannot simply be opened. Its absence is what lets this repository be Apache-2.0 |
 | The **agent** (Go node collectors and coordinator) | Nothing here needs data from inside a node |
-| **Its own authentication** | Not "left in K8Boss" so much as never built. This console has none: the audit actor is the advisory `X-K8Boss-User` header, and the documented deployment puts an authenticating proxy in front. Reimplementing K8Boss's JWT/session layer would have produced a second half-maintained auth system, and half-maintained auth is worse than a clearly documented absence with a proxy in front of it |
+| **K8Boss's JWT/session implementation** | Deliberately not copied. k8boss-admin now has its own narrower, opt-in local/LDAP authentication boundary with opaque revocable sessions; legacy proxy mode still uses advisory `X-K8Boss-User`. No K8Boss authentication code or token format crossed the lineage boundary |
 
 There is also one inherited disagreement that this repository does **not** carry:
 K8Boss has an unresolved conflict between two confidence orderings

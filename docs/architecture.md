@@ -52,7 +52,7 @@ wraps each added middleware *around* what came before, so the last added is
 outermost:
 
 ```
-CORS ─▶ request logging ─▶ cluster context ─▶ exception handlers ─▶ route
+CORS ─▶ request logging ─▶ authentication ─▶ cluster context ─▶ exception handlers ─▶ route
 ```
 
 **CORS outermost is the whole point.** Everything the app can produce — a 502
@@ -69,29 +69,32 @@ A read then travels like this:
 ```
   HTTP GET /api/workloads?cluster_id=1&namespace=prod
       │
-  1.  ClusterContextMiddleware        pins cluster_id, X-K8Boss-User and the
-      (app/k8s/context.py)            peer IP into contextvars for this request
+  1.  AuthenticationMiddleware       resolves the opaque session cookie and
+      (app/middleware/auth.py)        enforces CSRF on unsafe HTTP methods
       │
-  2.  route handler                   app/api/workloads.py — parses query
+  2.  ClusterContextMiddleware       pins cluster_id, the verified principal
+      (app/k8s/context.py)            (or legacy proxy actor), and peer IP
+      │
+  3.  route handler                   app/api/workloads.py — parses query
       │                               parameters, never cluster_id
       │
-  3.  ClusterClientManager            app/k8s/client.py — resolves the pinned
+    4.  ClusterClientManager            app/k8s/client.py — resolves the pinned
       │                               id to a cached, deadline-carrying client
       │                               bundle built from the stored endpoint and
       │                               the decrypted token
       │
-  4.  catalog.resolve()               app/resources/catalog.py — is this
+    5.  catalog.resolve()               app/resources/catalog.py — is this
       │                               resource served here, is it namespaced,
       │                               which verbs does it support
       │
-  5.  reader / service layer          app/resources/reader.py for generic
+    6.  reader / service layer          app/resources/reader.py for generic
       │                               reads; app/services/* for the typed ones
       │
-  6.  shaping                         app/resources/shaping.py and
+    7.  shaping                         app/resources/shaping.py and
       │                               app/services/workloads.py — objects to
       │                               rows, pure functions, no I/O
       │
-  7.  envelope()                      app/resources/envelope.py — items,
+    8.  envelope()                      app/resources/envelope.py — items,
       │                               continue, remaining, partial, unavailable
       ▼
   200 {"items": [...], "partial": true, "unavailable": [...]}

@@ -20,9 +20,9 @@ clusters, built on the assumption that the dangerous part is not reading.
   [K8Boss](https://github.com/aesaganda/k8boss), which this console was split out
   of; see [`docs/adr-0002-lineage.md`](docs/adr-0002-lineage.md) for what was
   carried over and what deliberately was not.
-* **Not authenticated.** It has no login of its own. The audit trail's actor
-  comes from an advisory `X-K8Boss-User` header. Put an authenticating proxy in
-  front of it before anyone but you can reach the port.
+* **Not an identity authority.** Built-in authentication is optional and supports
+  local accounts plus LDAP. When it is disabled, the legacy authenticating-proxy
+  mode remains available and `X-K8Boss-User` is advisory.
 * **Not a cache.** No cluster contents are stored. Every page is a live read, so
   it cannot show you a stale answer with a confident face — and it cannot show
   you anything when the API server is unreachable, which it will say plainly.
@@ -51,6 +51,48 @@ and it is ignored entirely.
 > on a development machine and is a bad idea anywhere else; registering a cluster
 > properly is the better answer. The symptom is the console starting fine and
 > reporting no clusters — which is accurate, not a failure to look.
+
+### Enable sign-in and user administration
+
+Authentication is opt-in so existing proxy deployments keep working. For a
+first local administrator, place these values in a mode-`600` Compose env file
+(do not put the password in shell history):
+
+```dotenv
+AUTH_ENABLED=true
+AUTH_BOOTSTRAP_USERNAME=admin
+AUTH_BOOTSTRAP_PASSWORD=replace-with-a-long-random-password
+AUTH_COOKIE_SECURE=false
+```
+
+Start with `docker compose --env-file .env.auth up --build`, sign in, then open
+**Administration -> Users**. The bootstrap credentials are used only while the
+users table is empty and never overwrite an existing account. Set
+`AUTH_COOKIE_SECURE=true` behind HTTPS.
+
+LDAP is search-and-bind: the service account finds one user DN, then the console
+binds as that DN with the submitted password. Plain-text LDAP is refused; use
+`ldaps://` or StartTLS.
+
+```dotenv
+AUTH_ENABLED=true
+LDAP_ENABLED=true
+LDAP_URL=ldaps://ldap.example.com:636
+LDAP_BIND_DN=cn=k8boss-admin,ou=services,dc=example,dc=com
+LDAP_BIND_PASSWORD=replace-with-the-directory-service-password
+LDAP_USER_SEARCH_BASE=ou=people,dc=example,dc=com
+LDAP_USER_SEARCH_FILTER=(uid={username})
+LDAP_USERNAME_ATTRIBUTE=uid
+LDAP_DISPLAY_NAME_ATTRIBUTE=cn
+LDAP_EMAIL_ATTRIBUTE=mail
+LDAP_ADMIN_GROUP_DN=cn=k8boss-admins,ou=groups,dc=example,dc=com
+LDAP_TLS_VALIDATE=true
+```
+
+Directory users are synchronized after their first successful login. Membership
+in `LDAP_ADMIN_GROUP_DN` maps to the console `admin` role; all other directory
+users map to `user`. LDAP passwords are never stored. Local accounts with the
+same normalized username always take precedence and cannot be taken over by LDAP.
 
 ### Register a cluster
 
@@ -277,6 +319,19 @@ means read-only.
 |---|---|---|
 | `ADMIN_ALLOW_MUTATIONS` | `false` | **The write gate.** False makes every write return `403 mutations_disabled` before the cluster is touched, and `/api/health` report `mutations: disabled` so the UI disables the buttons. Dry-run stays available: previewing is a read |
 | `SECRET_REVEAL_ENABLED` | `false` | Lets the single-object Secret read return values when asked with `?reveal=true`. Separate gate, separate blast radius; every reveal is audited either way |
+| `AUTH_ENABLED` | `false` | Requires a managed local or LDAP session for every API and WebSocket request except health and login |
+| `AUTH_SESSION_TTL_HOURS` | `12` | Lifetime of the revocable HttpOnly session cookie, from 1 to 168 hours |
+| `AUTH_COOKIE_NAME` | `k8boss_admin_session` | Session cookie name |
+| `AUTH_COOKIE_SECURE` | `false` | Adds the cookie `Secure` flag. Set true for every HTTPS deployment |
+| `AUTH_BOOTSTRAP_USERNAME` / `AUTH_BOOTSTRAP_PASSWORD` | *(empty)* | Creates the first local administrator only when no users exist |
+| `LDAP_ENABLED` | `false` | Enables LDAP as an alternate login provider |
+| `LDAP_URL` / `LDAP_START_TLS` | *(empty)* / `false` | Directory endpoint. Either `ldaps://` or StartTLS is mandatory |
+| `LDAP_TLS_VALIDATE` / `LDAP_CA_CERTIFICATE_FILE` | `true` / *(empty)* | Validate the directory certificate, optionally with a private CA bundle |
+| `LDAP_BIND_DN` / `LDAP_BIND_PASSWORD` | *(empty)* | Search identity; empty uses an anonymous search bind |
+| `LDAP_USER_SEARCH_BASE` / `LDAP_USER_SEARCH_FILTER` | *(empty)* / `(uid={username})` | User search scope and escaped filter template |
+| `LDAP_USERNAME_ATTRIBUTE` / `LDAP_DISPLAY_NAME_ATTRIBUTE` / `LDAP_EMAIL_ATTRIBUTE` | `uid` / `cn` / `mail` | Profile attributes synchronized at login |
+| `LDAP_ADMIN_GROUP_DN` | *(empty)* | Exact `memberOf` DN whose members become console administrators |
+| `LDAP_CONNECT_TIMEOUT_SECONDS` | `5` | LDAP connect and response deadline |
 | `DATABASE_URL` | `sqlite:///./k8boss_admin.db` | SQLAlchemy URL. SQLite for dev, PostgreSQL in cluster. Holds the console's own state only |
 | `ENCRYPTION_KEY` | *(empty)* | Secret used to derive the Fernet key protecting stored cluster tokens. Empty means a key is generated **once** and persisted beside the database. Never let this be regenerated per boot: every stored token becomes undecryptable and the symptom is every cluster failing to connect after an unrelated restart |
 | `ENCRYPTION_KEY_FILE` | *(empty)* | Override for that generated key's path. Empty means "next to the SQLite database", or `./k8boss_admin.key` when the database is not SQLite |
@@ -304,7 +359,7 @@ means read-only.
 |---|---|---|
 | `UI_PORT` | `8021` | Published port for the console |
 | `API_PORT` | `8020` | Published port for the API |
-| `API_BIND` | `127.0.0.1` | Interface the API is published on. Loopback by default — there is no authentication in front of it |
+| `API_BIND` | `127.0.0.1` | Interface the API is published on. Keep loopback unless application auth or a trusted proxy protects it |
 | `KUBECONFIG` | `~/.kube/config` | Host kubeconfig mounted read-only for the no-clusters-registered fallback |
 
 ---
@@ -371,9 +426,9 @@ kubectl -n k8boss-admin port-forward svc/k8boss-admin-frontend 8021:8021
 ```
 
 That gets a console that can read the cluster it runs in (via `IN_CLUSTER_MODE`)
-and write to nothing. `deploy/ingress.yaml` is commented out of the kustomization
-because it ships with a placeholder host — edit it, and read the warning at the
-top of it, before publishing a console that has no authentication of its own.
+and write to nothing. Built-in auth is still disabled in the base manifest.
+Before enabling the optional Ingress, either enable local/LDAP auth with the
+`k8boss-admin-auth` Secret or put a trusted authenticating proxy in front.
 
 ---
 

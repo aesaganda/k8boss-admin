@@ -92,6 +92,28 @@ spec:
             - name: SECRET_REVEAL_ENABLED
               value: "false"
 
+            # ── Console identity ──────────────────────────────────────────
+            # Enable only after creating the referenced Secret. On first start
+            # its credentials create one local administrator; later restarts do
+            # not overwrite that account. LDAP settings may be supplied here or
+            # through a deployment overlay; see README.md.
+            - name: AUTH_ENABLED
+              value: "false"
+            - name: AUTH_COOKIE_SECURE
+              value: "true"
+            - name: AUTH_BOOTSTRAP_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: k8boss-admin-auth
+                  key: bootstrap-username
+                  optional: true
+            - name: AUTH_BOOTSTRAP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: k8boss-admin-auth
+                  key: bootstrap-password
+                  optional: true
+
             # ── State ───────────────────────────────────────────────────────
             - name: DATABASE_URL
               value: sqlite:////app/data/k8boss_admin.db

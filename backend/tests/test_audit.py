@@ -86,8 +86,8 @@ def test_a_record_round_trips_through_the_query(db_engine):
 
 
 def test_the_actor_defaults_to_anonymous_and_is_recorded_as_advisory(db_engine):
-    """There is no auth layer in front of this console; §10 says so plainly. A
-    spoofable field presented as an identity would be a wrong answer with a
+    """Auth-disabled legacy mode accepts advisory attribution; §10 says so plainly. A
+    spoofable field presented as verified identity would be a wrong answer with a
     confident face — recording it as attribution is the honest version."""
     write()
 

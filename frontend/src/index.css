@@ -365,6 +365,77 @@ body {
   margin-block-end: var(--admin-gap);
 }
 
+/* ── Authentication and users ──────────────────────────────────────────── */
+
+.admin-login {
+  min-height: 100%;
+  display: grid;
+  place-items: center;
+  padding: clamp(1.5rem, 5vw, 4rem);
+  background:
+    linear-gradient(135deg, transparent 0 48%, color-mix(in srgb, var(--admin-border) 30%, transparent) 48% 49%, transparent 49%),
+    var(--pf-t--global--background--color--primary--default, #fff);
+  background-size: 36px 36px;
+}
+
+.admin-login__panel {
+  width: min(100%, 25rem);
+  border-block-start: 4px solid var(--pf-t--global--color--brand--default, #06c);
+  padding: clamp(1.5rem, 4vw, 2.5rem);
+  background: var(--pf-t--global--background--color--secondary--default, #f2f2f2);
+  box-shadow: var(--pf-t--global--box-shadow--lg, 0 0.5rem 1rem rgba(3, 3, 3, 0.16));
+}
+
+.admin-login__mark {
+  display: grid;
+  place-items: center;
+  width: 2.75rem;
+  height: 2.75rem;
+  margin-block-end: var(--admin-gap);
+  color: var(--pf-t--global--icon--color--brand--default, #06c);
+  font-size: 1.5rem;
+}
+
+.admin-login__brand {
+  margin: 0 0 0.2rem;
+  font-weight: 600;
+}
+
+.admin-login h1 {
+  margin: 0;
+  font-size: 2rem;
+}
+
+.admin-login__subtitle {
+  margin: 0.25rem 0 var(--admin-gap-lg);
+  color: var(--admin-muted);
+}
+
+.admin-login__alert {
+  margin-block-end: var(--admin-gap);
+}
+
+.admin-login__form {
+  display: grid;
+  gap: var(--admin-gap);
+}
+
+.admin-auth-state {
+  max-width: 42rem;
+  margin: 10vh auto;
+  padding: var(--admin-gap-lg);
+}
+
+.admin-form-help {
+  margin: 0.25rem 0 0;
+  color: var(--admin-muted);
+  font-size: var(--pf-t--global--font--size--body--sm, 0.875rem);
+}
+
+.admin-users__provider {
+  margin-block-end: var(--admin-gap);
+}
+
 /* ── Dark theme adjustments ─────────────────────────────────────────────── */
 
 /*

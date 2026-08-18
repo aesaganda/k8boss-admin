@@ -34,6 +34,7 @@ from app.database import create_tables
 from app.k8s.client import manager as cluster_manager
 from app.k8s.context import ClusterContextMiddleware
 from app.middleware.logging import RequestLoggingMiddleware, setup_logging
+from app.middleware.auth import AuthenticationMiddleware
 
 from app.api.access import router as access_router
 from app.api.audit import router as audit_router
@@ -46,6 +47,7 @@ from app.api.namespaces import router as namespaces_router
 from app.api.nodes import router as nodes_router
 from app.api.resources import router as resources_router
 from app.api.workloads import router as workloads_router
+from app.api.auth import router as auth_router
 
 logger = logging.getLogger(__name__)
 
@@ -55,26 +57,34 @@ async def lifespan(app: FastAPI):
     """Startup and shutdown."""
     setup_logging()
     logger.info(
-        "k8boss-admin %s starting (mutations=%s, secret reveal=%s)",
+        "k8boss-admin %s starting (mutations=%s, secret reveal=%s, auth=%s)",
         settings.app_version,
         "enabled" if settings.admin_allow_mutations else "disabled",
         "enabled" if settings.secret_reveal_enabled else "disabled",
+        "enabled" if settings.auth_enabled else "disabled",
     )
     if settings.admin_allow_mutations:
-        # Not an INFO detail. With this on, any caller that can reach the API can
-        # write to every registered cluster, and the only identity on the audit
-        # trail is the advisory X-K8Boss-User header. That is a deliberate
-        # posture and a serious accident, and the difference has to be visible in
-        # the logs of the pod it is happening in.
-        logger.warning(
-            "ADMIN_ALLOW_MUTATIONS is enabled: this console can write to every "
-            "registered cluster. There is no authentication in front of it, and "
-            "audit attribution comes from the spoofable X-K8Boss-User header. "
-            "Put an authenticating proxy in front of this deployment."
-        )
+        # Not an INFO detail. This opens the deployment-wide write gate. The
+        # warning is stronger in legacy proxy mode because reachability then
+        # implies authority and actor attribution is advisory.
+        if settings.auth_enabled:
+            logger.warning(
+                "ADMIN_ALLOW_MUTATIONS is enabled: authenticated console users can "
+                "write to every registered cluster, subject to Kubernetes preflight."
+            )
+        else:
+            logger.warning(
+                "ADMIN_ALLOW_MUTATIONS is enabled while AUTH_ENABLED is false: anyone "
+                "who can reach this console can write to every registered cluster, and "
+                "audit attribution comes from the spoofable X-K8Boss-User header. Enable "
+                "application authentication or put an authenticating proxy in front."
+            )
 
     create_tables()
     logger.info("Database schema ready")
+    from app.identity.service import ensure_bootstrap_admin
+
+    ensure_bootstrap_admin()
 
     try:
         yield
@@ -95,6 +105,7 @@ app = FastAPI(
 
 # Innermost first. See the module docstring for why this order matters.
 app.add_middleware(ClusterContextMiddleware)
+app.add_middleware(AuthenticationMiddleware)
 app.add_middleware(RequestLoggingMiddleware)
 app.add_middleware(
     CORSMiddleware,
@@ -111,6 +122,7 @@ app.add_middleware(
 register_exception_handlers(app)
 
 app.include_router(health_router)
+app.include_router(auth_router)
 app.include_router(clusters_router)
 app.include_router(resources_router)
 app.include_router(namespaces_router)

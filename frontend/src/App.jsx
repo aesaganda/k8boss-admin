@@ -7,15 +7,17 @@
  * only, so the sidebar stays usable while a page downloads.
  */
 import { lazy } from 'react';
-import { BrowserRouter, Route, Routes } from 'react-router-dom';
+import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import ErrorBoundary from './components/ErrorBoundary';
 import Layout from './components/Layout';
-import { EmptyState, ErrorState } from './components/ui';
+import { EmptyState, ErrorState, LoadingState } from './components/ui';
+import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { ClusterProvider } from './contexts/ClusterContext';
 import { HealthProvider } from './contexts/HealthContext';
 import { NamespaceProvider } from './contexts/NamespaceContext';
 import { NotificationProvider } from './contexts/NotificationContext';
 import { ThemeProvider } from './contexts/ThemeContext';
+import Login from './pages/Login';
 
 /**
  * Lazy-load a page, and degrade to a named failure if its chunk cannot be
@@ -69,6 +71,7 @@ const Events = lazyPage('Events', () => import('./pages/Events'));
 const Explorer = lazyPage('Explorer', () => import('./pages/Explorer'));
 const Clusters = lazyPage('Clusters', () => import('./pages/Clusters'));
 const Audit = lazyPage('Audit', () => import('./pages/Audit'));
+const Users = lazyPage('Users', () => import('./pages/Users'));
 
 function NotFound() {
   return (
@@ -79,63 +82,80 @@ function NotFound() {
   );
 }
 
+function ConsoleRoutes() {
+  return (
+    <HealthProvider>
+      <ClusterProvider>
+        <NamespaceProvider>
+          <Routes>
+            <Route path="/" element={<Layout />}>
+              <Route index element={<Overview />} />
+
+              <Route path="nodes" element={<Nodes />} />
+              <Route path="nodes/:name" element={<NodeDetail />} />
+
+              <Route path="namespaces" element={<Namespaces />} />
+
+              <Route path="workloads" element={<Workloads />} />
+              <Route
+                path="workloads/:plural/:namespace/:name"
+                element={<WorkloadDetail />}
+              />
+
+              <Route path="pods" element={<Pods />} />
+              <Route path="network" element={<Network />} />
+              <Route path="config" element={<Config />} />
+              <Route path="storage" element={<Storage />} />
+              <Route path="access" element={<Access />} />
+              <Route path="events" element={<Events />} />
+
+              {/* One page, two routes: the explorer with no resource chosen is
+                  the catalog, and the same page renders a selected listing. */}
+              <Route path="explorer" element={<Explorer />} />
+              <Route path="explorer/:group/:version/:plural" element={<Explorer />} />
+
+              <Route path="clusters" element={<Clusters />} />
+              <Route path="audit" element={<Audit />} />
+              <Route path="users" element={<Users />} />
+              <Route path="login" element={<Navigate to="/" replace />} />
+
+              <Route path="*" element={<NotFound />} />
+            </Route>
+          </Routes>
+        </NamespaceProvider>
+      </ClusterProvider>
+    </HealthProvider>
+  );
+}
+
+function AuthenticationGate() {
+  const { enabled, user, loading, error, refresh } = useAuth();
+  if (loading) {
+    return <LoadingState label="Checking your session…" minHeight="100vh" />;
+  }
+  if (error) {
+    return (
+      <div className="admin-auth-state">
+        <ErrorState title="Authentication service unavailable" error={error} onRetry={refresh} />
+      </div>
+    );
+  }
+  if (enabled && !user) return <Login />;
+  return <ConsoleRoutes />;
+}
+
 export default function App() {
   return (
-    // Outermost boundary, OUTSIDE every provider. A boundary only catches
-    // throws from its own subtree, so the one inside Layout cannot see a
-    // provider's render throw — and those are real: ThemeContext and
-    // ClusterContext both touch localStorage during render or in a layout
-    // effect, and localStorage throws in Safari private mode and under a
-    // blocked-cookies policy. Without this, that unmounts the root and leaves a
-    // genuinely blank page with no fallback and no reload button.
+    // Outermost boundary, outside every provider, so a provider startup failure
+    // still leaves a usable error panel rather than an empty root.
     <ErrorBoundary title="The console failed to start">
       <ThemeProvider>
         <NotificationProvider>
-          <HealthProvider>
-            <ClusterProvider>
-              <NamespaceProvider>
-                <BrowserRouter>
-                  <Routes>
-                    <Route path="/" element={<Layout />}>
-                      <Route index element={<Overview />} />
-
-                      <Route path="nodes" element={<Nodes />} />
-                      <Route path="nodes/:name" element={<NodeDetail />} />
-
-                      <Route path="namespaces" element={<Namespaces />} />
-
-                      <Route path="workloads" element={<Workloads />} />
-                      <Route
-                        path="workloads/:plural/:namespace/:name"
-                        element={<WorkloadDetail />}
-                      />
-
-                      <Route path="pods" element={<Pods />} />
-                      <Route path="network" element={<Network />} />
-                      <Route path="config" element={<Config />} />
-                      <Route path="storage" element={<Storage />} />
-                      <Route path="access" element={<Access />} />
-                      <Route path="events" element={<Events />} />
-
-                      {/* One page, two routes: the explorer with no resource
-                          chosen is the catalog, and the same page renders a
-                          listing once a group/version/plural is in the URL.
-                          Splitting them into two components duplicated the
-                          catalog fetch and let the two views disagree about
-                          which resources this cluster serves. */}
-                      <Route path="explorer" element={<Explorer />} />
-                      <Route path="explorer/:group/:version/:plural" element={<Explorer />} />
-
-                      <Route path="clusters" element={<Clusters />} />
-                      <Route path="audit" element={<Audit />} />
-
-                      <Route path="*" element={<NotFound />} />
-                    </Route>
-                  </Routes>
-                </BrowserRouter>
-              </NamespaceProvider>
-            </ClusterProvider>
-          </HealthProvider>
+          <BrowserRouter>
+            <AuthProvider>
+              <AuthenticationGate />
+            </AuthProvider>
+          </BrowserRouter>
         </NotificationProvider>
       </ThemeProvider>
     </ErrorBoundary>

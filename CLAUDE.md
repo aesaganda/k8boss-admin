@@ -7,7 +7,8 @@ happened — including what failed.
 
 **What it is not.** Not a monitoring system, not a deployment engine, not a
 GitOps controller, and not a security-posture product. It holds no cluster state:
-every page is a live read. It has no authentication of its own. It was split out
+every page is a live read. Optional local/LDAP authentication protects the console;
+legacy proxy mode remains available when it is disabled. It was split out
 of [K8Boss](https://github.com/aesaganda/k8boss) and shares no code with it —
 `docs/adr-0002-lineage.md` says what came across and what deliberately did not.
 
@@ -21,6 +22,7 @@ of [K8Boss](https://github.com/aesaganda/k8boss) and shares no code with it —
 | `backend/app/services/` | Typed read models: the unified workload row, node rows | `docs/api-contract.md` §5, §6 |
 | `backend/app/admin/` | **Every write.** The funnel, preflight, diff, apply, scale, rollout, node drain | `docs/safety-model.md` |
 | `backend/app/audit/` | Append-only trail: `record()` and `query()` | `docs/api-contract.md` §10 |
+| `backend/app/identity/` | Local password hashing, opaque sessions, LDAP search-and-bind | `docs/api-contract.md` §12 |
 | `backend/tests/` | pytest on SQLite. The fake Kubernetes client **raises** on an unstubbed call | — |
 | `frontend/src/` | React 19 / Vite / PatternFly 6 SPA | `docs/api-contract.md` §11 |
 | `deploy/` | Namespace, RBAC, Deployments, Services, Ingress, kustomization | `docs/rbac.md` |
