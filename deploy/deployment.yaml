@@ -114,6 +114,69 @@ spec:
                   key: bootstrap-password
                   optional: true
 
+            # ── Single sign-on (OpenID Connect) ──────────────────────────────
+            # Off by default. Turning it on needs AUTH_ENABLED plus an issuer and
+            # a client id; with any of the three missing the login page shows no
+            # SSO button at all, because a button that cannot work reads as a
+            # broken console rather than an unconfigured one.
+            #
+            # Register the redirect URI at the issuer as
+            #   https://<console-host>/api/auth/oidc/callback
+            # and set OIDC_REDIRECT_URL to the same string. It is derived from
+            # the forwarded Host when empty, which is correct behind exactly one
+            # well-behaved ingress and wrong behind anything that rewrites it —
+            # and the symptom of a mismatch is an `invalid_grant` from the token
+            # endpoint, which reads like a credential problem.
+            - name: OIDC_ENABLED
+              value: "false"
+            - name: OIDC_ISSUER
+              valueFrom:
+                secretKeyRef:
+                  name: k8boss-admin-oidc
+                  key: issuer
+                  optional: true
+            - name: OIDC_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: k8boss-admin-oidc
+                  key: client-id
+                  optional: true
+            # Omit the Secret key entirely for a public client, where PKCE alone
+            # protects the code exchange.
+            - name: OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: k8boss-admin-oidc
+                  key: client-secret
+                  optional: true
+            - name: OIDC_REDIRECT_URL
+              valueFrom:
+                secretKeyRef:
+                  name: k8boss-admin-oidc
+                  key: redirect-url
+                  optional: true
+            # Most issuers omit the groups claim unless the scope is requested
+            # AND the client is configured to emit it. Without it the console
+            # cannot map roles — and it deliberately leaves existing roles alone
+            # rather than demoting everyone, so a missing claim is silent.
+            - name: OIDC_SCOPES
+              value: "openid profile email"
+            - name: OIDC_ADMIN_GROUP
+              valueFrom:
+                secretKeyRef:
+                  name: k8boss-admin-oidc
+                  key: admin-group
+                  optional: true
+
+            # ── Sign-in rate limiting ───────────────────────────────────────
+            # Counted from the audit trail, so the limit holds across replicas
+            # and survives a restart. 0 disables it, which leaves the login
+            # endpoint an unmetered password oracle.
+            - name: AUTH_THROTTLE_MAX_ATTEMPTS
+              value: "10"
+            - name: AUTH_THROTTLE_WINDOW_SECONDS
+              value: "300"
+
             # ── State ───────────────────────────────────────────────────────
             - name: DATABASE_URL
               value: sqlite:////app/data/k8boss_admin.db

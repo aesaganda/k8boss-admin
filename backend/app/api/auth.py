@@ -1,9 +1,33 @@
-"""Console login, session identity, and administrator-managed users."""
+"""
+Console login, session identity, single sign-on, and administrator-managed users.
+
+**Every terminal state of a sign-in is audited** — the successes, the rejections,
+the throttled attempts and the SSO handshakes that failed verification. §10's
+existing vocabulary carries all of them: ``applied`` for a sign-in that produced
+a session, ``denied`` for one that was refused, ``failed`` for one this console
+could not complete because the identity provider did not answer.
+
+That distinction is the point of recording them at all. "Who tried" is the
+question asked after an incident, and a trail that holds only the sign-ins that
+worked cannot answer it — nor can it answer "is somebody guessing at this
+account", which is also what feeds the throttle in :mod:`app.identity.throttle`.
+
+**A rejected sign-in is recorded against the submitted username**, not against
+``anonymous``. There is no session yet, so the request context has no verified
+actor, and attributing every failed attempt to ``anonymous`` would collapse a
+thousand attempts against one account into an undifferentiated pile. §10 states
+that the actor on a ``denied`` console record is a *claim* by the caller rather
+than a verified identity, which is exactly what it is.
+"""
 
 from __future__ import annotations
 
+import logging
+import secrets
+from urllib.parse import urlencode
+
 from fastapi import APIRouter, Depends, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -11,7 +35,9 @@ from sqlalchemy.orm import Session
 from app.audit import recorder
 from app.config import settings
 from app.database import get_db
-from app.errors import Invalid, InvalidCredentials, NotFound
+from app.errors import AdminError, Invalid, InvalidCredentials, NotFound
+from app.identity import handshake as handshake_service
+from app.identity import oidc, throttle
 from app.identity.dependencies import current_session, require_admin
 from app.identity.service import (
     ROLES,
@@ -20,11 +46,16 @@ from app.identity.service import (
     create_local_user,
     create_session,
     hash_password,
+    normalize_username,
+    provision_federated_user,
     revoke_session,
     revoke_user_sessions,
 )
+from app.k8s.context import get_current_source_ip
 from app.models import User, rfc3339
 from app.resources.envelope import envelope
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/auth", tags=["authentication"])
 
@@ -62,41 +93,55 @@ def _session_body(identity) -> dict:
 
 
 def _audit_user_action(verb: str, username: str, detail: str) -> None:
-    recorder.record(
-        verb=verb,
-        target={
-            "group": "k8boss-admin.io",
-            "version": "v1",
-            "resource": "users",
-            "namespace": None,
-            "name": username,
-        },
-        dry_run=False,
-        outcome="applied",
-        detail=detail,
-        cluster_scoped=False,
+    recorder.record_console_event(
+        verb=verb, resource="users", name=username, outcome="applied", detail=detail,
     )
 
 
-@router.get("/config")
-def auth_config() -> dict:
-    return {
-        "enabled": settings.auth_enabled,
-        "localEnabled": True,
-        "ldapEnabled": settings.ldap_enabled,
-        "methods": ["local", *(("ldap",) if settings.ldap_enabled else ())],
-    }
+def _audit_signin(
+    *, outcome: str, username: str, method: str, detail: str, error: str | None = None
+) -> None:
+    """One console record for a sign-in attempt, whatever became of it.
+
+    ``username`` is the *submitted* one on a rejection: the request has no
+    verified identity at that point, and recording every failure as ``anonymous``
+    would make "somebody is guessing at erens's account" indistinguishable from
+    background noise — which is both the incident question and the input the
+    throttle counts.
+    """
+    recorder.record_console_event(
+        verb="login",
+        resource="sessions",
+        name=username,
+        outcome=outcome,
+        detail=detail,
+        error=error,
+        actor=username,
+        source_ip=get_current_source_ip(),
+    )
 
 
-@router.post("/login")
-def login(body: LoginBody, db: Session = Depends(get_db)) -> JSONResponse:
-    if not settings.auth_enabled:
-        raise Invalid("Application authentication is not enabled on this deployment.")
-    user = authenticate(db, username=body.username, password=body.password, source=body.source)
-    if user is None:
-        raise InvalidCredentials()
-    raw_token, identity = create_session(db, user)
-    response = JSONResponse(content=_session_body(identity))
+def _normalized_or_raw(username: str) -> str:
+    """The canonical username when it is one, otherwise the submitted text.
+
+    A malformed username still has to be recorded — it is what somebody typed,
+    and a rejected login recorded against an empty actor is a row nobody can find
+    when they search for the account being attacked. Bounded, because this value
+    is caller-controlled and lands in a column.
+    """
+    try:
+        return normalize_username(username)
+    except Invalid:
+        return (username or "").strip()[:255] or "(empty)"
+
+
+def _set_session_cookie(response: Response, raw_token: str) -> None:
+    """Attach the session cookie. One place, so its attributes cannot diverge.
+
+    ``SameSite=Strict``, which is right for a console whose every request is
+    same-site. Note that the OIDC *handshake* cookie is deliberately ``Lax`` —
+    see :mod:`app.identity.handshake` for why the two cannot share a setting.
+    """
     response.set_cookie(
         settings.auth_cookie_name,
         raw_token,
@@ -106,6 +151,82 @@ def login(body: LoginBody, db: Session = Depends(get_db)) -> JSONResponse:
         httponly=True,
         samesite="strict",
     )
+
+
+@router.get("/config")
+def auth_config() -> dict:
+    """Public discovery. What the login page needs to render, and nothing more.
+
+    Deliberately unauthenticated, so the SPA can decide what to show on first
+    paint. It therefore says only *which* methods exist — never the issuer URL,
+    the client id, the configured groups or anything else that would let an
+    unauthenticated caller enumerate how this deployment is wired.
+    """
+    sso_available = oidc.enabled() and settings.auth_enabled
+    return {
+        "enabled": settings.auth_enabled,
+        "localEnabled": True,
+        "ldapEnabled": settings.ldap_enabled,
+        "oidcEnabled": sso_available,
+        "methods": [
+            "local",
+            *(("ldap",) if settings.ldap_enabled else ()),
+            *(("oidc",) if sso_available else ()),
+        ],
+        "oidc": (
+            {
+                "label": settings.oidc_button_label,
+                "startPath": "/api/auth/oidc/start",
+            }
+            if sso_available
+            else None
+        ),
+    }
+
+
+@router.post("/login")
+def login(body: LoginBody, db: Session = Depends(get_db)) -> JSONResponse:
+    """Local or LDAP sign-in. Throttled, and audited on every terminal state."""
+    if not settings.auth_enabled:
+        raise Invalid("Application authentication is not enabled on this deployment.")
+
+    actor = _normalized_or_raw(body.username)
+    # Before the password check, so a throttled request costs one indexed COUNT
+    # rather than a PBKDF2 verification — otherwise the throttle would still let
+    # an attacker consume the console's CPU at the rate they can send requests.
+    throttle.check(actor)
+
+    try:
+        user = authenticate(
+            db, username=body.username, password=body.password, source=body.source
+        )
+    except AdminError as error:
+        # An identity provider that could not answer is not a credential
+        # rejection, and `failed` rather than `denied` keeps it out of the
+        # throttle count: a directory outage must not lock out every operator
+        # who tries during it.
+        _audit_signin(
+            outcome="failed", username=actor, method=body.source,
+            detail=f"Sign-in could not be completed via {body.source}.",
+            error=f"{error.code}: {error.message}",
+        )
+        raise
+
+    if user is None:
+        _audit_signin(
+            outcome="denied", username=actor, method=body.source,
+            detail=f"Sign-in rejected ({body.source}). The actor on this record is "
+                   "the submitted username, not a verified identity.",
+        )
+        raise InvalidCredentials()
+
+    raw_token, identity = create_session(db, user)
+    _audit_signin(
+        outcome="applied", username=user.username, method=user.auth_source,
+        detail=f"Signed in via {user.auth_source} with the {user.role} role.",
+    )
+    response = JSONResponse(content=_session_body(identity))
+    _set_session_cookie(response, raw_token)
     return response
 
 
@@ -116,7 +237,24 @@ def me(identity=Depends(current_session)) -> dict:
 
 @router.post("/logout")
 def logout(request: Request) -> Response:
-    revoke_session(request.cookies.get(settings.auth_cookie_name))
+    """Revoke the server-side session and clear the cookie.
+
+    Audited only when a session was actually revoked. A logout POST with no
+    cookie — a second tab, a bookmarked call, a page reloaded after expiry —
+    revokes nothing, and recording it would put sign-out rows in the trail for
+    people who were never signed in.
+    """
+    raw_token = request.cookies.get(settings.auth_cookie_name)
+    principal = getattr(request.state, "auth_principal", None)
+    revoke_session(raw_token)
+    if principal is not None:
+        recorder.record_console_event(
+            verb="logout",
+            resource="sessions",
+            name=principal.username,
+            outcome="applied",
+            detail="Signed out; the server-side session was revoked.",
+        )
     response = Response(status_code=204)
     response.delete_cookie(
         settings.auth_cookie_name,
@@ -126,6 +264,225 @@ def logout(request: Request) -> Response:
         samesite="strict",
     )
     return response
+
+
+# --------------------------------------------------------------------------- #
+# OpenID Connect single sign-on (§12.6)
+# --------------------------------------------------------------------------- #
+#
+# Two browser-navigation endpoints, which is what makes them different from
+# every other route in this API: the caller is a redirect, not `fetch()`, so a
+# §1.3 error envelope would be rendered as raw JSON in the address bar instead of
+# being read by the SPA. Failures therefore redirect back to the console with a
+# query string the login page renders, and the codes in it are drawn from the
+# same §1.3 vocabulary so there is one set of names rather than two.
+
+
+def _redirect_uri(request: Request) -> str:
+    """The callback URL to send the issuer, and to send it again on exchange.
+
+    OAuth requires the ``redirect_uri`` on the token exchange to be byte-identical
+    to the one on the authorization request, so it is computed once, sealed into
+    the handshake cookie, and read back — rather than recomputed at the callback,
+    where a different forwarded header would produce a different string and an
+    ``invalid_grant`` that reads as a credential problem.
+
+    Configured explicitly when ``OIDC_REDIRECT_URL`` is set. Otherwise derived
+    from the forwarded host, which is correct behind one well-configured ingress
+    and wrong behind anything that rewrites Host — hence the setting.
+    """
+    configured = settings.oidc_redirect_url.strip()
+    if configured:
+        return configured
+    proto = request.headers.get("x-forwarded-proto") or request.url.scheme
+    host = (
+        request.headers.get("x-forwarded-host")
+        or request.headers.get("host")
+        or request.url.netloc
+    )
+    return f"{proto}://{host}/api/auth/oidc/callback"
+
+
+def _sso_failure(next_path: str, code: str, reason: str) -> RedirectResponse:
+    """Send the browser back to the console carrying a renderable failure.
+
+    The reason is a slug from a closed set, not a sentence: the login page owns
+    the wording, and a message assembled here would be untranslatable and would
+    drift from the §1.3 codes the rest of the app branches on.
+    """
+    logger.info("SSO sign-in failed: %s (%s)", code, reason)
+    query = urlencode({"auth_error": code, "auth_reason": reason})
+    return RedirectResponse(url=f"{next_path}?{query}", status_code=302)
+
+
+@router.get("/oidc/start")
+def oidc_start(request: Request, next: str = "/") -> RedirectResponse:
+    """Begin the Authorization Code + PKCE handshake: redirect to the issuer.
+
+    The four secrets this sign-in needs on the way back — state, nonce, PKCE
+    verifier and the exact redirect URI — go into one sealed, short-lived,
+    ``SameSite=Lax`` cookie. See :mod:`app.identity.handshake`.
+    """
+    next_path = handshake_service.safe_next_path(next)
+    if not settings.auth_enabled:
+        raise Invalid("Application authentication is not enabled on this deployment.")
+    oidc.require_enabled()
+
+    state = secrets.token_urlsafe(24)
+    nonce = secrets.token_urlsafe(24)
+    verifier, challenge = oidc.generate_pkce()
+    redirect_uri = _redirect_uri(request)
+
+    try:
+        target = oidc.authorization_url(
+            redirect_uri=redirect_uri, state=state, nonce=nonce,
+            code_challenge=challenge,
+        )
+    except AdminError as error:
+        _audit_signin(
+            outcome="failed", username="(sso)", method="oidc",
+            detail="Single sign-on could not be started.",
+            error=f"{error.code}: {error.message}",
+        )
+        return _sso_failure(next_path, error.code, "provider_unreachable")
+
+    response = RedirectResponse(url=target, status_code=302)
+    response.set_cookie(
+        handshake_service.COOKIE_NAME,
+        handshake_service.seal(
+            handshake_service.Handshake(
+                state=state, nonce=nonce, code_verifier=verifier,
+                redirect_uri=redirect_uri, next_path=next_path,
+            )
+        ),
+        **handshake_service.cookie_attributes(),
+    )
+    return response
+
+
+@router.get("/oidc/callback")
+def oidc_callback(
+    request: Request,
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
+    """Complete the handshake: verify the assertion, provision, issue a session.
+
+    Nothing in the ID token is read before it has been verified against the
+    issuer's published keys — signature, issuer, audience, expiry and the nonce
+    from this browser's own handshake. See :mod:`app.identity.oidc` for what each
+    of those checks prevents.
+    """
+    sealed = request.cookies.get(handshake_service.COOKIE_NAME)
+    pending = handshake_service.unseal(sealed)
+    next_path = pending.next_path if pending else "/"
+
+    def _clear(response: RedirectResponse) -> RedirectResponse:
+        response.delete_cookie(
+            handshake_service.COOKIE_NAME, path=handshake_service.COOKIE_PATH
+        )
+        return response
+
+    # ── Nothing above this line writes a record. ─────────────────────────────
+    #
+    # This route is public (it has to be — SSO is how a session is obtained), so
+    # everything before the handshake is verified is reachable by anyone who can
+    # reach the console. An audit write on that path is an unauthenticated
+    # INSERT into the one table in this schema with no upper bound on rows: a
+    # loop over `?error=` would fill the operator's database, and would do it on
+    # a deployment that never enabled SSO at all.
+    #
+    # A callback that does not correspond to a handshake this console started is
+    # not a failed sign-in. It is a stray request, and recording it as a refused
+    # authentication would also put rows in the trail that no operator's action
+    # produced — noise in the table that is supposed to be evidence.
+    if not oidc.enabled():
+        return _clear(_sso_failure(next_path, "invalid", "sso_not_configured"))
+    if pending is None:
+        return _clear(
+            _sso_failure(next_path, "invalid", "handshake_missing_or_expired")
+        )
+
+    # ── Past here the handshake is ours, so a failure is a real event. ───────
+    if error:
+        # The issuer refused a sign-in we started — a declined consent screen, a
+        # user not assigned to the application. Recorded because a run of these
+        # against one console is worth being able to see. Bounded, because the
+        # value is attacker-influenced and lands in a column.
+        _audit_signin(
+            outcome="denied", username="(sso)", method="oidc",
+            detail="The identity provider refused the sign-in.",
+            error=str(error)[:200],
+        )
+        return _clear(_sso_failure(next_path, "permission_denied", "provider_refused"))
+
+    if not code or not state or not secrets.compare_digest(state, pending.state):
+        # A mismatched state is what a forged callback looks like, so it is a
+        # refusal rather than a retry prompt, and it is recorded.
+        _audit_signin(
+            outcome="denied", username="(sso)", method="oidc",
+            detail="The single sign-on callback did not match a handshake this "
+                   "console started.",
+        )
+        return _clear(_sso_failure(next_path, "invalid", "state_mismatch"))
+
+    try:
+        tokens = oidc.exchange_code(
+            code=code,
+            code_verifier=pending.code_verifier,
+            redirect_uri=pending.redirect_uri,
+        )
+        id_token = tokens.get("id_token")
+        if not id_token:
+            raise InvalidCredentials(
+                "The identity provider returned no ID token, so it asserted "
+                "nothing about who signed in.",
+            )
+        claims = oidc.verify_id_token(id_token, nonce=pending.nonce)
+        identity = oidc.identity_from_claims(claims)
+        oidc.check_group_allowlist(identity)
+    except AdminError as failure:
+        # 5xx-shaped failures are the provider's; 4xx-shaped ones are a refusal.
+        # Kept apart in the trail because they send an operator to different
+        # places, and because only a refusal should ever look like an attack.
+        outcome = "failed" if failure.http_status >= 500 else "denied"
+        _audit_signin(
+            outcome=outcome, username="(sso)", method="oidc",
+            detail="Single sign-on assertion was not accepted.",
+            error=f"{failure.code}: {failure.message}",
+        )
+        return _clear(_sso_failure(next_path, failure.code, "assertion_rejected"))
+
+    try:
+        user = provision_federated_user(
+            db,
+            source="oidc",
+            username=identity.username,
+            external_id=identity.subject,
+            display_name=identity.display_name,
+            email=identity.email,
+            groups=identity.groups,
+            admin_group=settings.oidc_admin_group,
+        )
+    except AdminError as failure:
+        _audit_signin(
+            outcome="denied", username=_normalized_or_raw(identity.username),
+            method="oidc",
+            detail="A verified single sign-on identity was refused a console account.",
+            error=f"{failure.code}: {failure.message}",
+        )
+        return _clear(_sso_failure(next_path, failure.code, "account_refused"))
+
+    raw_token, session = create_session(db, user)
+    _audit_signin(
+        outcome="applied", username=user.username, method="oidc",
+        detail=f"Signed in via single sign-on with the {user.role} role.",
+    )
+    response = RedirectResponse(url=next_path, status_code=302)
+    _set_session_cookie(response, raw_token)
+    return _clear(response)
 
 
 @router.get("/users")

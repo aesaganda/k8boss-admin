@@ -15,10 +15,26 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class LDAPProfile:
+    """What one successful search-and-bind learned about a directory user."""
+
     username: str
     display_name: str | None
     email: str | None
-    is_admin: bool
+    #: Group DNs as the directory returned them, or ``None`` when the directory
+    #: did not return the membership attribute at all.
+    #:
+    #: The two are not the same fact and the caller must not be able to confuse
+    #: them. ``()`` means "we asked and this person is in no groups"; ``None``
+    #: means "we could not look" — an ACL hiding ``memberOf`` from the search
+    #: account, a disabled referral chase, a truncated entry.
+    #:
+    #: This used to be ``is_admin: bool``, and an absent attribute produced
+    #: ``False``, which :func:`app.identity.service.authenticate` then wrote over
+    #: the stored role. A directory administrator was silently demoted on any
+    #: login where the attribute did not come back, and restored on the next one
+    #: that did — an intermittent loss of administrators with nothing connecting
+    #: it to the directory. See :mod:`app.identity.roles`.
+    groups: tuple[str, ...] | None
 
 
 def _value(entry, attribute: str) -> str | None:
@@ -123,15 +139,27 @@ def authenticate(username: str, password: str) -> LDAPProfile | None:
         if not user_connection.bind():
             return None
 
-        memberships = []
+        # The attribute being absent from the entry is reported as None, not as
+        # an empty membership. Role mapping is the caller's job (roles.py), and
+        # it needs to be able to tell "in no groups" from "we did not get to
+        # see the groups" — the second must leave a stored role alone.
         if "memberOf" in entry.entry_attributes:
-            memberships = [str(value).casefold() for value in entry["memberOf"].values]
-        admin_dn = settings.ldap_admin_group_dn.strip().casefold()
+            groups: tuple[str, ...] | None = tuple(
+                str(value) for value in entry["memberOf"].values
+            )
+        else:
+            groups = None
+            logger.warning(
+                "The LDAP entry for %r carried no memberOf attribute. Console "
+                "role mapping will be skipped for this login and the stored role "
+                "kept. If this is not expected, the search account probably "
+                "cannot read memberOf on that entry.", username,
+            )
         return LDAPProfile(
             username=_value(entry, settings.ldap_username_attribute) or username,
             display_name=_value(entry, settings.ldap_display_name_attribute),
             email=_value(entry, settings.ldap_email_attribute),
-            is_admin=bool(admin_dn and admin_dn in memberships),
+            groups=groups,
         )
     except IdentityProviderUnavailable:
         raise

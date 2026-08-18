@@ -66,6 +66,30 @@ services:
       - LDAP_EMAIL_ATTRIBUTE=${LDAP_EMAIL_ATTRIBUTE:-mail}
       - LDAP_ADMIN_GROUP_DN=${LDAP_ADMIN_GROUP_DN:-}
       - LDAP_CONNECT_TIMEOUT_SECONDS=${LDAP_CONNECT_TIMEOUT_SECONDS:-5}
+      # Sign-in rate limiting. Counted from the audit trail, so it holds across
+      # replicas; 0 disables it and leaves the login endpoint unmetered.
+      - AUTH_THROTTLE_MAX_ATTEMPTS=${AUTH_THROTTLE_MAX_ATTEMPTS:-10}
+      - AUTH_THROTTLE_WINDOW_SECONDS=${AUTH_THROTTLE_WINDOW_SECONDS:-300}
+      # OpenID Connect single sign-on. Needs AUTH_ENABLED plus an issuer and a
+      # client id — with any of the three missing, no SSO button is offered at
+      # all, because a button that cannot work reads as a broken console.
+      - OIDC_ENABLED=${OIDC_ENABLED:-false}
+      - OIDC_ISSUER=${OIDC_ISSUER:-}
+      - OIDC_CLIENT_ID=${OIDC_CLIENT_ID:-}
+      - OIDC_CLIENT_SECRET=${OIDC_CLIENT_SECRET:-}
+      - OIDC_SCOPES=${OIDC_SCOPES:-openid profile email}
+      - OIDC_REDIRECT_URL=${OIDC_REDIRECT_URL:-}
+      - OIDC_USERNAME_CLAIM=${OIDC_USERNAME_CLAIM:-preferred_username}
+      - OIDC_EMAIL_CLAIM=${OIDC_EMAIL_CLAIM:-email}
+      - OIDC_DISPLAY_NAME_CLAIM=${OIDC_DISPLAY_NAME_CLAIM:-name}
+      - OIDC_GROUPS_CLAIM=${OIDC_GROUPS_CLAIM:-groups}
+      - OIDC_ADMIN_GROUP=${OIDC_ADMIN_GROUP:-}
+      - OIDC_ALLOWED_GROUPS=${OIDC_ALLOWED_GROUPS:-}
+      - OIDC_VERIFY_TLS=${OIDC_VERIFY_TLS:-true}
+      - OIDC_CA_CERTIFICATE_FILE=${OIDC_CA_CERTIFICATE_FILE:-}
+      - OIDC_TIMEOUT_SECONDS=${OIDC_TIMEOUT_SECONDS:-10}
+      - OIDC_CLOCK_SKEW_SECONDS=${OIDC_CLOCK_SKEW_SECONDS:-60}
+      - OIDC_BUTTON_LABEL=${OIDC_BUTTON_LABEL:-Single sign-on}
 
       # ── State ────────────────────────────────────────────────────────────
       # Registered clusters and the audit trail. Cluster CONTENTS are never

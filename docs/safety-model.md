@@ -303,12 +303,81 @@ Conversely, a failed INSERT never fails the write: by the time the recorder runs
 on a real write, the cluster has already changed, and turning a logging problem
 into a 500 would tell the operator their action failed when it did not.
 
-*Who the actor is.* With `AUTH_ENABLED=true`, the actor is the verified local or
-LDAP session username; `X-K8Boss-User` is ignored and cannot spoof it. With auth
-disabled, the console remains in legacy proxy mode and the header is advisory,
-defaulting to `anonymous`. `main.py` emits the stronger startup warning when
-mutations are enabled in that mode because the difference has to be visible in
-the logs of the pod where it is happening.
+*Who the actor is.* With `AUTH_ENABLED=true`, the actor is the verified local,
+LDAP or single sign-on session username; `X-K8Boss-User` is ignored and cannot
+spoof it. With auth disabled, the console remains in legacy proxy mode and the
+header is advisory, defaulting to `anonymous`. `main.py` emits the stronger
+startup warning when mutations are enabled in that mode because the difference
+has to be visible in the logs of the pod where it is happening.
+
+One deliberate exception: on a **refused sign-in**, the actor is the username
+that was *submitted*. There is no session yet, so nothing verified it, and §10
+states plainly that such a row is a claim by the caller rather than an identity.
+It is stored anyway because "somebody made forty attempts on this account" is the
+question those rows exist to answer, and forty rows reading `anonymous` cannot
+answer it.
+
+### 7.1 Tamper evidence
+
+The append-only hook is a real protection against *this codebase* growing a bug.
+It is no protection at all against a `psql` session, a restored backup, or
+anyone with write access to the volume — which, for a table whose entire value is
+that it can be trusted after an incident, is the population that matters.
+
+So every record is hash-chained: `event_hash` is SHA-256 over the record's
+immutable content plus the previous record's `event_hash`. That prevents nothing.
+What it does is make editing, deleting, inserting or reordering a committed
+record **detectable**, and `GET /api/audit/verify` says where the chain broke.
+
+*The failure it prevents.* An operator scales the payments service to zero during
+an incident, then edits the row to name somebody else. The append-only guard
+cannot see it — the edit never goes through this application. The trail still
+reads perfectly, and the review reaches a confident, wrong conclusion about a
+person. With the chain, that row and every row after it stop verifying.
+
+**Three verdicts, and the third is the one that matters.** `intact`, `broken`,
+and `partial` — the last meaning no break was found *and* the trail contains
+records this mechanism cannot speak for. `partial` is never rendered as a pass,
+in the API or in the UI.
+
+**Records written before chaining existed are never back-filled.** Back-filling
+would compute a hash over whatever those records say *today* and store it as
+proof, converting "we do not know whether this was altered" into "this is
+verified". That is strictly worse than no chain: it is the wrong answer delivered
+with a cryptographic signature attached. They stay unhashed, they are counted,
+and the verdict is withheld. See `docs/adr-0003-audit-hash-chain.md`.
+
+**A record that cannot be chained is still written.** When concurrent writers
+exhaust the retry budget, the record is stored *unchained* rather than dropped,
+and reports itself that way. Losing the link costs the ability to prove one
+record was not altered; losing the record costs the knowledge that the action
+happened at all, and nothing says it is missing.
+
+*What this does not claim.* The chain proves that records were not altered
+**after** they were written. It says nothing about whether what was written was
+true — a compromised console writes truthful-looking records and chains them
+correctly. It also does not protect the trail's *availability*: anyone who can
+edit the table can also drop it, and a dropped table verifies vacuously. Off-box
+export (§10.4) is what addresses that, and it is a different mechanism with
+different assumptions.
+
+### 7.2 Console records
+
+The trail also holds sign-ins, sign-outs, console user changes, and audit
+exports, tagged `category: console`. Same table, same append-only guarantee, same
+chain.
+
+Same table because they answer one question — "who did what to this console and
+its clusters" — and a review that has to remember there are two places to look is
+one that will eventually look in only one. The `category` column exists so the
+two can still be separated by a filter, on a real column rather than by parsing
+the JSON `target` (the one filter in this schema that would be engine-divergent
+between SQLite and PostgreSQL).
+
+Console records carry no cluster, which is why `GET /api/audit` had to grow an
+explicit way to ask for them: a listing silently scoped to the selected cluster
+cannot contain a single sign-in, so an operator filtering for "who signed in"
+would get an empty table with nothing indicating the question was never asked.
 
 ---
 

@@ -35,11 +35,13 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 
+import { Alert, Button, Split, SplitItem, TextInput } from '@patternfly/react-core';
 import { FitAddon } from '@xterm/addon-fit';
 import { Terminal } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
 
 import { pods as podsApi } from '../api/client';
+import { StatusBadge } from './ui';
 import { useHealth } from '../contexts/HealthContext';
 import { useTheme } from '../contexts/ThemeContext';
 

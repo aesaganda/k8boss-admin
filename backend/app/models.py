@@ -10,6 +10,11 @@ Two invariants are enforced here rather than in review:
 * ``AuditRecord`` is append-only, enforced by a session hook that refuses to
   flush an update or a delete. An audit trail that can be edited answers a
   different question from the one operators believe they are asking it.
+* ``AuditRecord`` rows are hash-chained (:mod:`app.audit.integrity`). The guard
+  above stops *this process* rewriting a row; it says nothing about a ``psql``
+  session. The chain does not prevent that either — it makes it **detectable**,
+  which is the honest thing an application can promise about a table it does not
+  own the storage of.
 """
 
 from __future__ import annotations
@@ -156,6 +161,17 @@ class User(Base):
     email = Column(String(320), nullable=True)
     role = Column(String(32), nullable=False, default="user")
     auth_source = Column(String(32), nullable=False, default="local")
+
+    # The identity provider's own stable identifier for this person — the OIDC
+    # `sub` claim. Null for local and LDAP accounts, which are keyed by username.
+    #
+    # It exists because a username is not an identity across providers. Once a
+    # second issuer can mint logins, "alice" at a low-trust IdP must not resolve
+    # to the "alice" the corporate IdP created and inherit her role. Binding the
+    # row to the subject on first federated login turns that from a silent
+    # account takeover into a refusal (see app.identity.oidc.provision).
+    external_id = Column(String(255), nullable=True, index=True)
+
     password_hash = Column(Text, nullable=True)
     active = Column(Boolean, nullable=False, default=True)
     last_login = Column(DateTime, nullable=True)
@@ -171,6 +187,7 @@ class User(Base):
             "email": self.email,
             "role": self.role,
             "auth_source": self.auth_source,
+            "external_id": self.external_id,
             "active": bool(self.active),
             "last_login": rfc3339(self.last_login),
             "created_at": rfc3339(self.created_at),
@@ -190,6 +207,16 @@ class AuthSession(Base):
     created_at = Column(DateTime, nullable=False, default=utcnow)
 
 
+#: ``category`` values. Two kinds of record live in one table because they answer
+#: one question — "who did what to this console and its clusters" — and splitting
+#: them into two tables would mean an incident review has to remember to read
+#: both. The column exists so a filter can separate them without parsing JSON,
+#: which is the one thing in this schema that would be engine-divergent.
+CATEGORY_CLUSTER = "cluster"   # a write aimed at a Kubernetes API server
+CATEGORY_CONSOLE = "console"   # a sign-in, a sign-out, a console user change
+CATEGORIES: frozenset[str] = frozenset({CATEGORY_CLUSTER, CATEGORY_CONSOLE})
+
+
 class AuditRecord(Base):
     """One attempted write, recorded whether or not it reached the cluster.
 
@@ -202,6 +229,22 @@ class AuditRecord(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     ts = Column(DateTime, nullable=False, default=utcnow)
+
+    # cluster | console.
+    #
+    # Rows written before this column existed hold NULL, and are **not**
+    # back-filled — this table is append-only, and a migration that learned to
+    # UPDATE it would establish that the guard can be worked around. A null is
+    # instead *read* as `cluster` (see to_row_dict and the query filter), which
+    # is what all but a handful of pre-upgrade rows are and what every one of
+    # them is closer to than `console`.
+    #
+    # The alternative was to leave the filter matching only non-null values, and
+    # that is the actual defect: a filter for "cluster writes" would silently
+    # omit every record written before the upgrade, and a filter for "console
+    # records" would omit them too — rows that exist, that an operator is looking
+    # straight at in the unfiltered view, and that no filter can reach.
+    category = Column(String(16), nullable=True, default=CATEGORY_CLUSTER)
 
     # Verified session username when application auth is enabled. In legacy
     # proxy mode this is the advisory X-K8Boss-User value, or "anonymous".
@@ -233,6 +276,24 @@ class AuditRecord(Base):
     diff_digest = Column(String(80), nullable=True)
     error = Column(Text, nullable=True)
 
+    # -- tamper evidence (app.audit.integrity) ---------------------------
+    #
+    # Both are NULL for a row written before chaining existed, and for the
+    # last-resort path where the record was preserved but could not be linked.
+    # NULL is a third state and is reported as one: a verifier says "unchained",
+    # never "verified" and never "broken". Claiming either about a row we cannot
+    # speak for is the defect this whole mechanism exists to avoid making.
+    #
+    # UNIQUE on prev_hash is load-bearing, not a tidiness constraint. It is what
+    # makes a fork impossible rather than merely detectable: two replicas that
+    # read the same chain tip compute the same prev_hash, and the second INSERT
+    # is refused by the database instead of silently branching the chain. The
+    # writer retries against the new tip. Multiple NULLs are permitted by a
+    # UNIQUE index on both SQLite and PostgreSQL, so unchained rows do not
+    # collide with each other.
+    prev_hash = Column(String(64), nullable=True, unique=True)
+    event_hash = Column(String(64), nullable=True, unique=True)
+
     __table_args__ = (
         # The audit page is always scoped to a cluster and paged by descending
         # id, so the composite index serves both the filter and the ordering
@@ -240,6 +301,13 @@ class AuditRecord(Base):
         # cluster-scoped.
         Index("ix_audit_cluster_id", "cluster_id", "id"),
         Index("ix_audit_ts", "ts"),
+        # The audit page separates console sign-ins from cluster writes, and the
+        # login throttle counts recent console denials for one actor. Both are
+        # (category, ts) scans.
+        Index("ix_audit_category_ts", "category", "ts"),
+        # The throttle's exact query: recent records for one actor. Without it,
+        # every login attempt table-scans a table that only ever grows.
+        Index("ix_audit_actor_ts", "actor", "ts"),
     )
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
@@ -250,6 +318,11 @@ class AuditRecord(Base):
         return {
             "id": self.id,
             "ts": rfc3339(self.ts),
+            # Never null on the wire. A consumer that had to special-case a null
+            # here would be re-deriving the same "this predates the column"
+            # reasoning at every call site, and the first one to forget renders
+            # it as a blank cell.
+            "category": self.category or CATEGORY_CLUSTER,
             "actor": self.actor,
             "cluster_id": self.cluster_id,
             "cluster_name": self.cluster_name,
@@ -261,6 +334,12 @@ class AuditRecord(Base):
             "diff_digest": self.diff_digest,
             "error": self.error,
             "source_ip": self.source_ip,
+            # The chain link, echoed so an exported trail can be verified by
+            # something that is not this console. Both null means the row is
+            # outside the chain, which GET /api/audit/verify reports as
+            # `unchained` rather than folding into either verdict.
+            "prev_hash": self.prev_hash,
+            "event_hash": self.event_hash,
         }
 
 

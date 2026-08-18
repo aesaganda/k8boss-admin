@@ -405,6 +405,24 @@ export const auth = {
   me: () => api.get('/auth/me'),
   login: (body) => request('/auth/login', { method: 'POST', body, retry: false }),
   logout: () => request('/auth/logout', { method: 'POST', expect: 'none', retry: false }),
+
+  /**
+   * Where to send the browser to begin single sign-on.
+   *
+   * A full-page navigation, not a `fetch`. The handshake is a redirect to the
+   * identity provider and back, and an XHR cannot follow that: the IdP needs to
+   * show a login form, possibly a second factor, possibly a consent screen, in a
+   * real browsing context. It also has to be a top-level navigation for the
+   * handshake cookie to come back at all — see the backend's
+   * `identity/handshake.py` on why that cookie is SameSite=Lax.
+   *
+   * `cluster_id` is deliberately not appended: `buildUrl` is bypassed because
+   * this is not an API call, and a cluster scope means nothing to a sign-in.
+   */
+  ssoStartUrl: (nextPath = '/') => {
+    const qs = new URLSearchParams({ next: nextPath || '/' });
+    return `${API_BASE}/auth/oidc/start?${qs.toString()}`;
+  },
 };
 
 export const users = {
@@ -519,8 +537,42 @@ export const access = {
 /* ── §10 Audit ──────────────────────────────────────────────────────────── */
 
 export const audit = {
-  /** params: { limit, cursor, cluster_id, actor, outcome, since } */
+  /**
+   * params: { limit, cursor, cluster_id, actor, outcome, since, until,
+   *           category, verb, dry_run }
+   *
+   * `cluster_id: 0` means "records that belong to no cluster" — every console
+   * sign-in and user change. It exists because `buildUrl` appends the active
+   * cluster to every request and drops empty values, so there is otherwise no
+   * value this page can send that means "unscoped".
+   */
   list: (params) => api.get('/audit', params),
+
+  /** §10.2 — the hash-chain integrity report. */
+  verify: (params) => api.get('/audit/verify', params),
+
+  /**
+   * §10.3 — a full-page navigation to the export, not a `fetch`.
+   *
+   * The response is a `Content-Disposition: attachment` stream that can be far
+   * larger than the tab's memory. Reading it through `fetch` to build a blob URL
+   * would materialise the whole trail in the browser to hand it straight back to
+   * the disk, and would lose the streaming the backend went to the trouble of
+   * doing. Letting the browser handle the download is both correct and free.
+   */
+  exportUrl: (params) => {
+    const qs = new URLSearchParams();
+    for (const [key, value] of Object.entries(params || {})) {
+      if (value == null || value === '') continue;
+      qs.set(key, String(value));
+    }
+    // Same reasoning as `buildUrl`: scope to the active cluster unless the
+    // caller was explicit, so the file matches the table it was taken from.
+    if (activeClusterId != null && !qs.has('cluster_id')) {
+      qs.set('cluster_id', String(activeClusterId));
+    }
+    return `${API_BASE}/audit/export?${qs.toString()}`;
+  },
 };
 
 /* ── §7 Pod logs ────────────────────────────────────────────────────────── */

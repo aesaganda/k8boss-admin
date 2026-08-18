@@ -78,6 +78,40 @@ suite, pytest on SQLite. The correction is lint: K8Boss runs its frontend lint
 green check because nobody reads the output of a job that passed. Here lint
 fails the build, and `.github/workflows/ci.yml` says why in a comment.
 
+**Audit tamper evidence, with the honesty gap closed.** K8Boss chains its audit
+rows with a SHA-256 `prev_hash`/`event_hash` link, and the idea came across.
+Three things were re-decided rather than reproduced:
+
+* K8Boss's `verify_chain` filters to rows that *have* a hash and ignores the
+  rest, so a trail of three hashed rows among ten thousand unhashed ones returns
+  `ok: true`. Here the unhashed count is reported and the verdict is withheld as
+  `partial`, because "verified" over records nobody checked is this repository's
+  own defect standard being broken by its own verifier. See ADR-0003.
+* K8Boss serialises chaining with an in-process `threading.Lock`, whose docstring
+  admits it forks across replicas. Here a UNIQUE constraint on `prev_hash` makes
+  the fork impossible rather than detectable, and the writer retries.
+* K8Boss's chain covers a differently-shaped table. Nothing was copied; the field
+  list, the canonicalisation and the three-verdict report are this schema's.
+
+**Single sign-on, without the provider registry.** K8Boss's OIDC provider
+demonstrated the flow — Authorization Code with PKCE, discovery, JWKS
+verification, claim mapping — and every one of those checks is here for the same
+reasons. What did not come across is the shape around it: K8Boss stores identity
+providers as database rows with an admin CRUD surface, and this console
+configures LDAP from the environment. A second provider configured a different
+way would mean two places to look when a login fails. So OIDC is
+environment-configured too, one issuer per deployment, and the console says it
+does not do multi-issuer rather than half-building it.
+
+One correction on the way through. K8Boss's providers report group membership as
+a plain list, so a directory that omits the attribute is indistinguishable from
+one that returns none — and this console had inherited the same flaw in
+`LDAPProfile.is_admin`, where an absent `memberOf` silently demoted an
+administrator on login and the next good login restored them. Both providers now
+report `None` for "we could not look", and the caller keeps the stored role. That
+is the "say which question you failed to answer" rule reaching the identity
+layer, where it had not been applied.
+
 ---
 
 ## What was deliberately not carried over
@@ -92,7 +126,9 @@ Not "not yet". These are out of scope for what this product is.
 | **GitOps / continuous delivery** — Argo CD verification, change requests, stop levers | K8Boss verifies that other people's delivery tools did what they claimed. This console is the thing an operator uses when they are going around delivery on purpose — and everything it does is dry-run-first and audited for exactly that reason |
 | **The commercial licensing module**, entitlement states, the operator | The reason the monorepo cannot simply be opened. Its absence is what lets this repository be Apache-2.0 |
 | The **agent** (Go node collectors and coordinator) | Nothing here needs data from inside a node |
-| **K8Boss's JWT/session implementation** | Deliberately not copied. k8boss-admin now has its own narrower, opt-in local/LDAP authentication boundary with opaque revocable sessions; legacy proxy mode still uses advisory `X-K8Boss-User`. No K8Boss authentication code or token format crossed the lineage boundary |
+| **K8Boss's JWT/session implementation** | Deliberately not copied. k8boss-admin has its own narrower, opt-in local/LDAP/OIDC authentication boundary with opaque revocable sessions; legacy proxy mode still uses advisory `X-K8Boss-User`. No K8Boss authentication code or token format crossed the lineage boundary. Sessions here remain server-side and revocable rather than stateless JWTs, so a password change or a deactivation takes effect immediately instead of at the end of a token's life |
+| **K8Boss's 54-permission RBAC catalogue and its identity-provider CRUD** | Two roles (`admin`, `user`) are what this console's surface actually distinguishes, and cluster authorization is answered by `SelfSubjectAccessReview` against the real cluster — a second string-matching catalogue would be a second answer to the same question, free to disagree with the first. Multi-issuer SSO is a real feature and a real design change (a table, per-row encrypted secrets, a subject-collision story across issuers), not a config key |
+| **K8Boss's SIEM export pipeline** (Splunk HEC, Elasticsearch, webhook targets, a background worker with dead-lettering) | `GET /api/audit/export` is a synchronous download instead. A push pipeline needs stored per-target credentials, a delivery worker, backoff, and a dead-letter surface — infrastructure this console would then have to keep correct for a feature an operator can get by pointing their collector at one endpoint |
 
 There is also one inherited disagreement that this repository does **not** carry:
 K8Boss has an unresolved conflict between two confidence orderings

@@ -15,7 +15,8 @@ from sqlalchemy.orm import Session
 
 from app import database
 from app.config import settings
-from app.errors import Invalid
+from app.errors import Invalid, PermissionDenied
+from app.identity import roles
 from app.models import AuthSession, User, utcnow
 
 logger = logging.getLogger(__name__)
@@ -23,8 +24,17 @@ logger = logging.getLogger(__name__)
 PASSWORD_ALGORITHM = "pbkdf2_sha256"
 PASSWORD_ITERATIONS = 310_000
 PASSWORD_MIN_LENGTH = 12
-ROLES = frozenset({"admin", "user"})
-AUTH_SOURCES = frozenset({"local", "ldap"})
+#: Re-exported from :mod:`app.identity.roles`, which owns the vocabulary because
+#: two providers map onto it. Kept as a name here so existing importers of
+#: ``service.ROLES`` do not have to move.
+ROLES = roles.ROLES
+AUTH_SOURCES = frozenset({"local", "ldap", "oidc"})
+
+#: Auth sources whose role and profile are owned by the identity provider and
+#: refreshed at login. A console administrator cannot edit these fields, because
+#: the next successful login would overwrite the edit and the operator would have
+#: no way to see why it did not stick.
+FEDERATED_SOURCES = frozenset({"ldap", "oidc"})
 
 
 @dataclass(frozen=True)
@@ -207,7 +217,128 @@ def authenticate(db: Session, *, username: str, password: str, source: str = "au
     row = existing or User(username=profile_username, auth_source="ldap", active=True)
     row.display_name = profile.display_name
     row.email = profile.email
-    row.role = "admin" if profile.is_admin else "user"
+    row.role = _resolved_role(
+        roles.role_from_groups(
+            profile.groups,
+            admin_group=settings.ldap_admin_group_dn,
+            provider="ldap",
+        ),
+        existing=existing,
+        username=profile_username,
+    )
+    row.password_hash = None
+    row.last_login = utcnow()
+    if existing is None:
+        db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def _resolved_role(mapped: str | None, *, existing: User | None, username: str) -> str:
+    """The role to store, given what the provider was able to tell us.
+
+    ``mapped is None`` means the provider could not resolve group membership at
+    all. Writing the default there is what silently demoted directory
+    administrators (see :mod:`app.identity.roles`), so the stored role is kept
+    instead. A brand-new account has no stored role to keep and gets the default,
+    which is the safe direction: a person who has never signed in before is not
+    made an administrator by a directory failure either.
+    """
+    if mapped is not None:
+        return mapped
+    if existing is not None:
+        logger.warning(
+            "Keeping the stored console role %r for %r: the directory did not "
+            "report group membership on this login.", existing.role, username,
+        )
+        return existing.role
+    logger.warning(
+        "Creating %r with the default console role: the identity provider did "
+        "not report group membership, so no role could be derived.", username,
+    )
+    return roles.DEFAULT_ROLE
+
+
+def provision_federated_user(
+    db: Session,
+    *,
+    source: str,
+    username: str,
+    external_id: str | None,
+    display_name: str | None,
+    email: str | None,
+    groups: tuple[str, ...] | None,
+    admin_group: str,
+) -> User:
+    """Create or refresh the local row behind a federated (SSO) identity.
+
+    Two refusals here are the security-relevant part, and both are refusals
+    rather than merges because a merge would be an account takeover that looked
+    like a successful login:
+
+    **A username already owned by another auth source is refused.** Usernames are
+    globally unique in this schema. If ``alice`` is a local account with a
+    password, an SSO login as ``alice`` must not adopt that row — otherwise
+    anyone who can make an identity provider assert a username can inherit
+    whatever that username already had.
+
+    **A username already bound to a different provider subject is refused.** The
+    subject claim (`sub`) is the provider's own stable identifier and is what
+    actually names a person; the username is a label the provider can reuse. When
+    an account carries a subject and the incoming one differs, this is either a
+    second person with a recycled username or a second issuer asserting the same
+    name, and neither may silently take over the first one's role.
+
+    A row with a NULL ``external_id`` predates that binding and is adopted once,
+    which is what lets an existing deployment turn SSO on without every account
+    being refused. Rebinding an account to a new subject afterwards is
+    deliberately not a login-time action.
+    """
+    if source not in FEDERATED_SOURCES:
+        raise ValueError(f"{source!r} is not a federated auth source.")
+
+    normalized = normalize_username(username)
+    existing = find_user(db, normalized)
+
+    if existing is not None and existing.auth_source != source:
+        logger.warning(
+            "Refusing %s login for %r: the username belongs to auth source %r.",
+            source, normalized, existing.auth_source,
+        )
+        raise PermissionDenied(
+            "This username is managed by a different authentication source.",
+        )
+    if (
+        existing is not None
+        and existing.external_id
+        and external_id
+        and existing.external_id != external_id
+    ):
+        logger.warning(
+            "Refusing %s login for %r: the account is bound to a different "
+            "provider subject.", source, normalized,
+        )
+        raise PermissionDenied(
+            "This username is already bound to a different identity provider "
+            "account.",
+        )
+    if existing is not None and not existing.active:
+        raise PermissionDenied("This console account is deactivated.")
+
+    row = existing or User(username=normalized, auth_source=source, active=True)
+    row.display_name = display_name
+    row.email = email
+    row.external_id = external_id or row.external_id
+    row.role = _resolved_role(
+        roles.role_from_groups(groups, admin_group=admin_group, provider=source),
+        existing=existing,
+        username=normalized,
+    )
+    # A federated account never has a stored password. Clearing it matters on the
+    # adoption path: a row that predated SSO could otherwise keep a usable
+    # password hash while the console reports the account as provider-managed,
+    # leaving a second way in that nobody is watching.
     row.password_hash = None
     row.last_login = utcnow()
     if existing is None:

@@ -102,7 +102,8 @@ Stable `error` codes:
 | `authentication_required` | 401 | no valid application session was presented |
 | `invalid_credentials` | 401 | login was rejected without revealing whether the username exists |
 | `permission_denied` | 403 | the authenticated console role does not permit the action |
-| `identity_provider_unavailable` | 502 | LDAP could not answer or its secure transport is misconfigured |
+| `too_many_attempts` | 429 | the sign-in budget for this username is spent; `context.retryAfterSeconds` carries the wait |
+| `identity_provider_unavailable` | 502 | LDAP or the OIDC issuer could not answer, or its secure transport is misconfigured |
 | `mutations_disabled` | 403 | the deployment is running read-only |
 | `unsupported` | 501 | the API resource is not served by this cluster |
 | `upstream_error` | 502 | any other API server failure |
@@ -541,22 +542,171 @@ Baseline verb set checked at registration: `list` on `core/pods`,
 
 ## 10. Audit
 
-### `GET /api/audit`
+The trail holds two kinds of record, distinguished by `category`, in one table:
+
+* `cluster` — an attempted write to a Kubernetes API server.
+* `console` — a sign-in, a sign-out, a change to a console user, or an audit
+  export.
+
+They share a table because they answer one question — "who did what to this
+console and its clusters" — and an incident review that has to remember there
+are two places to look is one that will eventually look in only one.
+
+### 10.1 `GET /api/audit`
 Query `limit` (default 100, max 1000), `cursor`, `cluster_id`, `actor`,
-`outcome`, `since`.
+`outcome`, `since`, `until`, `category`, `verb`, `dry_run`.
 Row:
 ```json
-{ "id": 4471, "ts": "2026-08-18T09:14:03Z", "actor": "erens", "cluster_id": 1, "cluster_name": "prod-eu",
+{ "id": 4471, "ts": "2026-08-18T09:14:03Z", "category": "cluster", "actor": "erens",
+  "cluster_id": 1, "cluster_name": "prod-eu",
   "verb": "patch", "target": {"group":"apps","version":"v1","resource":"deployments","namespace":"prod","name":"checkout"},
   "dry_run": false, "outcome": "applied",
-  "detail": "replicas 3 -> 5", "diff_digest": "sha256:9f2c...", "error": null, "source_ip": "10.4.2.9" }
+  "detail": "replicas 3 -> 5", "diff_digest": "sha256:9f2c...", "error": null, "source_ip": "10.4.2.9",
+  "prev_hash": "…", "event_hash": "…" }
 ```
 `outcome` ∈ `applied` | `dry_run` | `denied` | `failed` | `conflict`.
+`category` ∈ `cluster` | `console`. An unrecognised `outcome`, `category` or
+timestamp is **rejected** with `422 invalid`, never ignored — a filter the
+caller believes is applied and is not returns the whole trail under a false
+label.
+
+`until` earlier than `since` is likewise rejected: a window that selects nothing
+would answer "nothing happened" to a question that was never asked.
+
 Records are append-only; there is no delete endpoint.
 
-With `AUTH_ENABLED=true`, actor is the verified session username and an inbound
-`X-K8Boss-User` cannot override it. With auth disabled, actor comes from the
-legacy advisory `X-K8Boss-User` header and defaults to `anonymous`.
+**`cluster_id` means something different on this endpoint.** Everywhere else,
+omitting it means "the active cluster" (§1.1). Here:
+
+| value | selects |
+|---|---|
+| omitted | every record, of both categories |
+| `0` | records that belong to **no** cluster — every console record |
+| *n* | records for cluster *n* |
+
+`0` is not a cluster id (the column is a positive autoincrement) and is free to
+carry this meaning. It exists because the frontend appends `cluster_id` to every
+request and drops empty values, so without it every sign-in record would be
+unreachable from a session that has a cluster selected — an empty table under a
+filter that looks like it is working.
+
+**Actor attribution.** With `AUTH_ENABLED=true`, actor is the verified session
+username and an inbound `X-K8Boss-User` cannot override it. With auth disabled,
+actor comes from the legacy advisory `X-K8Boss-User` header and defaults to
+`anonymous`.
+
+One exception, and it is deliberate: on a **`console` record with outcome
+`denied`** — a refused sign-in — the actor is the username that was *submitted*.
+Nothing verified it, and it is a claim by the caller rather than an identity. It
+is stored anyway because "somebody made forty attempts on this account" is the
+question those rows exist to answer, and forty rows reading `anonymous` cannot
+answer it. The UI states the distinction on the row.
+
+### 10.2 Console records
+
+`target.group` is `k8boss-admin.io`, which no cluster serves. It exists so a
+console record has the same shape as a cluster write and the audit page needs one
+renderer rather than two; consumers must not treat it as an API group.
+
+| `verb` | `target.resource` | when |
+|---|---|---|
+| `login` | `sessions` | a sign-in: `applied` succeeded, `denied` was refused, `failed` means the identity provider could not answer |
+| `logout` | `sessions` | a session was revoked |
+| `create` / `patch` / `delete` | `users` | console user administration |
+| `export` | `audit` | the trail was extracted (§10.4) |
+
+`cluster_id` and `cluster_name` are null and `dry_run` is always false — there is
+no rehearsed sign-in.
+
+`failed` and `denied` are kept apart on sign-ins because they send an operator to
+different places and only `denied` counts toward the throttle (§12.5). A
+directory outage must not lock every operator out on top of being down.
+
+### 10.3 `GET /api/audit/verify`
+
+Every record is hash-chained: `event_hash` is SHA-256 over the record's immutable
+content plus the previous record's `event_hash`. Editing, deleting, inserting or
+reordering a committed record breaks the links from that point on.
+
+This is a different guarantee from the append-only ORM guard, and the difference
+is the reason it exists. The guard stops *this application* rewriting a record.
+It is no protection against a `psql` session, a restored backup, or anyone with
+write access to the volume — which, for a table whose whole value is that it can
+be trusted after an incident, is the population that matters. The chain does not
+prevent any of that either; it makes it **detectable**.
+
+Query: `limit` (optional). Response:
+
+```json
+{ "status": "partial", "verified": 4460, "unchained": 12, "total": 4472,
+  "anchored": true, "first_break": null,
+  "tip": "…", "genesis": "000…", "window": { "requested_limit": null, "oldest_unchained_id": 1 } }
+```
+
+| `status` | meaning |
+|---|---|
+| `intact` | every record is chained, every hash recomputes, and the links run unbroken from the first record to the last |
+| `broken` | a record's content no longer matches its hash, or a record cannot be reached from the first one. `first_break` names the id and what it means. This is evidence of modification, deletion, insertion or reordering **after** the record was committed |
+| `partial` | no break was found, **and** the trail contains records this mechanism cannot speak for. `unchained` counts them |
+
+**`partial` is not a softer `intact`, and must never be rendered as a pass.**
+
+Records written before hash chaining existed have both hash columns null and are
+**never back-filled**. Back-filling would compute a hash over whatever those
+records say *today* and store it as proof — converting "we do not know whether
+this was altered" into "this is verified", in the one table where that inversion
+does the most damage. So they stay null, they are counted, and the verdict is
+withheld.
+
+A record the writer could not link — the last-resort path after chain contention
+— is stored **unchained rather than dropped**, and reports itself the same way.
+Losing the link costs the ability to prove one record was not altered; losing the
+record costs the knowledge that the action happened at all.
+
+`limit` verifies only the newest N records. That catches an edit or a deletion
+inside the window, but cannot prove the records *before* it still link back to
+the first one, so the result is always `partial` with `anchored: false`. Omit
+`limit` for the only form that can return `intact`.
+
+Concurrency: a UNIQUE constraint on `prev_hash` makes a forked chain impossible
+rather than merely detectable. Two replicas that read the same tip compute the
+same `prev_hash`, the second INSERT is refused by the database, and the writer
+retries against the new tip.
+
+### 10.4 `GET /api/audit/export`
+
+The whole matching trail as one downloadable file. Same filters as `GET
+/api/audit`, minus paging. Administrator-only when `AUTH_ENABLED=true`; in legacy
+proxy mode there is no console role to check and the proxy owns the decision, as
+it does for every other endpoint.
+
+`format` ∈ `ndjson` | `csv`. Anything else is `422 invalid` rather than
+defaulted — handing somebody who asked for `xlsx` a CSV lets them treat a
+modified spreadsheet as the byte-faithful record.
+
+| format | properties |
+|---|---|
+| `ndjson` | one JSON object per line, identical in shape to a `GET /api/audit` row, **including the chain columns**. Byte-faithful. This is the format to verify a chain against and to feed a machine |
+| `csv` | flattened for a spreadsheet, `target` expanded into five columns. **Not byte-faithful** — see below |
+
+**The CSV is defanged and says so.** `detail` and `error` carry text this console
+did not write: Kubernetes error strings, admission-webhook responses, object
+names. A cell beginning `=`, `+`, `-`, `@` or a tab is evaluated as a formula by
+Excel, LibreOffice and Google Sheets when the file is opened, and formulas can
+reach the network. An audit extract is a file that gets mailed around and opened
+without thought. Such cells are prefixed with `'`. That is a real modification of
+recorded bytes, which is why it is confined to CSV and why `ndjson` exists.
+
+**There is no row cap and no `limit`.** A truncated extract that looked complete
+would be unfalsifiable at the far end: the reader cannot tell a short file from a
+quiet quarter, and "nobody scaled that deployment" is the conclusion they would
+draw. The response streams.
+
+**The export is itself audited** — a `console` record with verb `export`,
+recorded before a byte is streamed, carrying the filters that were applied. Bulk
+extraction of an audit trail is precisely the kind of act the trail exists to
+record, and recording it on completion would leave an aborted download with no
+trace.
 
 ---
 
@@ -581,37 +731,203 @@ legacy advisory `X-K8Boss-User` header and defaults to `anonymous`.
 
 Authentication is disabled by default for compatibility with deployments that
 already put an authenticating proxy in front. When `AUTH_ENABLED=true`, every
-HTTP and WebSocket API except `GET /api/health`, `GET /api/auth/config`, and
-`POST /api/auth/login` requires a valid opaque session cookie. Unsafe HTTP
+HTTP and WebSocket API except `GET /api/health`, `GET /api/auth/config`,
+`POST /api/auth/login`, `GET /api/auth/oidc/start` and
+`GET /api/auth/oidc/callback` requires a valid opaque session cookie. Unsafe HTTP
 methods also require the session's `X-CSRF-Token`. Session bearer tokens are
 HttpOnly cookies and only their SHA-256 digests are stored.
 
-### `GET /api/auth/config`
+The two OIDC routes are public because single sign-on **is how a session is
+obtained** — challenging them for one is a deadlock whose symptom is a sign-in
+button that answers 401. Public is not unprotected: `/start` mints a sealed
+handshake and redirects, and `/callback` refuses anything that does not match a
+handshake this console started, issuing a session only after a
+signature-verified assertion.
 
-Public discovery: `{ "enabled":true, "localEnabled":true,
-"ldapEnabled":true, "methods":["local","ldap"] }`.
+### 12.1 `GET /api/auth/config`
 
-### `POST /api/auth/login`
+Public discovery:
+
+```json
+{ "enabled": true, "localEnabled": true, "ldapEnabled": true, "oidcEnabled": true,
+  "methods": ["local", "ldap", "oidc"],
+  "oidc": { "label": "Single sign-on", "startPath": "/api/auth/oidc/start" } }
+```
+
+It names *which* methods exist and never how they are wired. This is the one
+unauthenticated endpoint in the API, and the login page only needs to know which
+buttons to draw; returning the issuer, the client id or the configured groups
+would let anyone who can reach the console enumerate its identity provider.
+
+`oidcEnabled` is true only when `AUTH_ENABLED`, `OIDC_ENABLED`, `OIDC_ISSUER` and
+`OIDC_CLIENT_ID` are all set. A half-configured deployment shows no SSO button,
+because a button that leads to an error reads as a broken console rather than an
+unconfigured one.
+
+### 12.2 `POST /api/auth/login`
 
 Body `{ "username":"erens", "password":"...", "source":"auto|local|ldap" }`.
 Success sets the session cookie and returns `{enabled, authenticated, user,
 csrfToken, expiresAt}`. Every credential rejection is `401 invalid_credentials`;
 the response never reveals whether the username exists. An unavailable directory
-is `502 identity_provider_unavailable`, not invalid credentials.
+is `502 identity_provider_unavailable`, not invalid credentials. An exhausted
+sign-in budget is `429 too_many_attempts` (§12.5), which the UI must render
+differently — telling somebody to check their password while the console is
+refusing to look at it is how a lockout becomes a support ticket.
 
-### `GET /api/auth/me` / `POST /api/auth/logout`
+**Every terminal state is recorded in §10** as a `console` record: `applied`,
+`denied`, or `failed` when the identity provider could not answer. The response
+still reveals nothing about whether the username exists; the trail does, because
+it is read by the operator rather than by the caller, and a run of attempts
+against names that do not exist is the shape of an enumeration sweep.
+
+### 12.3 `GET /api/auth/me` / `POST /api/auth/logout`
 
 `me` returns the current session body and CSRF token. `logout` revokes the
-server-side session and clears the cookie.
+server-side session and clears the cookie. A logout carrying no session revokes
+nothing and records nothing — a sign-out row for somebody who was never signed in
+is noise in the one table that must not have any.
 
-### `/api/auth/users`
+### 12.4 Single sign-on (OpenID Connect)
+
+One issuer per deployment, configured from the environment exactly as LDAP is
+(`OIDC_*`, see the README). Multiple concurrent issuers is a real design change —
+a table, a CRUD surface, per-row encrypted secrets and a subject-collision story
+across issuers — not a config key, and the console says it does not do that
+rather than half-doing it.
+
+#### `GET /api/auth/oidc/start?next=<path>`
+
+302 to the issuer's authorization endpoint: Authorization Code flow with PKCE
+S256, carrying `state` and `nonce`. Those four values plus the exact
+`redirect_uri` are sealed into a short-lived cookie.
+
+`next` must be a same-origin path. An absolute URL, a scheme-relative
+`//host`, or anything containing a backslash becomes `/`. A login link carrying
+`?next=https://evil.example` would otherwise produce a page on this console's
+domain that authenticates the operator and hands them to somebody else's site.
+
+The handshake cookie is `SameSite=Lax`, **not** `Strict` like the session cookie.
+The callback is a top-level navigation from the issuer's origin, and browsers do
+not send a `Strict` cookie on a cross-site navigation — a `Strict` handshake
+cookie is simply absent when the callback runs, and every sign-in fails.
+
+#### `GET /api/auth/oidc/callback`
+
+Verifies the ID token completely before reading a single claim from it:
+signature against the issuer's JWKS, an **algorithm allowlist** (asymmetric only
+— never the token's own `alg`), `iss`, `aud`, `exp`/`iat` as required claims, and
+the `nonce` against this browser's handshake. Then the PKCE verifier is presented
+on the code exchange.
+
+Each of those has a specific attack behind it: a token minted by the same issuer
+for a different client is valid and correctly signed, so without an audience check
+anyone holding one can sign in here; `alg: none` and HS256-with-the-public-key
+both work against a verifier that trusts the token's header; and without a nonce
+an assertion captured from any other sign-in can be replayed.
+
+Success sets the session cookie and 302s to `next`. Failure 302s to `next`
+carrying `?auth_error=<§1.3 code>&auth_reason=<slug>`. It cannot answer with a
+§1.3 envelope — the caller is a browser navigation, not `fetch()` — so the code
+is drawn from the same §1.3 vocabulary rather than inventing a second one. The
+login page words the slug; an unrecognised slug is rendered verbatim rather than
+replaced with something generic.
+
+**Nothing is written to the audit trail before the handshake is verified**, and
+this route is public, so that rule is load-bearing rather than tidy. Every path
+reachable before the sealed cookie is checked is reachable by anyone who can
+reach the console, and an audit write on one of them is an unauthenticated
+INSERT into the one table in this schema with no upper bound on rows — a loop
+over `?error=` would fill the operator's database, on a deployment that may never
+have enabled SSO at all. A callback matching no handshake this console started
+is also not a failed sign-in, and recording it as one puts rows in the trail that
+no operator's action produced.
+
+Once the handshake *is* ours, every failure is recorded: a provider refusal, a
+state mismatch, a rejected assertion, a refused account.
+
+#### Account binding
+
+A federated identity is bound to the provider's `sub` claim, stored as
+`users.external_id`. Two refusals, both `permission_denied`, both refusals rather
+than merges:
+
+* **A username already owned by another auth source.** If `alice` is a local
+  account with a password, an SSO assertion naming `alice` must not adopt it —
+  otherwise anyone who can make an issuer assert a username inherits whatever
+  that username already had.
+* **A username already bound to a different subject.** The subject is the
+  provider's stable identity; the username is a label it can reuse. A mismatch is
+  either a recycled name or a second issuer asserting the same one.
+
+A row with a null `external_id` predates the binding and is adopted once, so an
+existing deployment can turn SSO on without every account being refused.
+Rebinding afterwards is deliberately not a login-time action. A federated
+account's stored password is cleared on adoption — a provider-managed account
+that kept a usable password hash would be a second way in that nobody is
+watching.
+
+#### Group mapping, and the two opposite rules
+
+`OIDC_ADMIN_GROUP` maps its members to `admin`; every other resolved membership
+maps to `user`. `OIDC_ALLOWED_GROUPS`, when set, restricts who may sign in at all.
+
+The groups claim can be **absent** rather than empty, and the two are not the
+same fact. Most issuers omit it entirely unless the scope was requested *and* the
+client is configured to emit it, so absent is the common state during setup.
+
+* **Role mapping fails open**: an absent claim leaves the account's stored role
+  unchanged. Writing the default there would demote an administrator every time
+  the issuer forgot the claim, and the next good login would silently restore
+  them — an intermittent loss of administrators with nothing connecting it to the
+  issuer.
+* **The allowlist fails closed**: an absent claim refuses the sign-in. Role
+  mapping asks "should this person be promoted", where the safe answer under
+  uncertainty is to change nothing; an allowlist asks "may this person in at
+  all", where the safe answer is no. An allowlist that admitted everyone whenever
+  the claim went missing would stop working exactly when the issuer is
+  misconfigured.
+
+The same tri-state governs LDAP: `memberOf` absent from an entry leaves the
+stored role alone.
+
+### 12.5 Sign-in rate limiting
+
+`AUTH_THROTTLE_MAX_ATTEMPTS` failed sign-ins per username per
+`AUTH_THROTTLE_WINDOW_SECONDS` (default 10 per 5 minutes). Exceeding it is
+`429 too_many_attempts` with `context.retryAfterSeconds`. `0` disables it, which
+leaves `POST /api/auth/login` an unmetered password oracle.
+
+Counted from the §10 trail rather than from process memory, so the limit is a
+property of the console rather than of the pod that answered: a per-process
+counter resets on every restart and gives a three-replica deployment three times
+the budget.
+
+Checked **before** the password is verified, so a refused request costs one
+indexed `COUNT` rather than a 310,000-round PBKDF2 verification — otherwise the
+throttle still lets an attacker consume the console's CPU at the rate they can
+send requests.
+
+Keyed on the submitted username alone, not username plus source address. Adding
+the address makes the limit trivially evadable from a botnet while doing nothing
+about the case that matters. The cost is that one user can lock out their own
+sign-ins for the window, which is recoverable by waiting.
+
+**When the count cannot be taken, the sign-in proceeds.** A database failure that
+started refusing every sign-in would lock every operator out of the console
+during exactly the kind of incident when they need it, and the password check
+still stands behind the throttle. The log names the consequence — "brute-force
+protection is not in effect" — rather than a generic query error.
+
+### 12.6 `/api/auth/users`
 
 Administrator-only. `GET` returns the standard list envelope; `POST` creates a
 local user; `PUT /{id}` updates profile, role, state, or a local password;
 `DELETE /{id}` deactivates the account and revokes all sessions. Password hashes
 never appear in responses. The current user and final active administrator
-cannot be deactivated. LDAP passwords and roles are directory-managed and are
-refreshed after a successful search-and-bind login. The `admin` role gates this
+cannot be deactivated. LDAP and OIDC passwords and roles are provider-managed and
+are refreshed at login **when the provider reports group membership** — when it
+does not, the stored role is left alone rather than reset (§12.4). The `admin` role gates this
 user-administration surface; both `admin` and `user` identities retain the
 console's normal cluster capabilities, still constrained by preflight and the
 deployment-wide mutation gate.

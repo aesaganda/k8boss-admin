@@ -76,9 +76,14 @@ def db_engine(monkeypatch):
     monkeypatch.setattr(database, "SessionLocal", session_factory)
 
     Base.metadata.create_all(bind=engine)
+    # The same two listeners production installs, installed the same way. A test
+    # database without them would let a test pass while asserting a property the
+    # deployed app does not have — which is the only thing worse than no test.
+    from app.audit.integrity import install_audit_chain
     from app.models import install_audit_append_only_guard
 
     install_audit_append_only_guard()
+    install_audit_chain()
 
     try:
         yield engine

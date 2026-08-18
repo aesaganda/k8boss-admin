@@ -94,6 +94,53 @@ in `LDAP_ADMIN_GROUP_DN` maps to the console `admin` role; all other directory
 users map to `user`. LDAP passwords are never stored. Local accounts with the
 same normalized username always take precedence and cannot be taken over by LDAP.
 
+Role mapping applies only when the directory actually returns the membership
+attribute. When it does not — an ACL that hides `memberOf` from the search
+account, a disabled referral chase, a truncated entry — the account keeps the
+role it already had. Writing the default there would demote a directory
+administrator on any login where the attribute did not come back, and the next
+good login would silently restore them.
+
+### Enable single sign-on
+
+Register the console as an OpenID Connect client at your issuer, with the
+redirect URI `https://<your-console-host>/api/auth/oidc/callback`, then:
+
+```bash
+AUTH_ENABLED=true
+OIDC_ENABLED=true
+OIDC_ISSUER=https://sso.example.com/realms/platform
+OIDC_CLIENT_ID=k8boss-admin
+OIDC_CLIENT_SECRET=replace-with-the-registered-client-secret   # omit for a public client
+OIDC_REDIRECT_URL=https://console.example.com/api/auth/oidc/callback
+OIDC_SCOPES=openid profile email groups
+OIDC_ADMIN_GROUP=k8boss-admins
+AUTH_COOKIE_SECURE=true
+```
+
+The flow is Authorization Code with PKCE (S256). The ID token is verified against
+the issuer's published keys before a single claim in it is read: signature,
+issuer, audience, expiry, and a nonce bound to that browser's own sign-in
+attempt.
+
+Two things are worth getting right at setup time:
+
+* **Ask for the groups claim explicitly.** Most issuers omit it unless the scope
+  was requested *and* the client is configured to emit it. Without it the console
+  cannot map roles, and it deliberately leaves existing roles alone rather than
+  demoting everyone (same rule as LDAP, above).
+* **Set `OIDC_REDIRECT_URL` unless you are behind exactly one ingress that
+  forwards `Host` faithfully.** OAuth requires the redirect URI on the token
+  exchange to be byte-identical to the one on the authorization request, and a
+  rewritten host produces an `invalid_grant` that reads like a credential
+  problem.
+
+An SSO identity is bound to the issuer's `sub` claim on first login. It cannot
+take over a local account with the same username, and a different `sub`
+presenting an already-bound username is refused rather than merged — otherwise
+anyone who can make an issuer assert a username inherits whatever that username
+already had.
+
 ### Register a cluster
 
 Registration is an API server endpoint plus a bearer token. Create a
@@ -242,7 +289,10 @@ version being that there is no undo for a deleted StatefulSet.
 
 * Multiple clusters, tokens encrypted at rest, per-cluster connection testing
   with a permission report.
-* An append-only audit trail with a queryable API.
+* An append-only, hash-chained audit trail with a queryable API, an integrity
+  check (`GET /api/audit/verify`) and an export (`GET /api/audit/export`, NDJSON
+  or CSV). It records console sign-ins and sign-outs alongside cluster writes,
+  including the ones that were refused.
 * Read-only mode as the default posture, reported on `/api/health` so the UI
   disables write affordances rather than offering them and failing.
 
@@ -319,7 +369,7 @@ means read-only.
 |---|---|---|
 | `ADMIN_ALLOW_MUTATIONS` | `false` | **The write gate.** False makes every write return `403 mutations_disabled` before the cluster is touched, and `/api/health` report `mutations: disabled` so the UI disables the buttons. Dry-run stays available: previewing is a read |
 | `SECRET_REVEAL_ENABLED` | `false` | Lets the single-object Secret read return values when asked with `?reveal=true`. Separate gate, separate blast radius; every reveal is audited either way |
-| `AUTH_ENABLED` | `false` | Requires a managed local or LDAP session for every API and WebSocket request except health and login |
+| `AUTH_ENABLED` | `false` | Requires a managed local, LDAP or single sign-on session for every API and WebSocket request except health, login and the two OIDC handshake routes |
 | `AUTH_SESSION_TTL_HOURS` | `12` | Lifetime of the revocable HttpOnly session cookie, from 1 to 168 hours |
 | `AUTH_COOKIE_NAME` | `k8boss_admin_session` | Session cookie name |
 | `AUTH_COOKIE_SECURE` | `false` | Adds the cookie `Secure` flag. Set true for every HTTPS deployment |
@@ -330,8 +380,24 @@ means read-only.
 | `LDAP_BIND_DN` / `LDAP_BIND_PASSWORD` | *(empty)* | Search identity; empty uses an anonymous search bind |
 | `LDAP_USER_SEARCH_BASE` / `LDAP_USER_SEARCH_FILTER` | *(empty)* / `(uid={username})` | User search scope and escaped filter template |
 | `LDAP_USERNAME_ATTRIBUTE` / `LDAP_DISPLAY_NAME_ATTRIBUTE` / `LDAP_EMAIL_ATTRIBUTE` | `uid` / `cn` / `mail` | Profile attributes synchronized at login |
-| `LDAP_ADMIN_GROUP_DN` | *(empty)* | Exact `memberOf` DN whose members become console administrators |
+| `LDAP_ADMIN_GROUP_DN` | *(empty)* | Exact `memberOf` DN whose members become console administrators. Applied only when the directory actually returns `memberOf`: an absent attribute means "we could not look", not "in no groups", and the stored role is left alone rather than reset |
 | `LDAP_CONNECT_TIMEOUT_SECONDS` | `5` | LDAP connect and response deadline |
+| `AUTH_THROTTLE_MAX_ATTEMPTS` | `10` | Failed sign-ins allowed per username per window before `429 too_many_attempts`. Counted from the audit trail, so the limit holds across replicas and survives a restart. `0` disables it, leaving `POST /api/auth/login` an unmetered password oracle |
+| `AUTH_THROTTLE_WINDOW_SECONDS` | `300` | Length of that window |
+| `OIDC_ENABLED` | `false` | Offers OpenID Connect single sign-on. Needs `AUTH_ENABLED`, plus an issuer and a client id — without all three the login page shows no SSO button, because a button that cannot work reads as a broken console |
+| `OIDC_ISSUER` | *(empty)* | Issuer URL. Its `/.well-known/openid-configuration` supplies every endpoint, so the flow cannot be half-configured across two deployments of the same provider |
+| `OIDC_CLIENT_ID` | *(empty)* | Client id registered at the issuer. Also the expected `aud` — a token minted for a *different* client of the same issuer is valid and correctly signed, and without this check anyone holding one could sign in here |
+| `OIDC_CLIENT_SECRET` | *(empty)* | Optional. Omit for a public client, where PKCE alone protects the code exchange |
+| `OIDC_SCOPES` | `openid profile email` | Add the provider's groups scope here if `OIDC_ADMIN_GROUP` or `OIDC_ALLOWED_GROUPS` is used — most issuers omit the groups claim entirely unless it was asked for |
+| `OIDC_REDIRECT_URL` | *(empty)* | The absolute callback URL registered at the issuer. Empty derives it from the forwarded host, which is right behind one well-configured ingress and wrong behind anything that rewrites `Host` |
+| `OIDC_USERNAME_CLAIM` / `OIDC_EMAIL_CLAIM` / `OIDC_DISPLAY_NAME_CLAIM` | `preferred_username` / `email` / `name` | Claims mapped onto the console identity |
+| `OIDC_GROUPS_CLAIM` | `groups` | Claim carrying group membership. Absent from a token means "not reported", which leaves an existing role alone; an empty list means "in no groups", which applies the default |
+| `OIDC_ADMIN_GROUP` | *(empty)* | Members get the `admin` role. Empty means every SSO account is a `user` and administrators are managed locally |
+| `OIDC_ALLOWED_GROUPS` | *(empty)* | Comma-separated groups permitted to use the console at all. Empty admits any account the issuer authenticates. When it *is* set and the token carries no groups claim, sign-in is **refused** — an allowlist that admitted everyone whenever the claim went missing would stop working exactly when the issuer is misconfigured |
+| `OIDC_VERIFY_TLS` / `OIDC_CA_CERTIFICATE_FILE` | `true` / *(empty)* | Verify the issuer's certificate, optionally against a private CA. Disabling it means the signed assertions this console carefully validates arrived over a channel anyone on the path controls |
+| `OIDC_TIMEOUT_SECONDS` | `10` | Deadline for discovery, JWKS and token-endpoint calls |
+| `OIDC_CLOCK_SKEW_SECONDS` | `60` | Leeway on `exp`/`iat`. Without any, a console thirty seconds behind its issuer rejects every freshly minted token and the symptom reads as a broken identity provider |
+| `OIDC_BUTTON_LABEL` | `Single sign-on` | Text on the login page's SSO button |
 | `DATABASE_URL` | `sqlite:///./k8boss_admin.db` | SQLAlchemy URL. SQLite for dev, PostgreSQL in cluster. Holds the console's own state only |
 | `ENCRYPTION_KEY` | *(empty)* | Secret used to derive the Fernet key protecting stored cluster tokens. Empty means a key is generated **once** and persisted beside the database. Never let this be regenerated per boot: every stored token becomes undecryptable and the symptom is every cluster failing to connect after an unrelated restart |
 | `ENCRYPTION_KEY_FILE` | *(empty)* | Override for that generated key's path. Empty means "next to the SQLite database", or `./k8boss_admin.key` when the database is not SQLite |
@@ -437,7 +503,8 @@ Before enabling the optional Ingress, either enable local/LDAP auth with the
 | Document | Subject |
 |---|---|
 | [`docs/api-contract.md`](docs/api-contract.md) | **Normative.** Paths, shapes, error codes, envelopes, the five rules |
-| [`docs/safety-model.md`](docs/safety-model.md) | Preflight, dry-run, diff, concurrency, drain, audit, read-only — and the failure each prevents |
+| [`docs/safety-model.md`](docs/safety-model.md) | Preflight, dry-run, diff, concurrency, drain, audit, tamper evidence, read-only — and the failure each prevents |
+| [`docs/adr-0003-audit-hash-chain.md`](docs/adr-0003-audit-hash-chain.md) | Why the audit trail is hash-chained, and why records written before the chain are never back-filled |
 | [`docs/architecture.md`](docs/architecture.md) | System shape, request lifecycle, module map, why the mutation funnel is one function |
 | [`docs/rbac.md`](docs/rbac.md) | Every permission, by feature, with its degradation |
 | [`docs/adr-0001-dry-run-first.md`](docs/adr-0001-dry-run-first.md) | Why dry-run-then-confirm rather than optimistic-with-undo |
