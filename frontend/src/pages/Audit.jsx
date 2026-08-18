@@ -39,6 +39,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { audit as auditApi, getActiveClusterId } from '../api/client';
+import { PageHeader } from '../components/ui';
 import { useCluster } from '../contexts/ClusterContext';
 import { formatTimestamp } from '../utils/format';
 
