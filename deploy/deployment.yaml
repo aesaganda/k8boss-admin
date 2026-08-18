@@ -1,0 +1,257 @@
+# The two Deployments and the volume that holds the console's own state.
+#
+# Backend and frontend are separate Deployments rather than two containers in one
+# pod: the frontend is a stateless nginx that scales freely, and the backend is
+# pinned to one replica by the SQLite database below. Coupling them would drag
+# the frontend down to one replica for no reason.
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: k8boss-admin-data
+  namespace: k8boss-admin
+  labels:
+    app.kubernetes.io/name: k8boss-admin
+spec:
+  accessModes:
+    # ReadWriteOnce, which is what forces replicas: 1 on the backend below.
+    # Both the SQLite database and the Fernet key that encrypts stored cluster
+    # tokens live on this volume, together on purpose: a snapshot that captures
+    # one captures the other. A backup with the database and not the key restores
+    # to a console whose every registered credential is undecryptable.
+    - ReadWriteOnce
+  resources:
+    requests:
+      # The console caches no cluster contents — every resource the UI shows is
+      # read live — so this holds registrations plus the audit trail and grows
+      # only with write activity. 1Gi is years of it. Raise it if you keep audit
+      # history for a long retention period.
+      storage: 1Gi
+  # storageClassName: ""   # set to pin a class; omitted uses the cluster default
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: k8boss-admin-backend
+  namespace: k8boss-admin
+  labels:
+    app.kubernetes.io/name: k8boss-admin
+    app.kubernetes.io/component: backend
+spec:
+  # ONE. Not a placeholder to raise later: the backend writes a SQLite file on a
+  # ReadWriteOnce volume, and a second replica either cannot mount it or corrupts
+  # it. Moving to PostgreSQL (set DATABASE_URL) is what unlocks more than one.
+  replicas: 1
+  strategy:
+    # Recreate, not RollingUpdate. A rolling update would start the new pod while
+    # the old one still holds the volume, and the new one blocks on a mount that
+    # cannot be granted — a deploy that hangs rather than one that restarts.
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: k8boss-admin
+      app.kubernetes.io/component: backend
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: k8boss-admin
+        app.kubernetes.io/component: backend
+    spec:
+      serviceAccountName: k8boss-admin
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001          # so the mounted PVC is writable by that uid
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: backend
+          image: ghcr.io/aesaganda/k8boss-admin-backend:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8020
+          env:
+            # ── The write gate (§1.6) ───────────────────────────────────────
+            # false, and it stays false until someone edits this line. With it
+            # false every write returns 403 mutations_disabled BEFORE the cluster
+            # is touched, and GET /api/health reports mutations=disabled so the
+            # UI disables the buttons rather than offering them and failing.
+            # Dry-run remains available: previewing a change is a read.
+            #
+            # This is one of TWO gates. The other is the ClusterRoleBinding in
+            # rbac.yaml, which is commented out for the same reason. Setting this
+            # to true without that binding gives a console that tries and gets a
+            # 403 naming the missing grant — diagnosable, and safe.
+            - name: ADMIN_ALLOW_MUTATIONS
+              value: "false"
+            # Separate gate for a separate blast radius: revealing a Secret's
+            # values is a privileged READ, audited whichever way this is set.
+            - name: SECRET_REVEAL_ENABLED
+              value: "false"
+
+            # ── State ───────────────────────────────────────────────────────
+            - name: DATABASE_URL
+              value: sqlite:////app/data/k8boss_admin.db
+            # Optional. Empty means the backend generates a key once and persists
+            # it beside the database on the PVC above. Provide it explicitly —
+            # through this Secret — if you want the database to be restorable
+            # somewhere the key file is not. optional: true so a cluster without
+            # the Secret starts rather than crash-looping on a missing key.
+            - name: ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: k8boss-admin-encryption
+                  key: encryption-key
+                  optional: true
+
+            # ── Kubernetes access ───────────────────────────────────────────
+            # Administer the cluster this console runs in, using the pod's own
+            # ServiceAccount, without registering it first. This is what the
+            # ClusterRoles in rbac.yaml are for. Additional clusters are
+            # registered through the UI with their own endpoint and token.
+            - name: IN_CLUSTER_MODE
+              value: "true"
+            # Deadlines. Without them a black-holed API server connection pins a
+            # threadpool worker forever while the liveness probe below — which
+            # touches no cluster — keeps answering healthy, so nothing restarts
+            # the pod that has stopped serving.
+            - name: K8S_CONNECT_TIMEOUT_SECONDS
+              value: "5"
+            - name: K8S_READ_TIMEOUT_SECONDS
+              value: "30"
+            - name: K8S_WATCH_READ_TIMEOUT_SECONDS
+              value: "600"
+
+            # ── HTTP ────────────────────────────────────────────────────────
+            # The browser talks to nginx, which proxies same-origin, so CORS only
+            # matters for a split-origin deployment. Set to the console's public
+            # origin if you serve the API on a different host from the SPA.
+            - name: CORS_ORIGINS
+              value: http://localhost:8021
+            - name: LOG_LEVEL
+              value: INFO
+          # Both probes hit /api/health, which reports on the CONSOLE and never
+          # on the clusters it administers: an unreachable customer cluster lands
+          # in `degraded[]` and leaves the status 200. A probe that touched a
+          # cluster would restart this pod because someone else's API server went
+          # down.
+          readinessProbe:
+            httpGet: { path: /api/health, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /api/health, port: http }
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            # Three misses before a restart: the endpoint opens a database
+            # session, and one slow disk moment should not recycle a pod that is
+            # mid-write to the audit trail.
+            failureThreshold: 3
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            # Memory is the one that matters: a listing of 5000 pods across a
+            # large cluster is deserialised in full before it is trimmed.
+            limits: { cpu: "2", memory: 1Gi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+            # readOnlyRootFilesystem: true needs this. A registered cluster with
+            # a CA certificate makes the client write that PEM to a temp file —
+            # the Kubernetes client library takes a path, not bytes. Without a
+            # writable /tmp, every cluster registered with a CA fails to connect
+            # and the error is an OSError from deep inside the transport.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: k8boss-admin-data
+        - name: tmp
+          emptyDir: {}
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: k8boss-admin-frontend
+  namespace: k8boss-admin
+  labels:
+    app.kubernetes.io/name: k8boss-admin
+    app.kubernetes.io/component: frontend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: k8boss-admin
+      app.kubernetes.io/component: frontend
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: k8boss-admin
+        app.kubernetes.io/component: frontend
+    spec:
+      # No ServiceAccount token: nginx serves files and proxies HTTP. It has no
+      # business holding a credential for the cluster it happens to run in.
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: frontend
+          image: ghcr.io/aesaganda/k8boss-admin-frontend:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8021
+          env:
+            # Rendered into the nginx config at container start. This is what
+            # makes one image work in compose and in Kubernetes: the /api and
+            # /api/ws locations proxy here.
+            - name: BACKEND_URL
+              value: http://k8boss-admin-backend.k8boss-admin.svc.cluster.local:8020
+          readinessProbe:
+            httpGet: { path: /, port: http }
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /, port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          resources:
+            requests: { cpu: 25m, memory: 64Mi }
+            limits: { cpu: 500m, memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            # All three are required by readOnlyRootFilesystem, and all three are
+            # written by the stock nginx image's own entrypoint rather than by
+            # anything this project wrote: conf.d is where the config template is
+            # rendered with BACKEND_URL substituted, cache and run are nginx's
+            # working directories. Omitting any one produces a container that
+            # exits immediately with a permission error from a script nobody in
+            # this repository has read.
+            - name: nginx-conf
+              mountPath: /etc/nginx/conf.d
+            - name: nginx-cache
+              mountPath: /var/cache/nginx
+            - name: nginx-run
+              mountPath: /var/run
+      volumes:
+        - name: nginx-conf
+          emptyDir: {}
+        - name: nginx-cache
+          emptyDir: {}
+        - name: nginx-run
+          emptyDir: {}

@@ -1,0 +1,351 @@
+# k8boss-admin RBAC.
+#
+# Two ClusterRoles, and the split is the point of this file:
+#
+#   k8boss-admin-reader   Everything the console needs to SHOW a cluster —
+#                         sufficient for every GET in docs/api-contract.md.
+#   k8boss-admin-writer   Only the write verbs, added on top.
+#
+# so that a console can be installed read-only and mutation opted into
+# deliberately, by a person who had to edit a file to do it.
+#
+# WHAT IS LIVE IN THIS FILE, exactly — because a comment that misdescribes its
+# own YAML sends operators hunting for a binding that was never there:
+#
+#   APPLIED   ServiceAccount k8boss-admin
+#   APPLIED   ClusterRole k8boss-admin-reader
+#   APPLIED   ClusterRoleBinding k8boss-admin-reader
+#   APPLIED   ClusterRole k8boss-admin-writer   (a role grants nothing until it
+#                                                is bound; defining it is safe)
+#   COMMENTED ClusterRoleBinding k8boss-admin-writer  — the last document below.
+#
+# So `kubectl apply -f rbac.yaml` unmodified produces a console that can read
+# every cluster it is registered against and write to none of them.
+#
+# THERE ARE TWO GATES AND BOTH MUST BE OPENED for a write to reach a cluster:
+#
+#   1. this binding, which decides what the API server will allow, and
+#   2. ADMIN_ALLOW_MUTATIONS in deployment.yaml, which decides whether the
+#      console will even try (§1.6 — false makes writes return 403
+#      mutations_disabled before the cluster is touched).
+#
+# Opening one alone is not a half-configured system, it is a working one: bound
+# but with mutations disabled, the console preflights and dry-runs and refuses to
+# confirm; unbound but with mutations enabled, every confirm returns a 403 that
+# names the exact missing grant. Both are diagnosable. What is NOT diagnosable is
+# a console that writes because a default did it quietly.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: k8boss-admin
+  namespace: k8boss-admin
+  labels:
+    app.kubernetes.io/name: k8boss-admin
+
+---
+# ═══════════════════════════════════════════════════════════════════════════
+# READ-ONLY — sufficient for every GET in the contract.
+#
+# Every rule below is annotated with the contract section it serves and with
+# what breaks without it. "Breaks" is rarely a 500: the console's rule is that a
+# read it could not perform lands in `unavailable[]` with `reason: forbidden`
+# and `partial: true`, so a missing grant here produces a page that says which
+# question it failed to answer — not a page with a shorter list.
+# ═══════════════════════════════════════════════════════════════════════════
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: k8boss-admin-reader
+  labels:
+    app.kubernetes.io/name: k8boss-admin
+    k8boss-admin.io/role: reader
+rules:
+  # §9 Access preflight. A `create` verb inside a read-only role, and that is
+  # correct: a SelfSubjectAccessReview creates nothing. It asks the API server
+  # "may this identity do X", which is how §0.2 preflights every mutation and how
+  # §11.4 decides which buttons to disable AND WHY rather than hiding them.
+  #
+  # This is the one rule whose absence degrades the console globally: with no
+  # review endpoint, every preflight returns allowed=false with a non-null
+  # evaluationError, which the UI must render as "we could not determine whether
+  # you may" — never as a denial. Withholding it does not make the console safer,
+  # it makes it uninformative. Kubernetes binds this to system:basic-user for
+  # every authenticated identity anyway; it is spelled out here so a cluster with
+  # that binding removed still works.
+  - apiGroups: ["authorization.k8s.io"]
+    resources: ["selfsubjectaccessreviews"]
+    verbs: ["create"]
+
+  # §4 catalog — API discovery. These are non-resource URLs, not resources.
+  # /version backs the server_version field of §2 health and §3 overview;
+  # /api, /apis and their children are how app/resources/catalog.py enumerates
+  # what this cluster serves. Without them the resource browser has nothing to
+  # browse and every typed page's resolve() fails before it reaches a resource.
+  - nonResourceURLs: ["/api", "/api/*", "/apis", "/apis/*", "/version", "/openapi/*"]
+    verbs: ["get"]
+
+  # §5 nodes, §3 overview capacity. Also the source of `requested` and
+  # `pod_count` per node — both of which become null, never 0, when the pod
+  # listing below fails, because a node reading "0 pods, 0 cores requested" is
+  # the one an operator picks to drain.
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+
+  # §5 namespaces — the list every other page's filter is built from.
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch"]
+
+  # §6 pods and §7 logs. `pods/log` is a separate RBAC resource from `pods`:
+  # granting the first without the second gives a console that lists pods and
+  # cannot show a single line of output, which is the state most operators
+  # actually notice first.
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch"]
+
+  # §5 events. The events page scans a bounded window and sorts it itself,
+  # because the API server offers no server-side ordering.
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+
+  # §8 Services and their backing endpoints. Both spellings: `endpoints` backs
+  # the Network page's endpoint listing, `endpointslices` (below) backs the
+  # `endpoint_count` column. Without the slices that column is null with an
+  # `unavailable` entry — deliberately not 0, which would claim a Service backs
+  # nothing.
+  - apiGroups: [""]
+    resources: ["services", "endpoints"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
+
+  # §8 config, storage and access rows.
+  - apiGroups: [""]
+    resources: ["configmaps", "serviceaccounts", "persistentvolumeclaims", "persistentvolumes", "resourcequotas", "limitranges"]
+    verbs: ["get", "list", "watch"]
+
+  # §8 Secrets. THE MOST PRIVILEGED RULE IN THIS FILE — read it before applying.
+  #
+  # `list secrets` cluster-wide means the console's ServiceAccount can read the
+  # value of every Secret in the cluster. The console itself never puts a value
+  # in a list response (secret_row reads key names and byte lengths only, and the
+  # single-object read redacts unless SECRET_REVEAL_ENABLED is on, a preflight
+  # passes and an audit record is written) — but RBAC grants the API access, not
+  # the console's discipline about it. Anyone who can exec into the console's pod
+  # holds this grant directly.
+  #
+  # DELETE THIS RULE if you do not want that. What degrades: the Config page's
+  # Secrets tab renders one `unavailable` entry saying `forbidden` on
+  # `core/secrets` instead of a table. Nothing else on the console changes, and
+  # nothing reports a cluster with no Secrets in it.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch"]
+
+  # §6 workloads. `controllerrevisions` is not optional for §6's rollout
+  # history: a StatefulSet's and a DaemonSet's revisions ARE ControllerRevisions,
+  # and without this the rollout panel for those two kinds reports that it could
+  # not read history — which the UI must not render as "this workload has never
+  # been rolled out".
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets", "replicasets", "controllerrevisions"]
+    verbs: ["get", "list", "watch"]
+
+  # §6 workloads, batch kinds. Jobs and CronJobs carry the `suspended`,
+  # `schedule` and `last_schedule` fields that are null on every other kind.
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch"]
+
+  # §8 Ingresses. `ingressclasses` fills the `class` column for an Ingress whose
+  # spec names none; without it the column is blank rather than wrong.
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses", "ingressclasses", "networkpolicies"]
+    verbs: ["get", "list", "watch"]
+
+  # §8 storage classes — `is_default` is read from the annotation on the class,
+  # so the Storage page cannot mark a default without this.
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses", "volumeattachments", "csidrivers"]
+    verbs: ["get", "list", "watch"]
+
+  # §8 access rows. Reading RBAC is not the same privilege as holding it, but it
+  # is a map of the cluster's permissions; drop this pair if the Access page is
+  # not wanted and it degrades to a `forbidden` entry like any other.
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings", "clusterroles", "clusterrolebindings"]
+    verbs: ["get", "list", "watch"]
+
+  # §5 drain planning, read half. The drain planner reads PodDisruptionBudgets to
+  # classify each pod as evict / skip / blocked BEFORE anything is executed.
+  # Without it the plan cannot tell whether a PDB blocks an eviction and says so
+  # in the plan — it does not guess, and it does not report "nothing blocks
+  # this". Reading it here (rather than in the writer role) means an operator can
+  # preview a drain plan on a read-only install.
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list", "watch"]
+
+  # §4 generic browse. The resource browser reaches anything the cluster serves,
+  # including CRDs the console has never heard of, so it needs to enumerate the
+  # CRDs themselves. Reading the definitions is not reading the custom objects:
+  # a CRD this role does not name is listed in the catalog and returns
+  # `forbidden` when browsed, which is the honest answer.
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apiregistration.k8s.io"]
+    resources: ["apiservices"]
+    verbs: ["get", "list", "watch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: k8boss-admin-reader
+  labels:
+    app.kubernetes.io/name: k8boss-admin
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: k8boss-admin-reader
+subjects:
+  - kind: ServiceAccount
+    name: k8boss-admin
+    namespace: k8boss-admin
+
+---
+# ═══════════════════════════════════════════════════════════════════════════
+# WRITE — the verbs that change a cluster. Additive: this role holds no read
+# rules, so it is useless on its own and must be bound alongside the reader.
+#
+# Every verb here is reachable only through app/admin/mutate.py, which gates on
+# ADMIN_ALLOW_MUTATIONS, preflights the exact target, dry-runs, diffs and audits
+# — in that order, in one function. This role decides what that funnel is
+# permitted to do once it gets there.
+#
+# NOTE ON DRY-RUN: `dryRun=All` is not a lesser permission. The API server
+# requires the same verb to project a write as to perform one, which is why
+# every write verb below is needed even for a console that only ever previews.
+# ═══════════════════════════════════════════════════════════════════════════
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: k8boss-admin-writer
+  labels:
+    app.kubernetes.io/name: k8boss-admin
+    k8boss-admin.io/role: writer
+rules:
+  # §6 scale. `deployments/scale` is a separate RBAC resource from `deployments`,
+  # which is the whole reason the console patches the subresource: a
+  # ServiceAccount can be allowed to resize a workload without being allowed to
+  # edit it. Grant this pair alone for a resize-only console.
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale", "statefulsets/scale", "replicasets/scale"]
+    verbs: ["get", "patch", "update"]
+
+  # §6 restart, suspend, rollback and the §4 YAML editor over workload kinds.
+  # `patch` covers restart (a timestamp annotation on the pod template, the same
+  # mechanism as `kubectl rollout restart`) and rollback (an RFC 6902 replace of
+  # /spec/template). `update` covers the editor's PUT, `create` its POST,
+  # `delete` its delete.
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
+    verbs: ["create", "update", "patch", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["create", "update", "patch", "delete"]
+
+  # §5 cordon and drain, node half. `patch nodes` sets spec.unschedulable. Note
+  # this grants cordon of ANY node, including control-plane nodes.
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["patch", "update"]
+
+  # §5 drain, pod half. `pods/eviction` is the API that respects
+  # PodDisruptionBudgets; the console never deletes a pod to drain a node,
+  # because delete ignores PDBs and would make the console a bigger hammer than
+  # `kubectl drain`. `delete pods` is here for the resource browser's own delete
+  # button, which is a different action with a different confirm dialog.
+  - apiGroups: [""]
+    resources: ["pods/eviction"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["delete"]
+
+  # §7 exec — a shell inside a running container. The most dangerous grant in
+  # this file after the wildcard below: it bypasses every other control here,
+  # because a shell in a pod can do whatever that pod's own ServiceAccount can.
+  # The console additionally requires ADMIN_ALLOW_MUTATIONS for exec (it is a
+  # write in every sense that matters) and audits the session on open and close.
+  # Remove this rule for a console that can read logs but not type into a
+  # container; the terminal button then disables itself with the reason.
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+
+  # §4/§8 config, storage and networking writes — the YAML editor and the delete
+  # button on those pages. `secrets` is included because the editor offers the
+  # same operations on every §8 row; drop it to keep Secret writing out of the
+  # console while leaving the rest editable.
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets", "services", "serviceaccounts", "persistentvolumeclaims"]
+    verbs: ["create", "update", "patch", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses", "networkpolicies"]
+    verbs: ["create", "update", "patch", "delete"]
+
+  # §4 generic write over ANYTHING the cluster serves — CRDs included.
+  #
+  # DELIBERATELY NOT GRANTED. The resource browser can *display* every resource
+  # in the catalog, and with the rules above it can write the ones this console
+  # has typed pages for. Editing a resource outside that set returns 403
+  # rbac_denied naming the exact verb/group/resource that is missing, which is a
+  # sentence an operator can act on.
+  #
+  # The alternative is the block below, which is cluster-admin wearing a
+  # different name. If you need it, uncomment it knowing that: it grants write
+  # over ValidatingWebhookConfigurations, over RBAC itself, and over every CRD
+  # any operator has installed — and that the console's own ServiceAccount then
+  # becomes a privilege-escalation path for anyone who can reach its port.
+  #
+  # - apiGroups: ["*"]
+  #   resources: ["*"]
+  #   verbs: ["create", "update", "patch", "delete"]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ClusterRoleBinding for the writer role — COMMENTED OUT ON PURPOSE.
+#
+# This is the deliberate opt-in. Uncomment the document below and re-apply, then
+# set ADMIN_ALLOW_MUTATIONS=true in deployment.yaml. Both, in that order: the
+# binding first means the console's own connection test reports the write
+# permissions as held before anything offers a button that uses them.
+#
+#   kubectl apply -f deploy/rbac.yaml
+#   kubectl -n k8boss-admin set env deployment/k8boss-admin-backend ADMIN_ALLOW_MUTATIONS=true
+#
+# To go back to read-only, do the reverse and delete the binding:
+#
+#   kubectl delete clusterrolebinding k8boss-admin-writer
+#
+# ---
+# apiVersion: rbac.authorization.k8s.io/v1
+# kind: ClusterRoleBinding
+# metadata:
+#   name: k8boss-admin-writer
+#   labels:
+#     app.kubernetes.io/name: k8boss-admin
+# roleRef:
+#   apiGroup: rbac.authorization.k8s.io
+#   kind: ClusterRole
+#   name: k8boss-admin-writer
+# subjects:
+#   - kind: ServiceAccount
+#     name: k8boss-admin
+#     namespace: k8boss-admin

@@ -1,0 +1,74 @@
+# k8boss-admin backend.
+#
+# Two stages for one reason: the wheels for cryptography and psycopg2-binary
+# occasionally need a compiler, and a compiler in the *runtime* image is a
+# permanent liability in a container that holds decryption keys for every
+# registered cluster's credentials. So the build toolchain lives in a stage that
+# is thrown away, and the final layer contains an interpreter, the installed
+# packages, and the application. Nothing else.
+
+# ── Stage 1: build the dependency tree ───────────────────────────────────────
+FROM python:3.12-slim AS builder
+
+# gcc and the libpq headers are here and only here. Most builds will not use
+# them — the pinned versions all publish manylinux wheels — but a wheel that is
+# missing for the platform being built (arm64 is the usual one) otherwise turns
+# into a build failure whose message is a compiler that does not exist.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends gcc libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY requirements.txt .
+
+# Install into a self-contained prefix that the runtime stage copies wholesale.
+# A virtualenv rather than --user: the path is explicit, so the runtime stage's
+# PATH is one line and does not depend on which user ends up running the process.
+RUN python -m venv /opt/venv \
+    && /opt/venv/bin/pip install --no-cache-dir --upgrade pip \
+    && /opt/venv/bin/pip install --no-cache-dir -r requirements.txt
+
+# ── Stage 2: runtime ─────────────────────────────────────────────────────────
+FROM python:3.12-slim
+LABEL org.opencontainers.image.title="k8boss-admin backend" \
+      org.opencontainers.image.description="Kubernetes administration console API" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.source="https://github.com/aesaganda/k8boss-admin"
+
+# Non-root, with a fixed uid/gid. Fixed, because the SQLite database and the
+# encryption key file live on a mounted volume: a uid assigned by the distro at
+# image build time can change when the base image does, and the symptom of that
+# is a console that starts, fails to open its own database, and reports every
+# registered cluster as gone. A pinned uid makes the volume's ownership a
+# property an operator can set once.
+RUN groupadd --gid 10001 k8boss \
+    && useradd --uid 10001 --gid 10001 --home-dir /app --shell /sbin/nologin k8boss
+
+ENV PATH="/opt/venv/bin:$PATH" \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+COPY --from=builder /opt/venv /opt/venv
+
+WORKDIR /app
+COPY --chown=k8boss:k8boss . .
+
+# The data directory holds the SQLite database and, next to it, the generated
+# Fernet key that encrypts stored cluster tokens (app/crypto.key_file_path puts
+# them together on purpose, so a volume snapshot captures both or neither).
+# Created and owned here so the container works with an empty named volume and
+# with no volume at all.
+RUN mkdir -p /app/data && chown -R k8boss:k8boss /app/data
+
+USER 10001:10001
+
+EXPOSE 8020
+
+# The health check must not depend on a cluster. GET /api/health reports on the
+# console, never on the clusters it administers — an unreachable customer
+# cluster appears in `degraded[]` and leaves `status` at 200. Probing anything
+# that touches a cluster here would restart a healthy pod because someone else's
+# API server went down.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD python -c "import httpx,sys; sys.exit(0 if httpx.get('http://127.0.0.1:8020/api/health', timeout=4).status_code==200 else 1)"
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8020", "--log-level", "info"]

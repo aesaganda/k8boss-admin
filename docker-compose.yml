@@ -1,0 +1,122 @@
+# k8boss-admin — local and small-scale deployment.
+#
+#   docker compose up --build      →  console on http://localhost:8021
+#
+# The frontend is the only thing you open. It serves the SPA and reverse-proxies
+# /api (and the /api/ws WebSockets for pod logs and exec) to the backend, so the
+# browser makes same-origin requests and CORS never enters the picture. The
+# backend port is published anyway, because `curl localhost:8020/api/health` is
+# the first thing anyone does when the page is blank.
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: k8boss-admin-backend:local
+    container_name: k8boss-admin-backend
+    ports:
+      - "${API_BIND:-127.0.0.1}:${API_PORT:-8020}:8020"
+    environment:
+      # ── The write gate ───────────────────────────────────────────────────
+      # DEFAULT false, and that is not caution for its own sake. There is no
+      # authentication in front of this console: with mutations enabled, anyone
+      # who can reach the port can scale, restart, delete and drain in every
+      # registered cluster, and the only identity on the audit trail comes from
+      # the X-K8Boss-User header, which the caller sets themselves.
+      #
+      # Read-only is therefore the posture a deployment ends up in when nobody
+      # made a decision, and turning writes on is an act with a visible line in
+      # a file. With it false, writes return 403 mutations_disabled BEFORE the
+      # cluster is touched and GET /api/health reports mutations=disabled, so the
+      # UI disables the buttons instead of offering them and failing.
+      #
+      # Dry-run stays available either way: projecting what a write WOULD do is a
+      # read, and that is what makes the console useful in an audit posture.
+      # Before setting this to true, put an authenticating proxy in front of the
+      # published port. See docs/safety-model.md.
+      - ADMIN_ALLOW_MUTATIONS=${ADMIN_ALLOW_MUTATIONS:-false}
+
+      # Separate gate, separate blast radius: revealing a Secret's values is a
+      # privileged READ, and an operator may reasonably want it without granting
+      # writes — or grant writes and still refuse it. Every reveal is audited
+      # whichever way this is set.
+      - SECRET_REVEAL_ENABLED=${SECRET_REVEAL_ENABLED:-false}
+
+      # ── State ────────────────────────────────────────────────────────────
+      # Registered clusters and the audit trail. Cluster CONTENTS are never
+      # cached here — every resource the UI shows is read live — so this volume
+      # is small and its loss costs registrations and history, not correctness.
+      - DATABASE_URL=sqlite:////app/data/k8boss_admin.db
+      # Encryption for stored cluster tokens. Unset means the backend generates a
+      # key ONCE and persists it beside the database on the same volume. Do not
+      # let that key be ephemeral: a key regenerated at boot makes every stored
+      # token undecryptable, and the symptom is every cluster failing to connect
+      # after an unrelated restart, which reads as "the console broke my
+      # clusters". Set it explicitly for anything you would call production.
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:-}
+
+      # ── Kubernetes transport ─────────────────────────────────────────────
+      # Deadlines, so a black-holed API server connection cannot pin a threadpool
+      # worker forever while the liveness probe — which touches no cluster —
+      # keeps answering healthy.
+      - K8S_CONNECT_TIMEOUT_SECONDS=${K8S_CONNECT_TIMEOUT_SECONDS:-5}
+      - K8S_READ_TIMEOUT_SECONDS=${K8S_READ_TIMEOUT_SECONDS:-30}
+      - K8S_WATCH_READ_TIMEOUT_SECONDS=${K8S_WATCH_READ_TIMEOUT_SECONDS:-600}
+
+      # Local-development fallback, used ONLY when no cluster is registered.
+      # Register clusters through the UI for anything else.
+      - KUBECONFIG_PATH=/home/k8boss/.kube/config
+      - IN_CLUSTER_MODE=${IN_CLUSTER_MODE:-false}
+
+      # ── HTTP ─────────────────────────────────────────────────────────────
+      # The browser talks to nginx on 8021 and nginx proxies same-origin, so this
+      # list only matters for a split-origin deployment or `npm run dev` on 5174.
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:8021,http://localhost:5174}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      - k8boss-admin-data:/app/data
+      # Read-only, and only used when the cluster registry is empty. `:ro` is not
+      # decoration: this file is a set of live cluster credentials.
+      - ${KUBECONFIG:-~/.kube/config}:/home/k8boss/.kube/config:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx,sys; sys.exit(0 if httpx.get('http://127.0.0.1:8020/api/health', timeout=4).status_code==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: k8boss-admin-frontend:local
+    container_name: k8boss-admin-frontend
+    ports:
+      - "${UI_PORT:-8021}:8021"
+    environment:
+      # Rendered into the nginx config at container start. Points at the compose
+      # service, so the proxy follows the container rather than a fixed IP.
+      - BACKEND_URL=http://backend:8020
+    depends_on:
+      backend:
+        # Not just `depends_on: [backend]`. nginx resolves the upstream hostname
+        # when it starts and caches the result; starting before the backend has
+        # a container means every /api request 502s until nginx is restarted,
+        # which looks exactly like a backend that is down.
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:8021/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  # Named, not a bind mount: it holds the SQLite database AND the generated
+  # encryption key that protects the cluster tokens inside it. They live together
+  # so a snapshot of this volume captures both or neither — a backup with one and
+  # not the other restores to a console whose every credential is unreadable.
+  k8boss-admin-data:
+    driver: local

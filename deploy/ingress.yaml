@@ -1,0 +1,53 @@
+# Optional. Everything else in this directory works without it —
+# `kubectl -n k8boss-admin port-forward svc/k8boss-admin-frontend 8021:8021` is
+# the zero-configuration way in — so this file is commented out of
+# kustomization.yaml by default rather than applying a host nobody owns.
+#
+# ONE backend, the frontend. Its nginx proxies /api and /api/ws to the API
+# Service itself, so there is no second path rule and no CORS: the browser makes
+# same-origin requests to whatever host is below. Splitting /api out to the
+# backend Service here would publish the API without the SPA in front of it,
+# which is the deployment shape this project explicitly does not want — see
+# service.yaml.
+#
+# BEFORE APPLYING, know what you are publishing. This console has no
+# authentication. Anyone who can reach this host can read every resource in every
+# registered cluster, including Secrets if the reader role's Secret rule is kept;
+# and if ADMIN_ALLOW_MUTATIONS is on, can change them. Put an authenticating
+# proxy in front of it — OAuth2 Proxy, an ingress-controller auth annotation, or
+# your own — and have it set X-K8Boss-User so the audit trail (§10) names a
+# person instead of `anonymous`.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: k8boss-admin
+  namespace: k8boss-admin
+  labels:
+    app.kubernetes.io/name: k8boss-admin
+  annotations:
+    # Pod log streaming and exec are WebSockets. Most controllers upgrade them
+    # transparently; NGINX ingress needs the read timeout raised or it reaps a
+    # quiet log stream after 60 seconds and the viewer reports a lost connection
+    # for a pod that was simply not logging.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    # Manifests submitted through the YAML editor travel as a JSON body; the
+    # 1m default rejects a ConfigMap carrying an embedded certificate bundle
+    # with a 413 the UI can only report as "the request failed".
+    nginx.ingress.kubernetes.io/proxy-body-size: "8m"
+spec:
+  # ingressClassName: nginx        # set to your controller's class
+  rules:
+    - host: k8boss-admin.example.com   # CHANGE THIS
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: k8boss-admin-frontend
+                port:
+                  number: 8021
+  # tls:
+  #   - hosts: [k8boss-admin.example.com]
+  #     secretName: k8boss-admin-tls

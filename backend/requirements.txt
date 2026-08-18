@@ -1,0 +1,27 @@
+# Runtime
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+kubernetes==31.0.0
+cryptography==50.0.0
+sqlalchemy==2.0.36
+pyyaml==6.0.2
+pydantic==2.10.3
+pydantic-settings==2.7.0
+python-json-logger==3.2.1
+httpx==0.28.1
+websockets==16.0
+
+# Postgres driver. Unpinned minor on purpose: the wheel is platform-specific and
+# the console never touches psycopg2-specific APIs — SQLAlchemy is the only
+# consumer. Dev runs SQLite, production runs Postgres, so anything engine-
+# divergent needs a deliberate Postgres check rather than trust in this line.
+psycopg2-binary>=2.9
+
+# Tests.
+# Bump these two together — pytest-asyncio 1.4.0 requires pytest<10,>=8.4, so a
+# lone bump of either makes the requirement set unsatisfiable
+# (ResolutionImpossible) and breaks the image build rather than the tests: every
+# job fails in under ten seconds at install, with no test having run. Carried
+# over from k8boss, where a single-package Dependabot bump did exactly that.
+pytest==9.0.3
+pytest-asyncio==1.4.0

@@ -1,0 +1,42 @@
+# Plain manifests, applied in dependency order.
+#
+#   kubectl apply -k deploy/
+#
+# What that gets you: a console that can READ every cluster it is registered
+# against, and write to none of them. Both write gates are closed —
+# ADMIN_ALLOW_MUTATIONS is "false" in deployment.yaml and the writer
+# ClusterRoleBinding in rbac.yaml is commented out. Opening them is a documented
+# two-step act; see the header of rbac.yaml.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Not set as a kustomize `namespace:` override. The manifests name their
+# namespace explicitly, and the ClusterRoleBinding's subject has to name it too —
+# a global override would rewrite the objects and silently leave the binding's
+# subject pointing at the old one, producing a console whose every read is
+# forbidden for a reason nothing in the output mentions.
+resources:
+  - namespace.yaml
+  - rbac.yaml
+  - deployment.yaml
+  - service.yaml
+  # Commented out on purpose: ingress.yaml carries a placeholder host
+  # (k8boss-admin.example.com) and no ingressClassName, so applying it as shipped
+  # creates an Ingress that routes nothing. Edit it, then uncomment.
+  # - ingress.yaml
+
+labels:
+  - includeSelectors: false
+    pairs:
+      app.kubernetes.io/part-of: k8boss-admin
+      app.kubernetes.io/managed-by: kustomize
+
+# Pin the images you actually run. `latest` in deployment.yaml is convenient for
+# a first look and wrong for anything else: with imagePullPolicy IfNotPresent a
+# node that already has a `latest` layer never fetches the new one, so half a
+# fleet runs last month's console and nothing says so.
+images:
+  - name: ghcr.io/aesaganda/k8boss-admin-backend
+    newTag: latest
+  - name: ghcr.io/aesaganda/k8boss-admin-frontend
+    newTag: latest

@@ -1,0 +1,50 @@
+# Services for the two Deployments.
+#
+# Both ClusterIP. The frontend is what a human reaches (through the Ingress, or
+# `kubectl port-forward`); the backend Service exists so nginx can find it and so
+# `kubectl port-forward svc/k8boss-admin-backend 8020:8020` works when the page
+# is blank and you want to see whether /api/health answers.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: k8boss-admin-backend
+  namespace: k8boss-admin
+  labels:
+    app.kubernetes.io/name: k8boss-admin
+    app.kubernetes.io/component: backend
+spec:
+  type: ClusterIP
+  # Deliberately NOT exposed through the Ingress. The console has no
+  # authentication of its own — the audit actor comes from the advisory
+  # X-K8Boss-User header — so the API is reachable only from inside the cluster,
+  # and the SPA's nginx is the one thing in front of it. Publish this directly
+  # only behind an authenticating proxy.
+  selector:
+    app.kubernetes.io/name: k8boss-admin
+    app.kubernetes.io/component: backend
+  ports:
+    - name: http
+      port: 8020
+      targetPort: http
+      protocol: TCP
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: k8boss-admin-frontend
+  namespace: k8boss-admin
+  labels:
+    app.kubernetes.io/name: k8boss-admin
+    app.kubernetes.io/component: frontend
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: k8boss-admin
+    app.kubernetes.io/component: frontend
+  ports:
+    - name: http
+      port: 8021
+      targetPort: http
+      protocol: TCP

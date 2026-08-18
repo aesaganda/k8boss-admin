@@ -1,0 +1,399 @@
+/*
+ * App-level styles.
+ *
+ * Everything here is either layout PatternFly has no component for, or a token
+ * alias. There is deliberately no second colour system: dark mode is
+ * PatternFly's own, switched by the `pf-v6-theme-dark` class that ThemeContext
+ * puts on <html>, and every colour below is a `--pf-t--global--*` token with a
+ * literal fallback. Hardcoding a hex here is how a component ends up legible in
+ * light mode and invisible in dark, which is exactly the bug that made the
+ * theme toggle untrustworthy in the first place.
+ */
+
+:root {
+  --admin-gap: var(--pf-t--global--spacer--md, 1rem);
+  --admin-gap-sm: var(--pf-t--global--spacer--sm, 0.5rem);
+  --admin-gap-lg: var(--pf-t--global--spacer--lg, 1.5rem);
+  --admin-muted: var(--pf-t--global--text--color--subtle, #6a6e73);
+  --admin-border: var(--pf-t--global--border--color--default, #d2d2d2);
+  --admin-surface: var(--pf-t--global--background--color--secondary--default, #f2f2f2);
+  --admin-mono: var(--pf-t--global--font--family--mono, "Red Hat Mono", ui-monospace, SFMono-Regular, Menlo, monospace);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+}
+
+/* ── Shell ──────────────────────────────────────────────────────────────── */
+
+.admin-brand {
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.admin-status-dot {
+  display: inline-block;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  margin-inline-end: var(--admin-gap-sm);
+  flex-shrink: 0;
+}
+
+.admin-readonly-banner {
+  margin: var(--admin-gap-sm) var(--admin-gap) 0;
+}
+
+.admin-content {
+  display: block;
+}
+
+/* ── Headers ────────────────────────────────────────────────────────────── */
+
+.admin-page-header {
+  margin-block-end: var(--admin-gap-lg);
+}
+
+.admin-page-header__crumbs {
+  margin-block-end: var(--admin-gap-sm);
+}
+
+.admin-page-header__subtitle,
+.admin-section-header__description {
+  margin: var(--admin-gap-sm) 0 0;
+  color: var(--admin-muted);
+  max-width: 70ch;
+}
+
+.admin-section-header {
+  margin-block: var(--admin-gap-lg) var(--admin-gap-sm);
+}
+
+/* ── Metrics ────────────────────────────────────────────────────────────── */
+
+.admin-stat-grid {
+  display: grid;
+  /* auto-fit rather than a fixed column count: an overview with four tiles and
+     a node page with seven both have to look deliberate at every width. */
+  grid-template-columns: repeat(auto-fit, minmax(var(--admin-stat-min, 190px), 1fr));
+  gap: var(--admin-gap);
+  margin-block-end: var(--admin-gap-lg);
+}
+
+.admin-metric {
+  position: relative;
+  overflow: hidden;
+}
+
+.admin-metric[role="button"] {
+  cursor: pointer;
+}
+
+.admin-metric__body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.admin-metric__label {
+  font-size: var(--pf-t--global--font--size--body--sm, 0.875rem);
+  color: var(--admin-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.admin-metric__help {
+  margin-inline-start: 0.35rem;
+  color: var(--admin-muted);
+  cursor: help;
+}
+
+.admin-metric__value {
+  font-size: 1.75rem;
+  line-height: 1.15;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.admin-metric__sub {
+  font-size: var(--pf-t--global--font--size--body--sm, 0.875rem);
+  color: var(--admin-muted);
+}
+
+.admin-metric::before {
+  content: "";
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: 0;
+  width: 3px;
+  background: transparent;
+}
+
+.admin-metric--success::before {
+  background: var(--pf-t--global--color--status--success--default, #3e8635);
+}
+.admin-metric--warning::before {
+  background: var(--pf-t--global--color--status--warning--default, #f0ab00);
+}
+.admin-metric--danger::before {
+  background: var(--pf-t--global--color--status--danger--default, #c9190b);
+}
+.admin-metric--info::before {
+  background: var(--pf-t--global--color--status--info--default, #2b9af3);
+}
+
+/* ── Key/value ──────────────────────────────────────────────────────────── */
+
+.admin-info-grid {
+  margin: 0;
+  border-block-start: 1px solid var(--admin-border);
+}
+
+.admin-info-grid__row {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--admin-gap);
+  padding: 0.4rem 0;
+  border-block-end: 1px solid var(--admin-border);
+}
+
+.admin-info-grid__label {
+  color: var(--admin-muted);
+  flex: 0 0 auto;
+}
+
+.admin-info-grid__value {
+  margin: 0;
+  text-align: end;
+  overflow-wrap: anywhere;
+}
+
+.admin-dl__help {
+  margin-inline-start: 0.35rem;
+  color: var(--admin-muted);
+  cursor: help;
+}
+
+/* ── Nullable values (contract rule 11.2) ───────────────────────────────── */
+
+/*
+ * The dash is dotted-underlined so it reads as "there is something to hover
+ * here" rather than as a stylistic placeholder. It must never be mistaken for
+ * a zero at a glance down a column, which is why it is also muted.
+ */
+.admin-nullable[data-nullable="true"] {
+  color: var(--admin-muted);
+  border-block-end: 1px dotted currentColor;
+  cursor: help;
+}
+
+.admin-nullable__unit {
+  color: var(--admin-muted);
+  font-size: 0.9em;
+}
+
+.admin-age {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* Tooltip wrapper around a Label — must not become a block and break the row. */
+.admin-status-badge {
+  display: inline-flex;
+}
+
+/* ── Partial banner (contract rule 11.1) ────────────────────────────────── */
+
+.admin-partial__list {
+  margin: 0;
+  padding-inline-start: 1.1rem;
+}
+
+.admin-partial__row {
+  margin-block-end: 0.25rem;
+}
+
+.admin-partial__headline {
+  font-weight: 600;
+}
+
+.admin-partial__explain {
+  color: var(--admin-muted);
+}
+
+.admin-partial__detail {
+  margin: 0.35rem 0 0;
+  padding: 0.4rem 0.6rem;
+  background: var(--admin-surface);
+  border-radius: var(--pf-t--global--border--radius--small, 4px);
+  font-family: var(--admin-mono);
+  font-size: 0.8rem;
+  white-space: pre-wrap;
+  overflow-x: auto;
+}
+
+/* ── Filters ────────────────────────────────────────────────────────────── */
+
+.admin-filterbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--admin-gap);
+  margin-block-end: var(--admin-gap);
+}
+
+.admin-filterbar__field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  min-width: 10rem;
+}
+
+.admin-filterbar__label {
+  font-size: var(--pf-t--global--font--size--body--sm, 0.875rem);
+  color: var(--admin-muted);
+}
+
+/* ── Code and diffs ─────────────────────────────────────────────────────── */
+
+.admin-codeblock {
+  font-family: var(--admin-mono);
+}
+
+.admin-codeblock--diff .admin-diff__line {
+  display: block;
+  white-space: pre;
+}
+
+/*
+ * Colour AND a leading character carry the meaning: the +/- already in the diff
+ * text is what a colour-blind reader (or a screenshot pasted into a ticket in
+ * greyscale) goes by, so the tint is reinforcement, never the only signal.
+ */
+.admin-diff__add {
+  background: var(--pf-t--global--background--color--status--success--default, #f3faf2);
+  color: var(--pf-t--global--text--color--status--success--default, #1f6b1f);
+}
+
+.admin-diff__del {
+  background: var(--pf-t--global--background--color--status--danger--default, #fdf2f2);
+  color: var(--pf-t--global--text--color--status--danger--default, #a30000);
+}
+
+.admin-diff__hunk {
+  color: var(--admin-muted);
+}
+
+/* ── Confirm dialog ─────────────────────────────────────────────────────── */
+
+.admin-confirm__description {
+  margin-block-end: var(--admin-gap);
+}
+
+.admin-confirm__alert {
+  margin-block-end: var(--admin-gap);
+}
+
+.admin-confirm__warnings {
+  margin: 0;
+  padding-inline-start: 1.1rem;
+}
+
+.admin-confirm__diff {
+  margin-block-start: var(--admin-gap);
+}
+
+.admin-confirm__diff-label {
+  margin: 0 0 var(--admin-gap-sm);
+  color: var(--admin-muted);
+}
+
+.admin-confirm__typed {
+  margin-block-start: var(--admin-gap);
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+/* ── States ─────────────────────────────────────────────────────────────── */
+
+.admin-loading {
+  display: flex;
+  align-items: center;
+  gap: var(--admin-gap-sm);
+}
+
+.admin-loading__label {
+  color: var(--admin-muted);
+}
+
+.admin-error-hint {
+  margin-block-start: var(--admin-gap-sm);
+  font-weight: 500;
+}
+
+.admin-error-code {
+  margin-block-start: var(--admin-gap-sm);
+  color: var(--admin-muted);
+  font-size: var(--pf-t--global--font--size--body--sm, 0.875rem);
+}
+
+.admin-crash {
+  max-width: 46rem;
+  margin: 4rem auto;
+  text-align: center;
+}
+
+.admin-crash__title {
+  margin: 0 0 var(--admin-gap-sm);
+}
+
+.admin-crash__message {
+  font-family: var(--admin-mono);
+  color: var(--pf-t--global--text--color--status--danger--default, #a30000);
+  overflow-wrap: anywhere;
+}
+
+.admin-crash__hint {
+  color: var(--admin-muted);
+  margin-block-end: var(--admin-gap);
+}
+
+/* ── Dark theme adjustments ─────────────────────────────────────────────── */
+
+/*
+ * PatternFly repaints itself from the class alone; only the two diff tints need
+ * help, because their light-mode background tokens are near-white and a green
+ * that reads as "added" on white is unreadable on charcoal.
+ */
+.pf-v6-theme-dark .admin-diff__add {
+  background: rgba(62, 134, 53, 0.22);
+  color: #7dd87d;
+}
+
+.pf-v6-theme-dark .admin-diff__del {
+  background: rgba(201, 25, 11, 0.22);
+  color: #ff9b93;
+}
+
+.pf-v6-theme-dark .admin-partial__detail {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+/* ── Motion ─────────────────────────────────────────────────────────────── */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}

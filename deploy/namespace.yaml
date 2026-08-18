@@ -1,0 +1,20 @@
+# The namespace the console runs in.
+#
+# Its own namespace, not kube-system and not an application namespace. Two
+# reasons, both operational: the console's ServiceAccount holds cluster-wide read
+# permission over everything (see rbac.yaml), so it should be somewhere an
+# operator can point a policy at; and the SQLite PersistentVolumeClaim in
+# deployment.yaml holds the audit trail, which is easier to back up and to
+# retain when it is not mixed in with workload storage.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: k8boss-admin
+  labels:
+    app.kubernetes.io/name: k8boss-admin
+    app.kubernetes.io/part-of: k8boss-admin
+    # The console reads Secrets cluster-wide when the reader role's Secret rule
+    # is kept. Its own pods hold decryption keys for every registered cluster's
+    # credentials, so it is a target: restricted, not baseline.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
