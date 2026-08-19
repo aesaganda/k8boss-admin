@@ -31,7 +31,9 @@
  * `columnWidths.js` says why the trailing column is the one that cannot be
  * pinned, and what happens when the pinned widths outgrow the viewport. Pass
  * `resizableColumns={false}` where that is unwanted, and `tableId` where two
- * tables share an `ariaLabel` and should not share one set of widths.
+ * tables share an `ariaLabel` and should not share one set of widths. A table
+ * that passes neither an `ariaLabel` nor a `tableId` still resizes; it has no
+ * identity to file the widths under, so it does not remember them.
  *
  * Sorting is uncontrolled by default. Pass `sort` + `onSort` together to hand
  * sorting to the server (the API returns chunked lists, so a page that pages

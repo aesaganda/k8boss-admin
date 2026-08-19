@@ -266,10 +266,10 @@ export function useColumnWidths({ tableId, columnKeys, enabled = true, trailingM
    * Put the column's current width on the handle, for the screen reader.
    *
    * Written to the element rather than held in state, for the same reason the
-   * drag writes `<col>` directly: this runs on focus and on blur, and a state
-   * update there re-renders every row in the table. On a few thousand pods that
-   * is half a second per Tab through the header — a cost only a keyboard user
-   * pays, which is the wrong way round.
+   * drag writes `<col>` directly: this runs whenever a handle takes focus, and
+   * a state update there re-renders every row in the table. On a few thousand
+   * pods that is half a second per Tab across the header — a cost only a
+   * keyboard user pays, which is the wrong way round.
    *
    * Withholding the number is not an option either: Chrome fills a focusable
    * separator's missing `aria-valuenow` with 50, which is below the 56 this
