@@ -50,6 +50,7 @@ import LockIcon from '@patternfly/react-icons/dist/esm/icons/lock-icon';
 import SignOutAltIcon from '@patternfly/react-icons/dist/esm/icons/sign-out-alt-icon';
 import UserIcon from '@patternfly/react-icons/dist/esm/icons/user-icon';
 import AppNav from './AppNav';
+import BrandMark from './BrandMark';
 import ErrorBoundary from './ErrorBoundary';
 import { LoadingState } from './ui';
 import { useCluster } from '../contexts/ClusterContext';
@@ -243,7 +244,7 @@ function ReadOnlyBadge() {
     // PatternFly component forwards one. `tabIndex` makes the explanation
     // reachable without a mouse.
     <Tooltip content={reason}>
-      <span tabIndex={0} data-testid="read-only-badge">
+      <span tabIndex={0} className="admin-status-badge" data-testid="read-only-badge">
         <Label color="orange" icon={<LockIcon />}>
           Read-only
         </Label>
@@ -297,7 +298,17 @@ function AppMasthead() {
         </MastheadToggle>
         <MastheadBrand>
           <MastheadLogo component={BrandLink}>
-            <span className="admin-brand">k8boss-admin</span>
+            <span className="admin-brand">
+              <BrandMark className="admin-brand__mark" />
+              {/* Two adjacent text nodes, not "k8boss" + " " + "admin": the
+                  e2e smoke test does a substring match on "k8boss-admin", and
+                  a space or extra element in between would break it while
+                  looking identical on screen. */}
+              <span className="admin-brand__text">
+                <span className="admin-brand__name">k8boss</span>
+                <span className="admin-brand__suffix">-admin</span>
+              </span>
+            </span>
           </MastheadLogo>
         </MastheadBrand>
       </MastheadMain>

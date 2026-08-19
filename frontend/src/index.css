@@ -33,8 +33,27 @@ body {
 /* ── Shell ──────────────────────────────────────────────────────────────── */
 
 .admin-brand {
-  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--admin-gap-sm);
+}
+
+.admin-brand__mark {
+  flex-shrink: 0;
+}
+
+.admin-brand__text {
+  font-size: 1.1rem;
   letter-spacing: 0.01em;
+}
+
+.admin-brand__name {
+  font-weight: 700;
+}
+
+.admin-brand__suffix {
+  font-weight: 400;
+  color: var(--admin-muted);
 }
 
 .admin-status-dot {
