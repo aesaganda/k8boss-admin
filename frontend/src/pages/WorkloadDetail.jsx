@@ -376,6 +376,9 @@ export default function WorkloadDetail() {
         ) : (
           <DataTable
             ariaLabel="Pods"
+            // Distinct from the Pods page, which shares the label: two tables
+            // with different columns must not share one set of column widths.
+            tableId="workload-detail-pods"
             columns={podColumns}
             rows={pods}
             rowKey={(row) => `${row.namespace}/${row.name}`}
@@ -502,6 +505,9 @@ export default function WorkloadDetail() {
       {tab === 'services' && (
         <DataTable
           ariaLabel="Services"
+          // Distinct from the Services tab on the Network page (same label,
+          // different columns), so their column widths stay apart.
+          tableId="workload-detail-services"
           columns={[
             { key: 'name', title: 'Name' },
             { key: 'type', title: 'Type' },

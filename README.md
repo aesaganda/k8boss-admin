@@ -295,6 +295,11 @@ version being that there is no undo for a deleted StatefulSet.
   including the ones that were refused.
 * Read-only mode as the default posture, reported on `/api/health` so the UI
   disables write affordances rather than offering them and failing.
+* Resizable table columns on every list page: drag a column's trailing edge in
+  the header, or focus the handle and use the arrow keys. Widths are remembered
+  per table in the browser, so a column widened to read an image digest is still
+  that wide after the next poll and the next visit. `Home`, a double-click, or
+  the **Reset column widths** link puts them back.
 
 ---
 

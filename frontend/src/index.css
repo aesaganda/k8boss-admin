@@ -199,6 +199,86 @@ body {
   cursor: help;
 }
 
+/* ── Resizable table columns ────────────────────────────────────────────── */
+
+/*
+ * The grab area sits INSIDE its header cell rather than straddling the column
+ * boundary. A column with the `truncate` modifier sets `overflow: hidden`, and
+ * anything hanging over that edge is clipped away on exactly the columns whose
+ * content is long enough to be worth widening — the handle would be missing
+ * from the ones that need it most.
+ */
+.admin-col-resizer {
+  position: absolute;
+  inset-block: 0;
+  inset-inline-end: 0;
+  z-index: 1;
+  width: 0.75rem;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: col-resize;
+  /* Without this a touch drag scrolls the page and the column never moves. */
+  touch-action: none;
+}
+
+.admin-col-resizer::before {
+  content: "";
+  position: absolute;
+  inset-block: 0.3rem;
+  inset-inline-end: 0.3rem;
+  width: 2px;
+  border-radius: 1px;
+  background: transparent;
+}
+
+/*
+ * Drawn on approach, on keyboard focus, and for the length of a drag — and at
+ * no other time. A header row with a permanent rule between every column reads
+ * as a spreadsheet, and this is a table of live cluster state.
+ */
+.admin-col-resizer:hover::before,
+.admin-col-resizer:focus-visible::before,
+.admin-col-resizer--active::before {
+  background: var(--pf-t--global--color--brand--default, #06c);
+}
+
+.admin-col-resizer:focus-visible {
+  outline: 2px solid var(--pf-t--global--color--brand--default, #06c);
+  outline-offset: -2px;
+}
+
+/* A pinned column is only honoured under a fixed layout; without it the browser
+   goes on sizing every column from its content and the drag does nothing. */
+.admin-table--sized {
+  table-layout: fixed;
+}
+
+/* Header text in a narrowed column breaks rather than painting over its
+   neighbour. PatternFly already does this for body cells, not for headers. */
+.admin-table--sized thead th {
+  overflow-wrap: anywhere;
+}
+
+.admin-table__widths {
+  display: flex;
+  justify-content: flex-end;
+  margin-block-end: var(--admin-gap-sm);
+  font-size: var(--pf-t--global--font--size--body--sm, 0.875rem);
+}
+
+/*
+ * For the length of a drag the pointer is captured by the handle, so every
+ * element it passes over would otherwise show its own cursor and paint a text
+ * selection across the rows — both of which read as the drag having been
+ * dropped somewhere in the middle of the table.
+ */
+body.admin-resizing,
+body.admin-resizing * {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+
 /* ── Nullable values (contract rule 11.2) ───────────────────────────────── */
 
 /*
