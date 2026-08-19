@@ -468,6 +468,58 @@ body.admin-resizing * {
   color: var(--admin-muted);
 }
 
+/* The header strip over a read-only YAML panel: when it was read, and Reload. */
+.admin-yaml-panel__bar {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--admin-gap-sm);
+  flex-wrap: wrap;
+  margin-block-end: var(--admin-gap-sm);
+  font-size: var(--pf-t--global--font--size--body--sm, 0.875rem);
+}
+
+/*
+ * Read-only YAML: one layer of text with its line numbers in the same flow.
+ *
+ * Nothing here is overlaid, so there is no alignment constraint to hold — the
+ * numbers and the code share a line box and cannot drift. The gutter is sticky
+ * rather than a separate scrolling column for the same reason: one scroll
+ * container cannot fall out of step with itself, which is the failure the
+ * editor spends a scroll handler avoiding.
+ */
+.admin-codeblock--yaml .admin-yaml-code__line {
+  display: block;
+  /* At least the full width so a marked line spans it, and as wide as the
+     content so the sticky number has something to stay put against. */
+  width: max-content;
+  min-width: 100%;
+  white-space: pre;
+}
+
+.admin-codeblock--yaml .admin-yaml-code__no {
+  position: sticky;
+  inset-inline-start: 0;
+  display: inline-block;
+  box-sizing: content-box;
+  min-width: calc(var(--admin-yaml-digits, 2) * 1ch);
+  margin-inline-end: 0.75rem;
+  padding-inline-end: 0.5rem;
+  text-align: end;
+  color: var(--admin-muted);
+  /* Opaque, and it has to be: a sticky column with a transparent background has
+     the scrolled line running underneath the numbers. */
+  background: var(--pf-t--global--background--color--secondary--default, #f2f2f2);
+  border-inline-end: 1px solid var(--admin-border);
+  /* A manifest copied out of here has to be a manifest that can be applied, and
+     line numbers interleaved into it is not one. */
+  user-select: none;
+}
+
+.admin-codeblock--yaml .admin-yaml-code__text {
+  white-space: pre;
+}
+
 /* ── YAML editor ────────────────────────────────────────────────────────── */
 
 /*
@@ -490,9 +542,14 @@ body.admin-resizing * {
  * second place for them to be changed in.
  */
 
-.admin-yaml {
-  --admin-yaml-pad: 0.5rem;
-
+/*
+ * The syntax palette, shared by the editor and the read-only block below it.
+ * Declared on both selectors rather than on :root: these colours exist only
+ * where YAML is rendered, and a palette on the root is a second colour system
+ * for the whole app whether or not anything else ever reads it.
+ */
+.admin-yaml,
+.admin-codeblock--yaml {
   /* Light palette. Every entry clears 4.5:1 against the editor's white
      background, the weakest at 5.1:1 — syntax colour nobody can read is
      decoration on a manifest somebody is about to apply to a cluster. */
@@ -505,6 +562,10 @@ body.admin-resizing * {
   --admin-yaml-meta: #8a5a00;
   --admin-yaml-selection: rgba(0, 102, 204, 0.3);
   --admin-yaml-error-line: rgba(201, 25, 11, 0.1);
+}
+
+.admin-yaml {
+  --admin-yaml-pad: 0.5rem;
 
   display: flex;
   align-items: stretch;
@@ -890,7 +951,8 @@ body.admin-resizing * {
  * of them is unreadable. These clear 4.5:1 on PatternFly's dark surfaces, the
  * weakest at 5.5:1.
  */
-.pf-v6-theme-dark .admin-yaml {
+.pf-v6-theme-dark .admin-yaml,
+.pf-v6-theme-dark .admin-codeblock--yaml {
   --admin-yaml-key: #79c0ff;
   --admin-yaml-string: #ce9178;
   --admin-yaml-number: #b5cea8;

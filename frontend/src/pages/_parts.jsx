@@ -23,6 +23,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import yaml from 'js-yaml';
 import {
+  Alert,
   Button,
   Drawer,
   DrawerActions,
@@ -67,7 +68,7 @@ import PodTerminal from '../components/PodTerminal';
 import YamlEditor from '../components/YamlEditor';
 import { resources } from '../api/client';
 import { useNamespace } from '../contexts/NamespaceContext';
-import { useAsync, useResourceList, entriesOf } from './_data';
+import { useLiveYaml, useResourceList, entriesOf } from './_data';
 
 /* ── Cluster scope ──────────────────────────────────────────────────────── */
 
@@ -359,23 +360,78 @@ export function TruncationFooter({ listing, noun = 'objects' }) {
 
 /* ── YAML ───────────────────────────────────────────────────────────────── */
 
-/**
- * `GET .../{name}/yaml` rendered read-only (§4).
- *
- * A failure here is shown as a failure, not as an empty editor: an operator who
- * is about to edit an object must never be handed a blank buffer that looks like
- * an empty manifest.
- */
-export function YamlPanel({ group, version, plural, name, namespace, height = 520 }) {
-  const key = [group, version, plural, namespace ?? '', name].join('|');
-  const { data, loading, error, reload } = useAsync(
-    () => resources.yaml(group, version, plural, name, namespace),
-    { key, enabled: Boolean(name && plural) },
-  );
+/** Wall-clock time of an epoch millisecond value, for "read at 16:20:31". */
+function clock(ms) {
+  return ms == null ? null : new Date(ms).toLocaleTimeString();
+}
 
-  if (loading) return <Skeleton lines={8} height="0.8rem" />;
-  if (error) return <ErrorState title="This object's YAML could not be read" error={error} onRetry={reload} />;
-  return <CodeBlock code={data ?? ''} language="yaml" ariaLabel={`${name} YAML`} maxHeight={height} />;
+/**
+ * `GET .../{name}/yaml` rendered read-only (§4), numbered, coloured and kept
+ * current.
+ *
+ * Three things this panel refuses to do, each of which is the same mistake in a
+ * different costume — presenting something as more current than it is:
+ *
+ * **It does not show a manifest without saying when it was read.** A YAML view
+ * with no timestamp is indistinguishable from a live one, and the object on the
+ * screen may have been replaced by a controller ten minutes ago.
+ *
+ * **It does not blank on a failed refresh.** The text stays and the header says
+ * the refresh failed. Throwing away the copy the operator was reading because
+ * one poll timed out is a worse answer than an old one, clearly labelled.
+ *
+ * **It does not present a stale copy as fresh.** `readAt` is the time the bytes
+ * on screen were fetched, never the time of the last attempt.
+ *
+ * Reload is here because a poll is on somebody else's clock. An operator who
+ * has just changed something wants to see it *now*, and "wait up to ten
+ * seconds, then decide whether it worked" is not a thing to ask of somebody
+ * mid-incident.
+ */
+export function YamlPanel({ group, version, plural, name, namespace, height = 520, watch = true }) {
+  const live = useLiveYaml({ group, version, plural, name, namespace, watch });
+
+  // Only while there is nothing to show. A skeleton on every refresh would take
+  // the manifest away from the operator six times a minute.
+  if (live.loading && live.text == null) return <Skeleton lines={8} height="0.8rem" />;
+  if (live.error) {
+    return <ErrorState title="This object's YAML could not be read" error={live.error} onRetry={live.reload} />;
+  }
+
+  return (
+    <div className="admin-yaml-panel" data-testid="yaml-panel">
+      <div className="admin-yaml-panel__bar">
+        <Muted>
+          <span data-testid="yaml-panel-read-at">Read at {clock(live.readAt) ?? '—'}</span>
+          {live.changedAt != null && (
+            <span data-testid="yaml-panel-changed"> · changed at {clock(live.changedAt)}</span>
+          )}
+          {live.watching && !live.refreshError && <span> · watching for changes</span>}
+        </Muted>
+        <Button
+          variant="link"
+          isInline
+          icon={<SyncAltIcon />}
+          onClick={live.reload}
+          data-testid="yaml-panel-reload"
+        >
+          Reload
+        </Button>
+      </div>
+
+      {live.refreshError && (
+        <Alert
+          isInline
+          variant="warning"
+          className="admin-confirm__alert"
+          data-testid="yaml-panel-stale"
+          title={`This is the copy read at ${clock(live.readAt) ?? 'an earlier point'} — the last refresh failed: ${live.refreshError.message}`}
+        />
+      )}
+
+      <CodeBlock code={live.text ?? ''} language="yaml" ariaLabel={`${name} YAML`} maxHeight={height} />
+    </div>
+  );
 }
 
 /**
@@ -395,32 +451,59 @@ export function YamlPanel({ group, version, plural, name, namespace, height = 52
  * bytes the operator is editing means the version we send is provably the
  * version they were looking at — two requests could straddle a change and send
  * a `resourceVersion` for a manifest nobody ever saw.
+ *
+ * **The object is re-read while the dialog is open, and the editor is never
+ * touched by it.** Two operators on the same Deployment during an incident is
+ * the §0.4 scenario, and the API server already refuses the second save — but a
+ * `409` arrives *after* the second operator has finished typing, which is the
+ * most expensive moment to learn it. The poll moves that discovery to the front:
+ * a banner appears the moment the object changes underneath, with the choice of
+ * what to do about it left to the operator.
+ *
+ * What the poll must never do is quietly re-base the edit. Adopting the newer
+ * text would discard what they typed; adopting the newer `resourceVersion`
+ * would be worse — it would make the `PUT` succeed against a version they never
+ * saw, which is precisely the blind overwrite optimistic concurrency exists to
+ * prevent, arranged by the console itself. So the version sent on `PUT` stays
+ * the one the editor was seeded from, and taking the new manifest is a button
+ * the operator presses, labelled with what it costs.
  */
 export function EditYamlDialog({ isOpen, group, version, plural, name, namespace, kind, onClose, onApplied }) {
   const [text, setText] = useState('');
   const [validity, setValidity] = useState({ valid: false, message: 'Loading…' });
   const key = [group, version, plural, namespace ?? '', name].join('|');
 
-  const loaded = useAsync(() => resources.yaml(group, version, plural, name, namespace), {
-    key,
-    enabled: Boolean(isOpen && name && plural),
-  });
+  const live = useLiveYaml({ group, version, plural, name, namespace, enabled: isOpen });
 
-  // Seed the editor once the manifest arrives, and only then: assigning on
-  // every render would throw away everything the operator typed.
+  // The manifest the editor was seeded from — the base of the edit, and the
+  // only thing `resourceVersion` may be read out of. `live.text` moves with the
+  // cluster; this does not move until the operator says so.
+  const [base, setBase] = useState(null);
   const seededRef = useRef(null);
+
+  const adopt = useCallback((next) => {
+    setBase(next);
+    setText(next);
+  }, []);
+
+  // Seed once, when the manifest arrives, and only then: assigning on every
+  // render would throw away everything the operator typed.
   useEffect(() => {
-    if (loaded.data != null && seededRef.current !== key) {
-      seededRef.current = key;
-      setText(loaded.data);
+    if (!isOpen) {
+      seededRef.current = null;
+      setBase(null);
+      return;
     }
-    if (!isOpen) seededRef.current = null;
-  }, [loaded.data, key, isOpen]);
+    if (live.text != null && seededRef.current !== key) {
+      seededRef.current = key;
+      adopt(live.text);
+    }
+  }, [live.text, key, isOpen, adopt]);
 
   const resourceVersion = useMemo(() => {
-    if (!loaded.data) return null;
+    if (!base) return null;
     try {
-      return yaml.load(loaded.data)?.metadata?.resourceVersion ?? null;
+      return yaml.load(base)?.metadata?.resourceVersion ?? null;
     } catch {
       // Unparseable YAML from our own backend is a defect, but it must not stop
       // the operator seeing it: PUT without a resourceVersion is refused by the
@@ -428,14 +511,19 @@ export function EditYamlDialog({ isOpen, group, version, plural, name, namespace
       // parse error thrown out of a dialog.
       return null;
     }
-  }, [loaded.data]);
+  }, [base]);
+
+  // Not "the text differs from what is in the box" — that is just editing. This
+  // is the cluster's copy differing from the one this edit was based on.
+  const changedOnCluster = base != null && live.text != null && live.text !== base;
+  const edited = base != null && text !== base;
 
   if (!isOpen) return null;
 
-  const previewBlocked = loaded.loading
+  const previewBlocked = live.loading && live.text == null
     ? 'The manifest is still loading.'
-    : loaded.error
-      ? `The manifest could not be read: ${loaded.error.message}`
+    : live.error
+      ? `The manifest could not be read: ${live.error.message}`
       : !validity.valid
         ? validity.message || 'The YAML in the editor is not valid.'
         : resourceVersion == null
@@ -465,16 +553,38 @@ export function EditYamlDialog({ isOpen, group, version, plural, name, namespace
       onApplied={onApplied}
       onClose={onClose}
     >
-      {loaded.loading ? (
+      {changedOnCluster && (
+        <Alert
+          isInline
+          variant="warning"
+          className="admin-confirm__alert"
+          data-testid="edit-yaml-changed"
+          title="This object has changed on the cluster since the editor was opened"
+          actionLinks={
+            <Button variant="link" isInline onClick={() => adopt(live.text)} data-testid="edit-yaml-adopt">
+              {edited ? 'Discard my changes and load the new version' : 'Load the new version'}
+            </Button>
+          }
+        >
+          {/* Said plainly, because the alternative is learning it from a 409
+              after finishing the edit. The version that will be sent is still
+              the one this edit started from, which is what makes the API
+              server's refusal the safe outcome rather than a lost change. */}
+          Applying what is in the editor will be refused as a conflict, because it is written against
+          {resourceVersion ? ` resourceVersion ${resourceVersion}` : ' an older version'} and the cluster has moved on.
+        </Alert>
+      )}
+
+      {live.loading && live.text == null ? (
         <Skeleton lines={10} height="0.8rem" />
-      ) : loaded.error ? (
-        <ErrorState title="This manifest could not be read" error={loaded.error} onRetry={loaded.reload} />
+      ) : live.error ? (
+        <ErrorState title="This manifest could not be read" error={live.error} onRetry={live.reload} />
       ) : (
         <YamlEditor
           value={text}
           onChange={setText}
           onValidityChange={setValidity}
-          originalValue={loaded.data ?? ''}
+          originalValue={base ?? ''}
           label={`${kind ?? plural}/${name}`}
           ariaLabel={`YAML for ${name}`}
         />
@@ -484,14 +594,22 @@ export function EditYamlDialog({ isOpen, group, version, plural, name, namespace
 }
 
 /**
- * Logs and exec for one pod, in one modal.
+ * Logs, YAML and exec for one pod, in one modal.
  *
  * `LogViewer` and `PodTerminal` are inline panels rather than dialogs — they are
  * embeddable anywhere, and neither takes `isOpen` or `onClose` — so the modal,
  * the tab strip and the close button belong to whoever opens them. Every pod
- * table in this lane opens the same one, so the two live side by side: the
+ * table in this lane opens the same one, so they live side by side: the
  * overwhelmingly common sequence is to read the logs, fail to find the answer,
  * and go in with a shell.
+ *
+ * **YAML is a tab here rather than a page of its own.** A pod is the one kind
+ * an operator opens by clicking a row rather than by browsing to it, and until
+ * this tab existed it was also the one kind whose manifest this console would
+ * not show them — the whole object was reachable from the API explorer and
+ * nowhere along the path they were actually walking. The three questions asked
+ * of a misbehaving pod are what it logged, what it is, and what it looks like
+ * from inside; they belong behind one set of tabs.
  *
  * The exec tab is *rendered* even when the caller may not use it, with the
  * reason in place of the terminal (rule 11.4). Hiding the tab would leave an
@@ -507,10 +625,13 @@ export function PodConsoleModal({ pod, initialTab = 'logs', execGate, onClose })
       <ModalBody>
         <Tabs activeKey={tab} onSelect={(_event, key) => setTab(key)} aria-label="Pod console">
           <Tab eventKey="logs" title={<TabTitleText>Logs</TabTitleText>} aria-label="Logs" />
+          <Tab eventKey="yaml" title={<TabTitleText>YAML</TabTitleText>} aria-label="YAML" />
           <Tab eventKey="exec" title={<TabTitleText>Terminal</TabTitleText>} aria-label="Terminal" />
         </Tabs>
         {tab === 'logs' ? (
           <LogViewer namespace={pod.namespace} name={pod.name} containers={pod.containers} />
+        ) : tab === 'yaml' ? (
+          <YamlPanel group="core" version="v1" plural="pods" name={pod.name} namespace={pod.namespace} height={520} />
         ) : execAllowed ? (
           <PodTerminal namespace={pod.namespace} name={pod.name} containers={pod.containers} />
         ) : (

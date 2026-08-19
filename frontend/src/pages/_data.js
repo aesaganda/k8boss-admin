@@ -101,6 +101,160 @@ export function useAsync(fetcher, { key, enabled = true } = {}) {
   return { data: state.data, loading: state.loading, error: state.error, reload };
 }
 
+/* ── One object's YAML, kept current (§4) ───────────────────────────────── */
+
+/**
+ * How often a YAML panel re-reads the object it is showing.
+ *
+ * Shorter than the 30 seconds `ClusterContext` and `HealthContext` poll on, and
+ * deliberately: those refresh a whole listing in the background while the
+ * operator is looking at something else, and this one is the single object they
+ * are looking *at*. Ten seconds is a compromise between "this is a live view of
+ * my cluster" and "this console re-reads a 4000-line CRD six times a minute".
+ */
+const YAML_WATCH_MS = 10000;
+
+/**
+ * `GET .../{name}/yaml`, re-read on an interval, with the two failure states
+ * kept apart.
+ *
+ * There is no watch endpoint to subscribe to — §4 is a plain read, and this
+ * console holds no cluster state — so "watching" here is polling, the same
+ * mechanism the cluster and health contexts already use. What matters is not
+ * the mechanism but what the caller is told:
+ *
+ *   `error`         we have nothing to show. The panel renders a failure.
+ *   `refreshError`  we have something to show and it is older than it looks.
+ *                   The text stays; the header says the refresh failed.
+ *
+ * Collapsing those two is the defect this hook exists to avoid. Blanking a
+ * manifest because one poll timed out throws away the copy the operator was
+ * reading; keeping it and saying nothing tells them a stale object is live —
+ * and on this screen the next thing they do is decide whether to change it.
+ * `readAt` is therefore always the time the *displayed* bytes were fetched,
+ * never the time of the last attempt.
+ *
+ * The poll pauses while the document is hidden. A console left open on a second
+ * monitor overnight is otherwise several thousand reads of an object nobody is
+ * looking at, and the first thing a background tab does on being shown again is
+ * read anyway.
+ */
+export function useLiveYaml({
+  group,
+  version,
+  plural,
+  name,
+  namespace = null,
+  enabled = true,
+  watch = true,
+  intervalMs = YAML_WATCH_MS,
+} = {}) {
+  const key = [group ?? '', version ?? '', plural ?? '', namespace ?? '', name ?? ''].join('|');
+  const active = Boolean(enabled && name && plural);
+
+  const [state, setState] = useState({
+    text: null,
+    error: null,
+    refreshError: null,
+    readAt: null,
+    changedAt: null,
+    loading: active,
+  });
+  const [tick, setTick] = useState(0);
+  const keyRef = useRef(key);
+
+  /** Read again now. Never blanks what is on screen. */
+  const reload = useCallback(() => setTick((n) => n + 1), []);
+
+  useEffect(() => {
+    if (!active) {
+      setState({ text: null, error: null, refreshError: null, readAt: null, changedAt: null, loading: false });
+      return undefined;
+    }
+
+    let cancelled = false;
+    let inFlight = false;
+    const controllers = new Set();
+
+    // A new object is a new question: drop the previous answer rather than
+    // showing one object's manifest, and one object's "read at", under another
+    // one's heading. A refresh of the same object keeps what is on screen — see
+    // `useAsync`'s docstring for why those two are not the same event.
+    const isNewKey = keyRef.current !== key;
+    keyRef.current = key;
+    setState((previous) =>
+      isNewKey
+        ? { text: null, error: null, refreshError: null, readAt: null, changedAt: null, loading: true }
+        : { ...previous, error: null, loading: previous.text == null },
+    );
+
+    const read = async () => {
+      if (inFlight) return;
+      inFlight = true;
+      const controller = typeof AbortController === 'function' ? new AbortController() : null;
+      if (controller) controllers.add(controller);
+      try {
+        const text = await resources.yaml(group, version, plural, name, namespace, controller?.signal);
+        if (cancelled) return;
+        const at = Date.now();
+        setState((previous) => ({
+          text,
+          error: null,
+          refreshError: null,
+          readAt: at,
+          // Only when the bytes actually differ. A pod's status is rewritten
+          // constantly; "changed" has to mean the document changed, or it means
+          // nothing and the operator stops reading it.
+          changedAt: previous.text != null && previous.text !== text ? at : previous.changedAt,
+          loading: false,
+        }));
+      } catch (err) {
+        if (cancelled || err?.name === 'AbortError') return;
+        setState((previous) =>
+          previous.text == null
+            ? { ...previous, error: err, refreshError: null, loading: false }
+            : { ...previous, refreshError: err, loading: false },
+        );
+      } finally {
+        inFlight = false;
+        if (controller) controllers.delete(controller);
+      }
+    };
+
+    read();
+
+    if (!watch) {
+      return () => {
+        cancelled = true;
+        controllers.forEach((c) => c.abort());
+      };
+    }
+
+    const handle = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      read();
+    }, intervalMs);
+
+    // Coming back to a tab that has been hidden for an hour must not show what
+    // the cluster looked like an hour ago for another ten seconds.
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') read();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+
+    return () => {
+      cancelled = true;
+      clearInterval(handle);
+      document.removeEventListener('visibilitychange', onVisible);
+      controllers.forEach((c) => c.abort());
+    };
+    // `key` stands in for the five identity fields it is built from.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key, active, tick, watch, intervalMs]);
+
+  return { ...state, reload, watching: Boolean(active && watch) };
+}
+
 /* ── Generic resource listings (§4) ─────────────────────────────────────── */
 
 const EMPTY = [];
