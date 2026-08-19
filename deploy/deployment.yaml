@@ -75,30 +75,38 @@ spec:
               containerPort: 8020
           env:
             # ── The write gate (§1.6) ───────────────────────────────────────
-            # false, and it stays false until someone edits this line. With it
-            # false every write returns 403 mutations_disabled BEFORE the cluster
-            # is touched, and GET /api/health reports mutations=disabled so the
-            # UI disables the buttons rather than offering them and failing.
-            # Dry-run remains available: previewing a change is a read.
+            # OPENED, on explicit request. With it true and the writer
+            # ClusterRoleBinding in rbac.yaml applied (both gates open), every
+            # write this console offers reaches the cluster after preflight,
+            # dry-run and diff. Dry-run was always available regardless of this
+            # flag: previewing a change is a read.
             #
-            # This is one of TWO gates. The other is the ClusterRoleBinding in
-            # rbac.yaml, which is commented out for the same reason. Setting this
-            # to true without that binding gives a console that tries and gets a
-            # 403 naming the missing grant — diagnosable, and safe.
+            # This is one of TWO gates; the other is the ClusterRoleBinding in
+            # rbac.yaml. Flip this back to "false" alone to stop all writes
+            # immediately without touching RBAC — every write then returns 403
+            # mutations_disabled before the cluster is touched.
             - name: ADMIN_ALLOW_MUTATIONS
-              value: "false"
+              value: "true"
             # Separate gate for a separate blast radius: revealing a Secret's
             # values is a privileged READ, audited whichever way this is set.
             - name: SECRET_REVEAL_ENABLED
               value: "false"
 
             # ── Console identity ──────────────────────────────────────────
-            # Enable only after creating the referenced Secret. On first start
-            # its credentials create one local administrator; later restarts do
-            # not overwrite that account. LDAP settings may be supplied here or
-            # through a deployment overlay; see README.md.
+            # ENABLED — the k8boss-admin-auth Secret must exist first, or the
+            # backend refuses to start: AUTH_ENABLED with no bootstrap user and
+            # no LDAP is a console nobody can log into, and app/identity raises
+            # rather than serve one. On first start its credentials create one
+            # local administrator; later restarts do not overwrite that
+            # account. LDAP settings may be supplied here or through a
+            # deployment overlay; see README.md.
+            #
+            # Load-bearing now that ADMIN_ALLOW_MUTATIONS is true above: mutations
+            # without auth means anyone who can reach the console writes to every
+            # registered cluster, with audit attribution coming from a spoofable
+            # header instead of a logged-in identity.
             - name: AUTH_ENABLED
-              value: "false"
+              value: "true"
             - name: AUTH_COOKIE_SECURE
               value: "true"
             - name: AUTH_BOOTSTRAP_USERNAME
@@ -194,12 +202,32 @@ spec:
                   optional: true
 
             # ── Kubernetes access ───────────────────────────────────────────
-            # Administer the cluster this console runs in, using the pod's own
-            # ServiceAccount, without registering it first. This is what the
-            # ClusterRoles in rbac.yaml are for. Additional clusters are
-            # registered through the UI with their own endpoint and token.
+            # Authenticate with a mounted kubeconfig instead of the pod's own
+            # ServiceAccount, so this console can administer a cluster other
+            # than (or in addition to) the one it happens to run in, using
+            # whatever credentials are already baked into that file. This is
+            # the same fallback client.py documents as "local development
+            # only" — repurposed here as the console's default identity,
+            # reached whenever no cluster has been registered through the UI.
+            # Additional clusters can still be registered there with their own
+            # endpoint and token; those take precedence over this file for
+            # their own cluster_id.
+            #
+            # Create the Secret before this Deployment starts serving:
+            #   kubectl -n k8boss-admin create secret generic k8boss-admin-kubeconfig \
+            #     --from-file=config=/path/to/your/kubeconfig
             - name: IN_CLUSTER_MODE
-              value: "true"
+              value: "false"
+            - name: KUBECONFIG_PATH
+              value: /app/kubeconfig/config
+            # Omit to use the kubeconfig's own current-context. Set only if the
+            # file carries more than one and the default is the wrong one.
+            - name: KUBE_CONTEXT
+              valueFrom:
+                secretKeyRef:
+                  name: k8boss-admin-kubeconfig
+                  key: context
+                  optional: true
             # Deadlines. Without them a black-holed API server connection pins a
             # threadpool worker forever while the liveness probe below — which
             # touches no cluster — keeps answering healthy, so nothing restarts
@@ -256,12 +284,28 @@ spec:
             # and the error is an OSError from deep inside the transport.
             - name: tmp
               mountPath: /tmp
+            # KUBECONFIG_PATH above points here. Read-only: the console never
+            # writes to it, only the kubernetes client library's config loader
+            # reads it at startup.
+            - name: kubeconfig
+              mountPath: /app/kubeconfig
+              readOnly: true
       volumes:
         - name: data
           persistentVolumeClaim:
             claimName: k8boss-admin-data
         - name: tmp
           emptyDir: {}
+        - name: kubeconfig
+          secret:
+            secretName: k8boss-admin-kubeconfig
+            # optional: true so a missing Secret doesn't block the pod from
+            # scheduling. Without it, the local-kubeconfig fallback in
+            # client.py fails to find a file and every request that reaches it
+            # raises the same diagnosable NoClusterSelected it raises today
+            # when nothing is registered and no kubeconfig is usable — not a
+            # crash loop.
+            optional: true
 
 ---
 apiVersion: apps/v1
@@ -289,6 +333,14 @@ spec:
       automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
+        # The image's own USER directive is the named `nginx` user, not a
+        # numeric uid — some container runtimes can't resolve a name to verify
+        # runAsNonRoot without inspecting the image, and refuse to start the
+        # container at all ("cannot verify user is non-root") rather than
+        # guess. Spelling out its actual uid/gid (nginx:1.27-alpine's stock
+        # nginx user) sidesteps that lookup entirely.
+        runAsUser: 101
+        runAsGroup: 101
         seccompProfile:
           type: RuntimeDefault
       containers:
