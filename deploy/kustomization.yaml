@@ -2,11 +2,14 @@
 #
 #   kubectl apply -k deploy/
 #
-# What that gets you: a console that can READ every cluster it is registered
-# against, and write to none of them. Both write gates are closed —
-# ADMIN_ALLOW_MUTATIONS is "false" in deployment.yaml and the writer
-# ClusterRoleBinding in rbac.yaml is commented out. Opening them is a documented
-# two-step act; see the header of rbac.yaml.
+# What that gets you, AS CURRENTLY EDITED: both write gates are open —
+# ADMIN_ALLOW_MUTATIONS is "true" in deployment.yaml and the writer
+# ClusterRoleBinding in rbac.yaml (including its wildcard apiGroups:["*"] rule)
+# is applied — and the backend authenticates via a mounted kubeconfig
+# (IN_CLUSTER_MODE=false) instead of the pod's own ServiceAccount. Create the
+# k8boss-admin-kubeconfig Secret before applying, or the backend has no cluster
+# to talk to until one is registered through the UI. See the headers of
+# rbac.yaml and deployment.yaml for what each opt-in costs and how to revert it.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 

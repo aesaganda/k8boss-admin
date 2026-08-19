@@ -15,12 +15,18 @@
 #   APPLIED   ServiceAccount k8boss-admin
 #   APPLIED   ClusterRole k8boss-admin-reader
 #   APPLIED   ClusterRoleBinding k8boss-admin-reader
-#   APPLIED   ClusterRole k8boss-admin-writer   (a role grants nothing until it
-#                                                is bound; defining it is safe)
-#   COMMENTED ClusterRoleBinding k8boss-admin-writer  — the last document below.
+#   APPLIED   ClusterRole k8boss-admin-writer, INCLUDING the wildcard
+#             apiGroups:["*"]/resources:["*"] rule — deliberately opted into
+#             below. This is cluster-admin wearing a different name: write
+#             over ValidatingWebhookConfigurations, over RBAC itself, and over
+#             every CRD any operator has installed. The console's own
+#             ServiceAccount is a privilege-escalation path for anyone who can
+#             reach its port. Chosen explicitly for this deployment; revert by
+#             deleting the wildcard rule if that stops being true.
+#   APPLIED   ClusterRoleBinding k8boss-admin-writer  — the last document below.
 #
-# So `kubectl apply -f rbac.yaml` unmodified produces a console that can read
-# every cluster it is registered against and write to none of them.
+# So `kubectl apply -f rbac.yaml` produces a console that can read every
+# cluster it is registered against and write to all of them, unrestricted.
 #
 # THERE ARE TWO GATES AND BOTH MUST BE OPENED for a write to reach a cluster:
 #
@@ -303,49 +309,42 @@ rules:
 
   # §4 generic write over ANYTHING the cluster serves — CRDs included.
   #
-  # DELIBERATELY NOT GRANTED. The resource browser can *display* every resource
-  # in the catalog, and with the rules above it can write the ones this console
-  # has typed pages for. Editing a resource outside that set returns 403
-  # rbac_denied naming the exact verb/group/resource that is missing, which is a
-  # sentence an operator can act on.
-  #
-  # The alternative is the block below, which is cluster-admin wearing a
-  # different name. If you need it, uncomment it knowing that: it grants write
-  # over ValidatingWebhookConfigurations, over RBAC itself, and over every CRD
-  # any operator has installed — and that the console's own ServiceAccount then
-  # becomes a privilege-escalation path for anyone who can reach its port.
-  #
-  # - apiGroups: ["*"]
-  #   resources: ["*"]
-  #   verbs: ["create", "update", "patch", "delete"]
+  # OPTED IN for this deployment, on explicit request. Without the rules above,
+  # this alone would be the only line standing between the resource browser and
+  # every object the cluster serves; it is cluster-admin wearing a different
+  # name. It grants write over ValidatingWebhookConfigurations, over RBAC
+  # itself, and over every CRD any operator has installed — and it makes the
+  # console's own ServiceAccount a privilege-escalation path for anyone who can
+  # reach its port. Delete this rule to fall back to the typed-resource-only
+  # writer role above it, which is what the console's UI actually uses.
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: ["create", "update", "patch", "delete"]
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ClusterRoleBinding for the writer role — COMMENTED OUT ON PURPOSE.
+# ClusterRoleBinding for the writer role — OPTED IN.
 #
-# This is the deliberate opt-in. Uncomment the document below and re-apply, then
-# set ADMIN_ALLOW_MUTATIONS=true in deployment.yaml. Both, in that order: the
-# binding first means the console's own connection test reports the write
-# permissions as held before anything offers a button that uses them.
-#
-#   kubectl apply -f deploy/rbac.yaml
-#   kubectl -n k8boss-admin set env deployment/k8boss-admin-backend ADMIN_ALLOW_MUTATIONS=true
+# The binding is applied before ADMIN_ALLOW_MUTATIONS is set in deployment.yaml,
+# same ordering the read-only default documented: the console's own connection
+# test reports the write permissions as held before anything offers a button
+# that uses them.
 #
 # To go back to read-only, do the reverse and delete the binding:
 #
 #   kubectl delete clusterrolebinding k8boss-admin-writer
-#
-# ---
-# apiVersion: rbac.authorization.k8s.io/v1
-# kind: ClusterRoleBinding
-# metadata:
-#   name: k8boss-admin-writer
-#   labels:
-#     app.kubernetes.io/name: k8boss-admin
-# roleRef:
-#   apiGroup: rbac.authorization.k8s.io
-#   kind: ClusterRole
-#   name: k8boss-admin-writer
-# subjects:
-#   - kind: ServiceAccount
-#     name: k8boss-admin
-#     namespace: k8boss-admin
+#   kubectl -n k8boss-admin set env deployment/k8boss-admin-backend ADMIN_ALLOW_MUTATIONS=false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: k8boss-admin-writer
+  labels:
+    app.kubernetes.io/name: k8boss-admin
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: k8boss-admin-writer
+subjects:
+  - kind: ServiceAccount
+    name: k8boss-admin
+    namespace: k8boss-admin
