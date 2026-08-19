@@ -217,6 +217,38 @@ test.describe('YAML editor gutter and highlighting', () => {
     await expect(page.getByTestId('yaml-editor-gutter').locator('.admin-yaml__lineno--error')).toHaveCount(0);
   });
 
+  test('Escape arms the way out of the box, and does not throw the manifest away', async ({ page }) => {
+    await openEditor(page, 'a: 1');
+    const input = page.getByTestId('yaml-editor-input');
+    await input.click();
+
+    // The keystroke the hint under the box recommends. It used to reach
+    // PatternFly's Modal, which closes on Escape — so following the editor's
+    // own instructions discarded whatever had been typed into it.
+    await page.keyboard.press('Escape');
+    await expect(page.getByTestId('mutation-dialog')).toBeVisible();
+    await expect(input).toHaveValue('a: 1');
+
+    // And the Tab it armed moves focus out rather than indenting: that is the
+    // whole point of arming it, and it is what makes the box escapable without
+    // a mouse.
+    await page.keyboard.press('Tab');
+    await expect(input).toHaveValue('a: 1');
+    await expect(input).not.toBeFocused();
+  });
+
+  test('Escape twice still closes the dialog', async ({ page }) => {
+    await openEditor(page, 'a: 1');
+    await page.getByTestId('yaml-editor-input').click();
+
+    // The other exit. A dialog that cannot be dismissed from the control that
+    // fills it is the same trap in the other direction, so the second Escape is
+    // deliberately not intercepted.
+    await page.keyboard.press('Escape');
+    await page.keyboard.press('Escape');
+    await expect(page.getByTestId('mutation-dialog')).toHaveCount(0);
+  });
+
   test('Tab still indents inside the box', async ({ page }) => {
     // The textarea is now transparent, overlaid and inside a flex frame. None
     // of that may cost it the editing behaviour it had: Tab is what indents
