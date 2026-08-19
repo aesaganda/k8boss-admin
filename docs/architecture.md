@@ -183,7 +183,7 @@ reason.
 |---|---|
 | `api/client.js` | One fetch wrapper. `ApiError.code` carries the §1.3 code; callers branch on the code, never on a message |
 | `contexts/` | Cluster (active cluster + switcher), Health (mutations gate, degraded list), Namespace, Notification, Theme |
-| `components/ui/` | The toolbox: `DataTable`, `PageHeader`, `StatusBadge`, `MetricCard`, `PartialBanner`, `ConfirmDialog`, `CodeBlock`, `DescriptionList`, cells, inputs, states |
+| `components/ui/` | The toolbox: `DataTable`, `PageHeader`, `StatusBadge`, `MetricCard`, `PartialBanner`, `ConfirmDialog`, `CodeBlock`, `DescriptionList`, cells, inputs, states. `columnWidths.js` sits behind `DataTable` and owns the resizable columns: the per-table widths, their persistence, and the drag and keyboard lifecycle |
 | `components/MutationDialog.jsx` | The dry-run → diff → confirm spine every write dialog is built on |
 | `components/DiffView.jsx`, `YamlEditor.jsx` | Rendering the unified diff; editing a manifest |
 | `components/{Scale,Restart,Suspend,Rollback,Delete,Cordon,Drain}Dialog.jsx` | The seven actions, all over `MutationDialog` |

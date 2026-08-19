@@ -11,7 +11,7 @@
  * a toy: an operator who widens Images to read a digest does not want it back
  * at 90px the moment the table refreshes.
  *
- * Four properties are load-bearing.
+ * Six properties are load-bearing.
  *
  * **The trailing column is never pinned.** It absorbs the leftover width, and
  * that is what makes every other column exactly as wide as it was dragged. With
@@ -26,9 +26,25 @@
  * would jump on first grab and nothing the operator did caused it.
  *
  * **Widths are pixels and the table may outgrow its container.** The caller
- * gives the table `max(100%, minTableWidth)`, so widening one column pushes the
- * table into the page's horizontal scroll instead of squeezing the others below
- * a readable floor.
+ * hands `minTableWidth` to the stylesheet as `--admin-table-min-width`, and
+ * `.admin-table--sized` resolves it as `max(100%, …)`: widening one column
+ * pushes the table into the page's horizontal scroll instead of squeezing the
+ * others below a readable floor. It is a custom property rather than an inline
+ * width because the stylesheet has to be able to take it away again — see the
+ * next property.
+ *
+ * **The widths are abandoned where PatternFly restacks the table.** Below 48rem
+ * the table becomes one card per row: the header is gone, every resize handle
+ * with it, and there are no columns left for a pixel width to describe. A width
+ * set on a desktop would leave that card list frozen at desktop width, scrolled
+ * sideways, with nothing on screen to undo it.
+ *
+ * **A drag writes the DOM, not React state.** Only the first move goes through
+ * a render — it is what puts the `<colgroup>` on the table — and every move
+ * after it sets `col.style.width` directly, with one commit on release.
+ * Rendering per move rebuilds every row, and PatternFly measures every cell it
+ * renders: on a listing of a few thousand pods that is most of a second per
+ * pointer event, and the column lags the cursor by the length of the drag.
  *
  * **A width we could not store is not an error.** `localStorage` throws in
  * private modes and when a quota is full. Resizing still works for the session;
@@ -152,9 +168,6 @@ function isRtl(node) {
 export function useColumnWidths({ tableId, columnKeys, enabled = true, trailingMinWidth = UNPINNED_MIN_WIDTH }) {
   const [widths, setWidths] = useState(() => (enabled ? readWidths(tableId) : {}));
   const [resizing, setResizing] = useState(null);
-  // The measured width of the handle's own column, taken when it takes focus.
-  // See `resizerProps` for why it is measured then and not on every render.
-  const [focused, setFocused] = useState(null);
 
   // A synchronous mirror of `widths`. A pointermove computes the next width
   // from the previous one, and reading it back out of React state would read
@@ -197,10 +210,14 @@ export function useColumnWidths({ tableId, columnKeys, enabled = true, trailingM
    * object each render because `Th` also keys its truncation measurement on the
    * ref's identity (`useEffect(..., [cellRef])`, where its own fallback is a
    * fresh `createRef()` every render). Handing it one stable object would run
-   * that measurement once and never again — so a column narrowed until its
-   * header clipped would never gain the tab stop and tooltip PatternFly gives
-   * every other truncated header, on exactly the columns this feature lets you
-   * narrow.
+   * that measurement once and never again.
+   *
+   * What that measurement drives is one thing: the tab stop `Th` puts on a
+   * header whose text is clipped, so it can be reached and read. It applies
+   * only to columns without a sort or select control — a sortable header is
+   * `tabIndex: -1` regardless — and not to the hover tooltip, which compares
+   * `offsetWidth` to `scrollWidth` live and was never affected. Small, but it
+   * is exactly the columns this feature lets an operator narrow.
    */
   const headerNode = useCallback((key) => {
     let node = headerRefs.current.get(key);
@@ -244,6 +261,44 @@ export function useColumnWidths({ tableId, columnKeys, enabled = true, trailingM
     if (!element) return null;
     return sanitizeWidth(element.getBoundingClientRect().width);
   }, []);
+
+  /**
+   * Put the column's current width on the handle, for the screen reader.
+   *
+   * Written to the element rather than held in state, for the same reason the
+   * drag writes `<col>` directly: this runs on focus and on blur, and a state
+   * update there re-renders every row in the table. On a few thousand pods that
+   * is half a second per Tab through the header — a cost only a keyboard user
+   * pays, which is the wrong way round.
+   *
+   * Withholding the number is not an option either: Chrome fills a focusable
+   * separator's missing `aria-valuenow` with 50, which is below the 56 this
+   * handle declares as its minimum, so a 97px column is announced as narrower
+   * than its own floor.
+   */
+  const syncValue = useCallback(
+    (element, key) => {
+      if (!element) return;
+      const pinned = widthsRef.current[key];
+      const width = pinned ?? measure(key);
+      if (width == null) return;
+      element.setAttribute('aria-valuenow', String(width));
+      element.setAttribute(
+        'aria-valuetext',
+        pinned == null ? `Automatic width, ${width} pixels` : `${width} pixels`,
+      );
+    },
+    [measure],
+  );
+
+  /** The same, after the browser has laid out whatever just changed. */
+  const syncValueAfterCommit = useCallback(
+    (element, key) => {
+      if (!element) return;
+      window.requestAnimationFrame(() => syncValue(element, key));
+    },
+    [syncValue],
+  );
 
   /** Every pinnable column pinned at what it currently measures, leaving the
    *  ones already pinned exactly where the operator put them. */
@@ -291,8 +346,9 @@ export function useColumnWidths({ tableId, columnKeys, enabled = true, trailingM
       // and storage are told what the operator settled on.
       if (committed) applyWidths(state.live, { persist: true });
       else applyWidths(state.previous);
+      syncValueAfterCommit(state.node, state.key);
     },
-    [applyWidths],
+    [applyWidths, syncValueAfterCommit],
   );
 
   const onPointerDown = useCallback(
@@ -411,11 +467,14 @@ export function useColumnWidths({ tableId, columnKeys, enabled = true, trailingM
       const handle = headerRefs.current.get(key)?.current?.querySelector('.admin-col-resizer');
       if (handle) {
         handle.focus();
+        // Focus arrives before the reset has been rendered, so the width the
+        // handle would announce is the one it is about to stop having.
+        syncValueAfterCommit(handle, key);
         return true;
       }
     }
     return false;
-  }, [columnKeys]);
+  }, [columnKeys, syncValueAfterCommit]);
 
   const onKeyDown = useCallback(
     (event, key) => {
@@ -486,50 +545,55 @@ export function useColumnWidths({ tableId, columnKeys, enabled = true, trailingM
       role: 'separator',
       'aria-orientation': 'vertical',
       'aria-label': `Resize the ${title} column`,
-      // A pinned column reports the width it was given; an automatic one
-      // reports what it measures, taken on focus.
-      //
-      // Withholding the number instead is worse than useless: Chrome fills a
-      // focusable separator's missing value with 50, which lands *below* the
-      // declared minimum of 56 and tells a screen-reader user the column is at
-      // its narrowest when it is 97px wide. Measuring on focus rather than on
-      // every render keeps it to one layout read at the moment it is read out,
-      // instead of one per header per render of the table.
-      'aria-valuenow': widths[key] ?? (focused?.key === key ? focused.width : undefined),
+      // A pinned column's width is known without measuring, so React can
+      // render it. An automatic one is measured onto the element by
+      // `syncValue` when the handle takes focus, which is when it is read.
+      'aria-valuenow': widths[key] ?? undefined,
       'aria-valuemin': MIN_COLUMN_WIDTH,
       'aria-valuemax': MAX_COLUMN_WIDTH,
-      'aria-valuetext':
-        widths[key] == null
-          ? `Automatic width${focused?.key === key && focused.width != null ? `, ${focused.width} pixels` : ''}`
-          : `${widths[key]} pixels`,
+      'aria-valuetext': widths[key] == null ? undefined : `${widths[key]} pixels`,
       tabIndex: 0,
       className: `admin-col-resizer${resizing === key ? ' admin-col-resizer--active' : ''}`,
       // Short on purpose: `title` becomes the accessible description, and this
       // is read out once per column to anybody tabbing through the header.
       title: 'Drag to resize. Home restores the automatic width.',
       'data-testid': `column-resizer-${key}`,
-      onFocus: () => {
-        const width = widths[key] ?? measure(key);
-        setFocused((current) => (current?.key === key && current.width === width ? current : { key, width }));
-      },
-      onBlur: () => setFocused((current) => (current?.key === key ? null : current)),
+      onFocus: (event) => syncValue(event.currentTarget, key),
       onPointerDown: (event) => onPointerDown(event, key),
       onPointerMove,
       onPointerUp,
       onPointerCancel,
       onLostPointerCapture: onPointerCancel,
-      onKeyDown: (event) => onKeyDown(event, key),
+      onKeyDown: (event) => {
+        onKeyDown(event, key);
+        // The width the handle reports has just changed under it, and for a
+        // column handed back its automatic width there is nothing to report
+        // until the browser has laid it out again.
+        syncValueAfterCommit(event.currentTarget, key);
+      },
       onDoubleClick: (event) => {
         event.preventDefault();
         event.stopPropagation();
         resetColumn(key);
+        syncValueAfterCommit(event.currentTarget, key);
       },
       // The handle sits inside the header cell, and on a sortable column that
       // cell reacts to clicks. Sorting a table because somebody grabbed its
       // edge is the kind of surprise that makes people stop grabbing edges.
       onClick: (event) => event.stopPropagation(),
     }),
-    [focused, measure, onKeyDown, onPointerCancel, onPointerDown, onPointerMove, onPointerUp, resetColumn, resizing, widths],
+    [
+      onKeyDown,
+      onPointerCancel,
+      onPointerDown,
+      onPointerMove,
+      onPointerUp,
+      resetColumn,
+      resizing,
+      syncValue,
+      syncValueAfterCommit,
+      widths,
+    ],
   );
 
   return {

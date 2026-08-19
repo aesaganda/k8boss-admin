@@ -80,6 +80,53 @@ test.describe('resizable table columns', () => {
     expect(await headerWidth(page, 'Images')).toBeCloseTo(before - 60, 0);
   });
 
+  test('the column tracks the pointer during the drag, not only on release', async ({ page }) => {
+    await openWorkloads(page);
+
+    const before = await headerWidth(page, 'Name');
+    const box = await page.getByTestId('column-resizer-name').boundingBox();
+    const y = box.y + box.height / 2;
+    const x = box.x + box.width / 2;
+    await page.mouse.move(x, y);
+    await page.mouse.down();
+    await page.mouse.move(x + 60, y, { steps: 4 });
+    await page.mouse.move(x + 200, y, { steps: 4 });
+
+    // Measured with the button still down. Every other test in this file reads
+    // the width after release, where the React commit sets it — so they pass
+    // whether or not the per-move DOM writes happen at all, and those writes
+    // are the difference between the column following the cursor and jumping
+    // to its final width when the operator lets go.
+    expect(await headerWidth(page, 'Name')).toBeCloseTo(before + 200, 0);
+    const live = await page
+      .getByRole('grid', { name: 'Workloads' })
+      .evaluate((table) => table.style.getPropertyValue('--admin-table-min-width'));
+    expect(parseInt(live, 10)).toBeGreaterThan(0);
+
+    await page.mouse.up();
+    expect(await headerWidth(page, 'Name')).toBeCloseTo(before + 200, 0);
+  });
+
+  test('Escape abandons a drag and leaves nothing behind', async ({ page }) => {
+    await openWorkloads(page);
+
+    const before = await headerWidth(page, 'Name');
+    const box = await page.getByTestId('column-resizer-name').boundingBox();
+    const y = box.y + box.height / 2;
+    const x = box.x + box.width / 2;
+    await page.mouse.move(x, y);
+    await page.mouse.down();
+    await page.mouse.move(x + 220, y, { steps: 6 });
+    await page.keyboard.press('Escape');
+    await page.mouse.up();
+
+    // The widths a drag applies go straight to the DOM, so abandoning one has
+    // to put back a width React never rendered — and must not leave a
+    // preference behind for a drag the operator explicitly gave up on.
+    expect(await headerWidth(page, 'Name')).toBeCloseTo(before, 0);
+    expect(await page.evaluate((key) => window.localStorage.getItem(key), STORAGE_KEY)).toBeNull();
+  });
+
   test('the width outlives a reload', async ({ page }) => {
     await openWorkloads(page);
 
@@ -254,18 +301,22 @@ test.describe('resizable table columns', () => {
       expect(cell.overflow).toBe(cell.isAction ? 'visible' : 'hidden');
     }
 
-    // And the menu really does open to its full size inside that cell.
-    await page.getByRole('grid', { name: 'Workloads' }).getByRole('row').nth(1).getByRole('button').last().click();
-    const menu = page.getByRole('menu');
-    await expect(menu).toBeVisible();
-    const clipped = await menu.evaluate((node) => {
-      const cell = node.closest('td');
-      if (!cell) return 0;
-      const box = node.getBoundingClientRect();
-      const cellBox = cell.getBoundingClientRect();
-      return Math.round(Math.max(0, box.right - cellBox.right, cellBox.left - box.left));
-    });
-    expect(clipped).toBe(0);
+    // And the kebab itself is whole. That cell is the one that gives up its
+    // width to whatever the others release, so it is also the one that ends up
+    // narrowest — clipping it cuts the button, which is all it holds.
+    const kebab = await page
+      .getByRole('grid', { name: 'Workloads' })
+      .getByRole('row')
+      .nth(1)
+      .getByRole('button')
+      .last()
+      .evaluate((button) => {
+        const cell = button.closest('td');
+        const box = button.getBoundingClientRect();
+        const cellBox = cell.getBoundingClientRect();
+        return Math.round(Math.max(0, box.right - cellBox.right, cellBox.left - box.left));
+      });
+    expect(kebab).toBe(0);
   });
 
   test('resetting hands focus on rather than dropping it', async ({ page }) => {

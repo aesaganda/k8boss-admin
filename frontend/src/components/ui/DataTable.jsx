@@ -85,7 +85,7 @@ export function DataTable({
   sort,
   onSort,
   filterText = '',
-  ariaLabel = 'Resources',
+  ariaLabel,
   tableId,
   resizableColumns = true,
   variant = 'compact',
@@ -94,6 +94,12 @@ export function DataTable({
   footer,
   className,
 }) {
+  // Defaulted here rather than in the parameter list, because the same value is
+  // the identity column widths are stored under: a table that never named
+  // itself would otherwise file its widths under "Resources" and share them
+  // with every other unnamed table, silently and across pages.
+  const label = ariaLabel ?? 'Resources';
+
   const controlled = typeof onSort === 'function';
   const [internalSort, setInternalSort] = useState(() => sort ?? { key: null, direction: 'asc' });
 
@@ -187,7 +193,7 @@ export function DataTable({
     resetAll: resetColumnWidths,
     focusFirstResizer,
   } = useColumnWidths({
-    tableId: tableId ?? ariaLabel,
+    tableId: tableId ?? ariaLabel,   // undefined for both: resize, do not remember
     columnKeys: resizableKeys,
     enabled: resizableColumns,
     // The row-actions column holds one kebab, so it needs far less room than a
@@ -341,7 +347,7 @@ export function DataTable({
   return (
     <div className={className}>
       <Table
-        aria-label={ariaLabel}
+        aria-label={label}
         // A drag writes the column widths straight onto these elements rather
         // than through a render; `columnWidths.js` says why.
         ref={tableRef}

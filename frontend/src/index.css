@@ -313,10 +313,15 @@ body {
  * labels for us; it does nothing for body cells, and a Status column dragged
  * to its minimum painted "Progressing" across the Ready column's "4 / 5".
  *
- * The row-actions cell is exempt on purpose: PatternFly renders its kebab menu
- * inline, inside that very cell, so clipping the cell would clip the menu shut.
- * (The class is `pf-v6-c-table__action` — `pf-m-action` is a different thing,
- * set on cells that merely *contain* an action.)
+ * The row-actions cell is exempt: it is the column that gives up its width to
+ * whatever the others release, so it is also the one that ends up at its
+ * narrowest when they take width back — and clipping it there cuts into the
+ * kebab button itself, which is the whole of that cell's content. The menu is
+ * safe either way; PatternFly renders it in a portal, not in the cell.
+ *
+ * The class is `pf-v6-c-table__action`. `pf-m-action` is a different thing —
+ * PatternFly sets it from the `hasAction` prop, which nothing here passes, so a
+ * rule written against it exempts nothing at all.
  */
 .admin-table--sized tbody td:not(.pf-v6-c-table__action) {
   overflow: hidden;
