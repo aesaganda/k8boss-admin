@@ -61,6 +61,11 @@ from app.models import AuditRecord, utcnow
 
 logger = logging.getLogger(__name__)
 
+#: The audit table under an alias, so :func:`chain_tip` can correlate a row
+#: against the rest of the table in one statement without SQLAlchemy folding the
+#: two references into the same FROM entry.
+_tip_candidate = AuditRecord.__table__.alias("tip_candidate")
+
 #: ``prev_hash`` of the first chained row. A literal rather than NULL so the
 #: first row is provably first: with NULL there, a verifier could not tell the
 #: genuine head of the chain from a row whose predecessor was deleted.
@@ -78,9 +83,15 @@ UNCHAINED_ATTR = "_k8boss_write_unchained"
 #: the model (a derived list would silently start covering, or stop covering,
 #: whatever the next schema change did).
 #:
-#: ``id`` is excluded because it is assigned by the database *after* this runs.
-#: Renumbering is still caught: :func:`verify` walks the links rather than the
-#: ids, so a row moved in id order becomes unreachable from GENESIS.
+#: ``id`` is excluded because it is assigned by the database *after* this runs,
+#: so there is nothing to hash yet.
+#:
+#: That means the hash alone cannot speak for a record's id, and renumbering is
+#: **not** caught by the link walk — a renumbered record stays perfectly
+#: reachable from GENESIS. It matters because ``GET /api/audit`` pages by
+#: descending id, so moving a record moves it in the operator's listing. The walk
+#: therefore checks separately that chain order and id order agree; see
+#: :func:`_verify_from_genesis`.
 HASHED_FIELDS: tuple[str, ...] = (
     "ts",
     "category",
@@ -148,21 +159,39 @@ def compute_event_hash(row: AuditRecord, prev_hash: str) -> str:
 def chain_tip(session: OrmSession) -> str:
     """The ``event_hash`` to link the next row to, or :data:`GENESIS`.
 
-    Highest id wins. That is the newest chained row under every normal
-    append-only history, and when it is not — because a concurrent writer already
-    linked to it — the UNIQUE constraint refuses the insert and the caller retries
-    with a freshly read tip. Choosing the tip cheaply and letting the database
-    arbitrate is what keeps this correct without an advisory lock.
+    The tip is the chained row **whose hash nothing else links to**, not simply
+    the one with the highest id. Those are the same row in an untouched trail,
+    and choosing by id looks simpler — but it hands an attacker a way to stop the
+    console recording anything ever again.
+
+    Renumbering one committed row to the highest id makes it the apparent tip.
+    Its ``event_hash`` is already the *next* row's ``prev_hash``, and
+    ``prev_hash`` is UNIQUE, so every subsequent chained INSERT collides. The
+    lookup has no advancing state, so it collides again on every retry, forever:
+    each new record burns its retries and lands unchained, and ``verify`` reports
+    the result as ``partial`` — the verdict reserved for benign residue. A single
+    ``UPDATE ... SET id`` silently converts the chain into a permanently dead one
+    that reports itself as merely incomplete.
+
+    The correlated subquery costs one indexed lookup against ``ix_audit_prev_hash``
+    per write, which is the same order of work the previous version did, and it
+    depends on the links rather than on a column an attacker can renumber.
 
     ``no_autoflush`` because this runs inside ``before_flush``: a session
     configured with ``autoflush=True`` would otherwise re-enter the flush it is
     already in.
     """
+    successor = select(AuditRecord.id).where(
+        AuditRecord.prev_hash == _tip_candidate.c.event_hash
+    )
     with session.no_autoflush:
         newest = session.execute(
-            select(AuditRecord.event_hash)
-            .where(AuditRecord.event_hash.is_not(None))
-            .order_by(AuditRecord.id.desc())
+            select(_tip_candidate.c.event_hash)
+            .where(
+                _tip_candidate.c.event_hash.is_not(None),
+                ~successor.exists(),
+            )
+            .order_by(_tip_candidate.c.id.desc())
             .limit(1)
         ).scalar()
     return newest or GENESIS
@@ -246,7 +275,7 @@ def verify(session: OrmSession, *, limit: int | None = None) -> dict[str, Any]:
     result is always ``partial`` and says ``anchored: false``. A windowed check
     reported as ``intact`` would be a claim about records nobody looked at.
 
-    Returns the §10.2 body::
+    Returns the §10.3 body::
 
         {"status": "intact"|"broken"|"partial",
          "verified": int, "unchained": int, "total": int,
@@ -340,6 +369,7 @@ def _verify_from_genesis(
     verified = 0
     seen: set[int] = set()
     tip: str | None = None
+    previous_id: int | None = None
 
     while prev in by_prev:
         candidates = by_prev[prev]
@@ -385,7 +415,30 @@ def _verify_from_genesis(
                     row.id, "event_hash mismatch: this row's content was modified"
                 ),
             }
+        if previous_id is not None and row.id <= previous_id:
+            # The chain is built in insertion order, so its order and the id
+            # order agree on every record this console has ever written. They
+            # disagree only if an id was changed after the fact — which the hash
+            # cannot detect on its own, because the id does not exist yet when
+            # the hash is computed.
+            #
+            # Worth detecting rather than shrugging at: `GET /api/audit` pages by
+            # descending id, so renumbering a record moves it in the listing an
+            # operator reads, and every hash still verifies while it does.
+            return {
+                "status": STATUS_BROKEN,
+                "anchored": True,
+                "verified": verified,
+                "tip": tip,
+                "first_break": _break(
+                    row.id,
+                    f"record {row.id} follows record {previous_id} in the chain but "
+                    "not in id order, so an id was changed after the record was "
+                    "written — which moves it in every listing that pages by id",
+                ),
+            }
         seen.add(row.id)
+        previous_id = row.id
         prev = row.event_hash
         tip = row.event_hash
         verified += 1
@@ -452,6 +505,20 @@ def _verify_window(session: OrmSession, limit: int) -> dict[str, Any]:
                     row.id,
                     "this record does not link to the one before it, which means "
                     "a record between them was deleted or reordered",
+                ),
+            }
+        if previous is not None and row.id <= previous.id:
+            # Same reasoning as the anchored walk: the hash cannot cover the id,
+            # so id order is checked against chain order separately.
+            return {
+                "status": STATUS_BROKEN,
+                "anchored": False,
+                "verified": verified,
+                "first_break": _break(
+                    row.id,
+                    f"record {row.id} follows record {previous.id} in the chain but "
+                    "not in id order, so an id was changed after the record was "
+                    "written",
                 ),
             }
         previous = row

@@ -173,7 +173,7 @@ reason.
 | `identity/oidc.py` | OpenID Connect: discovery, PKCE, and the ID-token verification each of whose checks blocks a specific attack |
 | `identity/handshake.py` | The sealed, short-lived cookie carrying one sign-in across the redirect. `SameSite=Lax`, unlike the session cookie, and the module says why |
 | `identity/roles.py` | Group → console role, with the tri-state that keeps "in no groups" apart from "we could not look" |
-| `identity/throttle.py` | Sign-in rate limiting, counted from the audit trail rather than from process memory |
+| `identity/throttle.py` | Sign-in rate limiting. Reserves before the password check, in its own table, so a burst cannot walk through the limit and a failed audit write cannot silently disable it |
 | `schema_upgrade.py` | Additive column upgrades for databases older than the current build, and a startup refusal when one could not be added |
 | `api/*.py` | Routers. Thin: parse, call, envelope. The logic lives below them |
 

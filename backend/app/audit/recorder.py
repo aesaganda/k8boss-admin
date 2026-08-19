@@ -315,23 +315,35 @@ def _insert_with_chain_retry(fields: dict[str, Any]) -> int | None:
                 setattr(row, integrity.UNCHAINED_ATTR, True)
             db.add(row)
             db.commit()
-            db.refresh(row)
+            # Captured immediately after the COMMIT and before anything else can
+            # fail. `record()` returning None means "the record was not written",
+            # and the caller puts that straight into the §1.5 response's
+            # `auditId` — so a refresh or a log call failing *after* a durable
+            # commit would tell the operator their change went unrecorded while
+            # the row sat in the table, verified and findable. Wrong in the
+            # direction that makes somebody go looking for evidence they already
+            # have.
+            written_id = row.id
             if last:
                 logger.error(
                     "Audit record %s was written OUTSIDE the hash chain after %d "
                     "contended attempts. The record is intact and complete; what "
                     "is missing is the cryptographic link that would prove it was "
                     "not altered afterwards. GET /api/audit/verify reports it as "
-                    "unchained.", row.id, CHAIN_RETRIES,
+                    "unchained.", written_id, CHAIN_RETRIES,
                 )
-            logger.info(
-                "audit id=%s %s %s %s/%s %s outcome=%s dry_run=%s actor=%s",
-                row.id, row.category, row.verb,
-                row.target.get("resource"), row.target.get("name"),
-                f"in {row.target.get('namespace')}" if row.target.get("namespace") else "cluster-wide",
-                row.outcome, row.dry_run, row.actor,
-            )
-            return row.id
+            try:
+                logger.info(
+                    "audit id=%s %s %s %s/%s %s outcome=%s dry_run=%s actor=%s",
+                    written_id, fields["category"], fields["verb"],
+                    fields["target"].get("resource"), fields["target"].get("name"),
+                    f"in {fields['target'].get('namespace')}"
+                    if fields["target"].get("namespace") else "cluster-wide",
+                    fields["outcome"], fields["dry_run"], fields["actor"],
+                )
+            except Exception:  # noqa: BLE001 - a log line must not lose a record
+                logger.debug("Could not log the audit record summary", exc_info=True)
+            return written_id
         except IntegrityError:
             _rollback(db)
             if last:
@@ -693,7 +705,7 @@ def stream(
 
 
 def verify_chain(*, limit: int | None = None) -> dict[str, Any]:
-    """§10.2 integrity report. See :func:`app.audit.integrity.verify`."""
+    """§10.3 integrity report. See :func:`app.audit.integrity.verify`."""
     db = database.SessionLocal()
     try:
         return integrity.verify(db, limit=limit)

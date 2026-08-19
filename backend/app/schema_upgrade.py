@@ -131,8 +131,10 @@ ADDITIVE_COLUMNS: tuple[AdditiveColumn, ...] = (
 #: (every statement is ``IF NOT EXISTS``) because an index is not something
 #: ``create_all`` adds to a table it did not create either.
 STANDALONE_INDEXES: tuple[str, ...] = (
-    # The login throttle counts one actor's recent attempts on every sign-in.
+    # Used by the audit page's actor filter. The throttle has its own table.
     "CREATE INDEX IF NOT EXISTS ix_audit_actor_ts ON audit_records (actor, ts)",
+    "CREATE INDEX IF NOT EXISTS ix_login_attempt_actor_ts "
+    "ON login_attempts (actor, ts)",
 )
 
 
@@ -220,6 +222,13 @@ def _execute_index(connection, statement: str) -> None:
     before the constraint existed, which is a fact an operator has to be told at
     boot rather than have quietly ignored.
     """
+    table = statement.split(" ON ", 1)[-1].split("(")[0].strip()
+    if table and _existing_columns(connection, table) is None:
+        # `login_attempts` is created by create_all on a fresh database and by
+        # this run's create_all on an upgrade, but a database whose create_all
+        # could not act has its own error — indexing a table that is not there
+        # would mask it with a confusing one.
+        return
     try:
         connection.execute(text(statement))
     except SQLAlchemyError:

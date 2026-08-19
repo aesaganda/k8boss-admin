@@ -317,6 +317,10 @@ If a rule is wrong, change `eslint.config.js`, where the change gets reviewed.
 **Dev runs SQLite, production runs PostgreSQL, and CI only exercises SQLite.**
 Anything engine-divergent — a raw SQL fragment, a reliance on SQLite's permissive
 typing — needs a deliberate Postgres check before it is believed.
+`scripts/postgres-check.py` is that check for the audit schema and the sign-in
+throttle; point it at a scratch database and run it. It exists because the first
+version of `schema_upgrade.py` deadlocked PostgreSQL at startup — forever, before
+serving a request — and SQLite could not reproduce it.
 
 ---
 

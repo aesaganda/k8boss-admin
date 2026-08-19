@@ -1,5 +1,5 @@
 """
-OpenID Connect single sign-on (§12.6).
+OpenID Connect single sign-on (§12.4).
 
 **These tests sign real tokens with a real key.** Mocking ``verify_id_token`` and
 asserting that the callback provisions a user would test the plumbing and none of

@@ -169,9 +169,10 @@ spec:
                   optional: true
 
             # ── Sign-in rate limiting ───────────────────────────────────────
-            # Counted from the audit trail, so the limit holds across replicas
-            # and survives a restart. 0 disables it, which leaves the login
-            # endpoint an unmetered password oracle.
+            # Each attempt reserves a row before the password is checked, so
+            # the limit holds across replicas, survives a restart, and cannot be
+            # walked through by a simultaneous burst. 0 disables it, which leaves
+            # the login endpoint an unmetered password oracle.
             - name: AUTH_THROTTLE_MAX_ATTEMPTS
               value: "10"
             - name: AUTH_THROTTLE_WINDOW_SECONDS

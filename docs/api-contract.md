@@ -671,7 +671,19 @@ the first one, so the result is always `partial` with `anchored: false`. Omit
 Concurrency: a UNIQUE constraint on `prev_hash` makes a forked chain impossible
 rather than merely detectable. Two replicas that read the same tip compute the
 same `prev_hash`, the second INSERT is refused by the database, and the writer
-retries against the new tip.
+retries against the new tip. The tip is the record nothing links to, not the
+highest id — choosing by id let a renumbered record become the apparent tip and
+collide with every subsequent write forever.
+
+**What `intact` does not mean.** It means every record present verifies and the
+links run unbroken. It does **not** mean nothing was removed from the end:
+deleting the newest N records leaves a shorter chain that is internally perfect,
+and no chain can detect that, because nothing in the table says where the end
+should be. Deletion from the *middle* is detected — the records after the gap
+stop linking back — as is renumbering, which is checked separately because a
+record's id does not exist yet when its hash is computed. Guarding the tail needs
+an anchor outside the database; §10.4 taken off-box on a schedule is the
+available one.
 
 ### 10.4 `GET /api/audit/export`
 

@@ -1,5 +1,5 @@
 """
-Console authentication in the audit trail, and the sign-in throttle (§10, §12.7).
+Console authentication in the audit trail, and the sign-in throttle (§10, §12.5).
 
 The trail used to hold cluster writes and a handful of user-administration rows.
 It now holds sign-ins too, and the reason is the one that motivates the whole
@@ -21,9 +21,10 @@ from __future__ import annotations
 
 import pytest
 
+from app import database
 from app.audit import recorder
 from app.config import settings
-from app.errors import IdentityProviderUnavailable
+from app.errors import IdentityProviderUnavailable, TooManyAttempts
 from app.identity import throttle
 from app.identity.service import create_local_user
 
@@ -286,6 +287,12 @@ def test_the_throttle_is_scoped_to_one_username(client, db_session, auth_enabled
 def test_a_provider_outage_does_not_count_toward_the_lockout(
     client, auth_enabled, monkeypatch
 ):
+    """A directory that is down must not also lock everyone out.
+
+    The reservation has to be taken before the password check for the burst
+    protection to hold, so it is *released* once the failure turns out to be the
+    provider's rather than the caller's.
+    """
     monkeypatch.setattr(settings, "auth_throttle_max_attempts", 2)
     monkeypatch.setattr(settings, "ldap_enabled", True)
 
@@ -346,7 +353,7 @@ def test_the_throttle_can_be_turned_off_deliberately(
         assert attempt(client, "erens", "wrong").status_code == 401
 
 
-def test_an_uncountable_trail_allows_the_sign_in_and_says_what_it_cost(
+def test_an_unreservable_attempt_allows_the_sign_in_and_says_what_it_cost(
     client, db_session, auth_enabled, monkeypatch, caplog
 ):
     """The uncomfortable direction, chosen deliberately.
@@ -360,13 +367,13 @@ def test_an_uncountable_trail_allows_the_sign_in_and_says_what_it_cost(
     """
     monkeypatch.setattr(settings, "auth_throttle_max_attempts", 1)
     create_local_user(db_session, username="erens", password=PASSWORD)
-    monkeypatch.setattr(throttle, "recent_failures", lambda actor: None)
+    monkeypatch.setattr(throttle, "reserve", lambda actor: None)
 
     with caplog.at_level("ERROR"):
         assert attempt(client, "erens", PASSWORD).status_code == 200
 
 
-def test_recent_failures_reports_none_rather_than_zero_when_it_cannot_look(
+def test_recent_attempts_reports_none_rather_than_zero_when_it_cannot_look(
     db_engine, monkeypatch
 ):
     """`0` says nobody has tried. `None` says we could not look. Not the same fact."""
@@ -374,4 +381,108 @@ def test_recent_failures_reports_none_rather_than_zero_when_it_cannot_look(
         "app.database.SessionLocal", lambda: (_ for _ in ()).throw(RuntimeError("down"))
     )
 
-    assert throttle.recent_failures("erens") is None
+    assert throttle.recent_attempts("erens") is None
+
+
+def test_a_concurrent_burst_cannot_walk_through_the_limit(tmp_path, monkeypatch):
+    """The check-then-act race, which a plain COUNT loses outright.
+
+    Counting alone let every request in a simultaneous burst read the same number
+    before any of them had recorded anything, so all of them proceeded: measured
+    at 30 concurrent guesses against a documented budget of 3, none refused,
+    every one reaching PBKDF2.
+
+    Run against a **file-backed** SQLite database rather than the suite's shared
+    in-memory one, because the shared fixture hands every thread the same
+    connection (`StaticPool`) and SQLite then refuses the nested transaction —
+    which would make this test fail for a reason that has nothing to do with the
+    property under test, and would make it pass on a design that still raced.
+    """
+    import threading
+
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from app.database import Base
+
+    url = f"sqlite:///{tmp_path / 'throttle.db'}"
+    engine = create_engine(url, connect_args={"check_same_thread": False, "timeout": 30})
+    Base.metadata.create_all(bind=engine)
+    monkeypatch.setattr(
+        database, "SessionLocal", sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    )
+    monkeypatch.setattr(settings, "auth_throttle_max_attempts", 3)
+
+    burst = 12
+    start = threading.Barrier(burst)
+    refused: list[bool] = []
+    lock = threading.Lock()
+
+    def guess():
+        start.wait()
+        try:
+            throttle.check("erens")
+            allowed = True
+        except TooManyAttempts:
+            allowed = False
+        with lock:
+            refused.append(not allowed)
+
+    threads = [threading.Thread(target=guess) for _ in range(burst)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    engine.dispose()
+
+    assert sum(refused) > 0, (
+        f"a burst of {burst} simultaneous attempts against a budget of 3 was not "
+        "throttled at all, which is the check-then-act race the reservation "
+        "design exists to close"
+    )
+    # The budget is delivered, not merely approached: no more attempts got past
+    # the gate than the limit allows.
+    assert refused.count(False) <= 3, refused
+
+
+def test_the_limit_survives_an_audit_trail_that_cannot_be_written(
+    client, db_session, auth_enabled, monkeypatch
+):
+    """The throttle must not depend on the audit INSERT succeeding.
+
+    When it counted audit rows, an INSERT that could not happen — disk full, a
+    hot standby, INSERT revoked while SELECT was retained — made the COUNT return
+    a genuine, indistinguishable `0`. The login endpoint became precisely the
+    unmetered password oracle the throttle exists to prevent, with no attempts
+    recorded and nothing saying that counting had stopped.
+    """
+    monkeypatch.setattr(settings, "auth_throttle_max_attempts", 3)
+    create_local_user(db_session, username="erens", password=PASSWORD)
+    monkeypatch.setattr(recorder, "record_console_event", lambda **kwargs: None)
+
+    statuses = [attempt(client, "erens", "wrong").status_code for _ in range(6)]
+
+    assert console_records("login") == []
+    assert 429 in statuses, (
+        "with the audit write failing, the throttle never engaged — the limiter "
+        "was reading the table that had stopped accepting rows"
+    )
+
+
+def test_a_successful_sign_in_clears_the_budget(
+    client, db_session, auth_enabled, monkeypatch
+):
+    """Otherwise an operator locks themselves out of their own console.
+
+    Reservations are taken before the password is checked, so successful
+    sign-ins take them too. Without a release, `max_attempts` successful sign-ins
+    inside one window would refuse the next one.
+    """
+    monkeypatch.setattr(settings, "auth_throttle_max_attempts", 3)
+    create_local_user(db_session, username="erens", password=PASSWORD)
+
+    for _ in range(8):
+        assert attempt(client, "erens", PASSWORD).status_code == 200
+
+    assert throttle.recent_attempts("erens") == 0

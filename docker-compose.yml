@@ -66,8 +66,9 @@ services:
       - LDAP_EMAIL_ATTRIBUTE=${LDAP_EMAIL_ATTRIBUTE:-mail}
       - LDAP_ADMIN_GROUP_DN=${LDAP_ADMIN_GROUP_DN:-}
       - LDAP_CONNECT_TIMEOUT_SECONDS=${LDAP_CONNECT_TIMEOUT_SECONDS:-5}
-      # Sign-in rate limiting. Counted from the audit trail, so it holds across
-      # replicas; 0 disables it and leaves the login endpoint unmetered.
+      # Sign-in rate limiting. Reserved per attempt in the console's database,
+      # so it holds across replicas; 0 disables it and leaves the login endpoint
+      # unmetered.
       - AUTH_THROTTLE_MAX_ATTEMPTS=${AUTH_THROTTLE_MAX_ATTEMPTS:-10}
       - AUTH_THROTTLE_WINDOW_SECONDS=${AUTH_THROTTLE_WINDOW_SECONDS:-300}
       # OpenID Connect single sign-on. Needs AUTH_ENABLED plus an issuer and a

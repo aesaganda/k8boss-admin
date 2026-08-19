@@ -100,16 +100,38 @@ engine divergence.
   reading and the UI explains it rather than treating it as a problem to clear.
 * The chain proves records were not altered **after** they were written. It says
   nothing about whether what was written was true: a compromised console writes
-  truthful-looking records and chains them correctly. It also does not protect
-  availability — anyone who can edit the table can drop it, and a dropped table
-  verifies vacuously. Off-box export (§10.4) addresses that, with different
-  assumptions.
+  truthful-looking records and chains them correctly.
+* **Truncation from the end is not detected, and cannot be by this mechanism.**
+  Deleting the newest N records leaves a shorter chain that is internally
+  perfect, and `verify` reports `intact` — correctly, because every record it can
+  see does verify. A chain proves the *integrity* of what is present; it cannot
+  prove that nothing is missing from the end, because nothing in the table says
+  where the end should be. Deleting from the *middle* is detected, because the
+  records after the gap no longer link back.
+
+  The general form is worse: anyone who can edit the table can drop it, and an
+  empty table verifies vacuously. Both are availability problems, and a chain is
+  not an availability mechanism.
+
+  What actually addresses them is an anchor the attacker cannot reach: the export
+  (§10.4) taken off-box on a schedule, a copy of the tip in a separate system, or
+  an external append-only store. The console does not do any of those on its own
+  today, and saying so is the point of this bullet — an operator who believes
+  `intact` means "nothing has been removed" has been told something false by
+  omission.
 * `audit_records` gained four nullable columns, which `create_all` will not add
   to an existing table. `app/schema_upgrade.py` adds them and **refuses to start**
   if any is still missing afterwards — the alternative being a console that
   serves every page correctly and records nothing.
 
 ## Alternatives considered
+
+**Recording the expected chain length or the tip in a second place.** This is the
+missing half of tail-truncation detection, and it is deferred rather than
+rejected: done inside the same database it is as removable as the trail, and done
+outside it needs somewhere to put it (a second datastore, a periodic export
+receipt, a log shipper's high-water mark) that this deployment does not currently
+assume. Recording the count in the same table would look like a fix and be none.
 
 **Signing each record with an asymmetric key.** Stronger: a verifier would not
 need the console's cooperation, and the console could not forge history even for

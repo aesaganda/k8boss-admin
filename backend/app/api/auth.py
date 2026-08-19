@@ -22,9 +22,10 @@ than a verified identity, which is exactly what it is.
 
 from __future__ import annotations
 
+import functools
 import logging
 import secrets
-from urllib.parse import urlencode
+from urllib.parse import parse_qsl, urlencode
 
 from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -40,6 +41,7 @@ from app.identity import handshake as handshake_service
 from app.identity import oidc, throttle
 from app.identity.dependencies import current_session, require_admin
 from app.identity.service import (
+    FEDERATED_SOURCES,
     ROLES,
     active_admin_count,
     authenticate,
@@ -92,10 +94,53 @@ def _session_body(identity) -> dict:
     }
 
 
-def _audit_user_action(verb: str, username: str, detail: str) -> None:
+def _audit_user_action(
+    verb: str,
+    username: str,
+    detail: str,
+    *,
+    outcome: str = "applied",
+    error: str | None = None,
+) -> None:
     recorder.record_console_event(
-        verb=verb, resource="users", name=username, outcome="applied", detail=detail,
+        verb=verb, resource="users", name=username, outcome=outcome, detail=detail,
+        error=error,
     )
+
+
+def audited_user_change(verb: str, name_of):
+    """Record the refusals as well as the successes on a user-administration route.
+
+    §10's whole argument is that a trail holding only what worked answers "what
+    changed" but not "who tried", and the second is the question asked after an
+    incident. That argument was being applied to cluster writes and not to the
+    endpoints that create administrators: every refusal above the success line —
+    a non-admin caller, a missing user, an attempt to demote the last
+    administrator or to deactivate one's own account — returned by raising, and
+    left nothing behind.
+
+    A decorator rather than try/except in three handlers, so a fourth handler
+    cannot be added without the question "and where is its audit call?" being
+    visible at the definition.
+    """
+    def decorate(handler):
+        @functools.wraps(handler)
+        def wrapper(*args, **kwargs):
+            try:
+                return handler(*args, **kwargs)
+            except AdminError as error:
+                _audit_user_action(
+                    verb,
+                    name_of(kwargs) or "(unknown)",
+                    f"Refused a console user change ({verb}).",
+                    # A refusal by the console's own rules, not by a cluster:
+                    # `denied` is §10's outcome for exactly that.
+                    outcome="denied",
+                    error=f"{error.code}: {error.message}",
+                )
+                raise
+        return wrapper
+    return decorate
 
 
 def _audit_signin(
@@ -191,9 +236,13 @@ def login(body: LoginBody, db: Session = Depends(get_db)) -> JSONResponse:
         raise Invalid("Application authentication is not enabled on this deployment.")
 
     actor = _normalized_or_raw(body.username)
-    # Before the password check, so a throttled request costs one indexed COUNT
-    # rather than a PBKDF2 verification — otherwise the throttle would still let
-    # an attacker consume the console's CPU at the rate they can send requests.
+    # Before the password check, so a throttled request costs one INSERT and one
+    # indexed COUNT rather than a 310,000-round PBKDF2 verification — otherwise
+    # the throttle still lets an attacker consume the console's CPU at the rate
+    # they can send requests, and every sync handler shares one threadpool.
+    #
+    # It reserves rather than merely counts: counting alone let a simultaneous
+    # burst all read the same number and all proceed. See app.identity.throttle.
     throttle.check(actor)
 
     try:
@@ -202,9 +251,15 @@ def login(body: LoginBody, db: Session = Depends(get_db)) -> JSONResponse:
         )
     except AdminError as error:
         # An identity provider that could not answer is not a credential
-        # rejection, and `failed` rather than `denied` keeps it out of the
-        # throttle count: a directory outage must not lock out every operator
-        # who tries during it.
+        # rejection. The reservation taken above is released, so a directory
+        # outage cannot lock out every operator who tries during it — they would
+        # be told to wait for something that was never their attempt's fault,
+        # on top of an outage.
+        #
+        # Released rather than never taken: the reservation has to precede the
+        # password check for the burst protection to hold, and whether this is a
+        # credential attempt is only known afterwards.
+        throttle.release(actor)
         _audit_signin(
             outcome="failed", username=actor, method=body.source,
             detail=f"Sign-in could not be completed via {body.source}.",
@@ -219,6 +274,12 @@ def login(body: LoginBody, db: Session = Depends(get_db)) -> JSONResponse:
                    "the submitted username, not a verified identity.",
         )
         raise InvalidCredentials()
+
+    # Clear the budget before anything else: a working account must not
+    # accumulate a lockout against itself, and this must happen even if the
+    # audit write below fails.
+    throttle.release(actor)
+    throttle.release(user.username)
 
     raw_token, identity = create_session(db, user)
     _audit_signin(
@@ -267,7 +328,7 @@ def logout(request: Request) -> Response:
 
 
 # --------------------------------------------------------------------------- #
-# OpenID Connect single sign-on (§12.6)
+# OpenID Connect single sign-on (§12.4)
 # --------------------------------------------------------------------------- #
 #
 # Two browser-navigation endpoints, which is what makes them different from
@@ -311,8 +372,18 @@ def _sso_failure(next_path: str, code: str, reason: str) -> RedirectResponse:
     drift from the §1.3 codes the rest of the app branches on.
     """
     logger.info("SSO sign-in failed: %s (%s)", code, reason)
-    query = urlencode({"auth_error": code, "auth_reason": reason})
-    return RedirectResponse(url=f"{next_path}?{query}", status_code=302)
+    # Merged into whatever query `next_path` already carries, rather than
+    # concatenated. `safe_next_path` permits a query string — the SPA sends
+    # `pathname + search`, so a deep link like `/events?type=Warning` is normal —
+    # and appending `?auth_error=...` to that produced
+    # `/events?type=Warning?auth_error=invalid`, in which `auth_error` is not a
+    # parameter at all. `URLSearchParams.get('auth_error')` then returns null,
+    # the login page renders no alert, and a failed sign-in looks like nothing
+    # happened.
+    path, _, existing = next_path.partition("?")
+    params = parse_qsl(existing, keep_blank_values=True)
+    params += [("auth_error", code), ("auth_reason", reason)]
+    return RedirectResponse(url=f"{path}?{urlencode(params)}", status_code=302)
 
 
 @router.get("/oidc/start")
@@ -492,6 +563,7 @@ def list_users(_admin=Depends(require_admin), db: Session = Depends(get_db)) -> 
 
 
 @router.post("/users", status_code=201)
+@audited_user_change("create", lambda kwargs: getattr(kwargs.get("body"), "username", None))
 def create_user(
     body: UserCreateBody,
     _admin=Depends(require_admin),
@@ -520,6 +592,7 @@ def _load_user(db: Session, user_id: int) -> User:
 
 
 @router.put("/users/{user_id}")
+@audited_user_change("patch", lambda kwargs: str(kwargs.get("user_id", "")))
 def update_user(
     user_id: int,
     body: UserUpdateBody,
@@ -528,9 +601,17 @@ def update_user(
 ) -> dict:
     row = _load_user(db, user_id)
     changes = body.model_dump(exclude_unset=True)
-    if row.auth_source == "ldap" and any(key in changes for key in ("role", "password")):
+    if row.auth_source in FEDERATED_SOURCES and any(
+        key in changes for key in ("role", "password")
+    ):
+        # Every federated source, not just LDAP. The guard was written when LDAP
+        # was the only one; leaving it there let an administrator promote an OIDC
+        # account and watch the change silently revert at that user's next
+        # sign-in, with nothing anywhere explaining why it did not stick.
         raise Invalid(
-            "LDAP roles and passwords are managed by the directory and refresh at login."
+            f"{row.auth_source.upper()} roles and passwords are managed by the "
+            "identity provider and refresh at login.",
+            context={"field": "role", "auth_source": row.auth_source},
         )
     removing_admin = row.active and row.role == "admin" and (
         changes.get("active") is False or changes.get("role") == "user"
@@ -564,6 +645,7 @@ def update_user(
 
 
 @router.delete("/users/{user_id}", status_code=204)
+@audited_user_change("delete", lambda kwargs: str(kwargs.get("user_id", "")))
 def deactivate_user(
     user_id: int,
     admin=Depends(require_admin),

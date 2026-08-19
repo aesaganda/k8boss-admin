@@ -254,7 +254,20 @@ function IntegrityPanel({ chain, error, loading, onVerify }) {
 
 export default function Audit() {
   const { clusters } = useCluster();
-  const { enabled: authenticationEnabled } = useAuth();
+  const { enabled: authenticationEnabled, user } = useAuth();
+
+  // §10.4 is administrator-only when application authentication is on; with it
+  // off there is no console role and the proxy in front owns the decision, so
+  // the buttons stay live. Rule 11.4: a control the caller cannot use is
+  // **disabled with the reason**, never hidden — an operator has to be able to
+  // see that the export exists and why it is unavailable, and a live button that
+  // navigates to a raw 403 JSON page is the worse of the two failures.
+  const mayExport = !authenticationEnabled || user?.role === 'admin';
+  const exportReason = mayExport
+    ? 'Downloads every record matching the filters above. No row cap.'
+    : 'Exporting the whole trail is administrator-only: one request returns every '
+      + 'actor, source address and action. Your console role is '
+      + `${user?.role ?? 'unknown'}.`;
 
   const [actor, setActor] = useState('');
   const [actorInput, setActorInput] = useState('');
@@ -312,7 +325,22 @@ export default function Audit() {
         // The list is not cleared on an append failure — losing the page the
         // operator was reading because the *next* page failed is a worse
         // outcome than a stale list with an error above it.
-        if (!append) setRows([]);
+        //
+        // The paging state IS cleared on a first-page failure, and that half
+        // matters more. `continue` is an opaque "id < N" cursor tied to the
+        // query that produced it: kept across a failed filter change, the
+        // footer would still offer "Load more", and clicking it would fetch the
+        // NEW filter's records older than the OLD filter's last row — silently
+        // omitting every matching record newer than that id. An operator who
+        // filtered to `denied`, saw the load fail, and paged onward would be
+        // shown a list missing exactly the most recent denials, with nothing
+        // indicating a gap.
+        if (!append) {
+          setRows([]);
+          setNextCursor(null);
+          setRemaining(null);
+          setUnavailable([]);
+        }
         setError(err);
       } finally {
         setLoading(false);
@@ -636,21 +664,33 @@ export default function Audit() {
             the server names the file in Content-Disposition, including the
             timestamp, and a client-side name would drift from it.
           */}
-          <Button
-            component="a"
-            variant="secondary"
-            href={auditApi.exportUrl({ ...filters, format: 'ndjson' })}
-            data-testid="audit-export-ndjson"
-          >
-            Export NDJSON
-          </Button>
+          <Tooltip content={exportReason}>
+            <Button
+              component={mayExport ? 'a' : 'button'}
+              variant="secondary"
+              isAriaDisabled={!mayExport}
+              href={mayExport ? auditApi.exportUrl({ ...filters, format: 'ndjson' }) : undefined}
+              data-testid="audit-export-ndjson"
+            >
+              Export NDJSON
+            </Button>
+          </Tooltip>
         </SplitItem>
         <SplitItem>
-          <Tooltip content="Flattened for a spreadsheet. Cells a spreadsheet would run as a formula are prefixed with an apostrophe, so this format is not byte-faithful — use NDJSON to verify the hash chain.">
+          <Tooltip
+            content={
+              mayExport
+                ? 'Flattened for a spreadsheet. Cells a spreadsheet would run as a formula are '
+                  + 'prefixed with an apostrophe, so this format is not byte-faithful — use '
+                  + 'NDJSON to verify the hash chain.'
+                : exportReason
+            }
+          >
             <Button
-              component="a"
+              component={mayExport ? 'a' : 'button'}
               variant="secondary"
-              href={auditApi.exportUrl({ ...filters, format: 'csv' })}
+              isAriaDisabled={!mayExport}
+              href={mayExport ? auditApi.exportUrl({ ...filters, format: 'csv' }) : undefined}
               data-testid="audit-export-csv"
             >
               Export CSV

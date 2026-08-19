@@ -172,7 +172,7 @@ def verify_audit(
         ),
     ),
 ) -> dict[str, Any]:
-    """§10.2 — walk the audit hash chain and report what can be attested.
+    """§10.3 — walk the audit hash chain and report what can be attested.
 
     Three verdicts, and the third is the one that matters:
 
@@ -223,7 +223,7 @@ def export_audit(
     dry_run: bool | None = Query(None),
     _admin=Depends(require_console_admin),
 ) -> StreamingResponse:
-    """§10.3 — the whole matching trail as one downloadable file.
+    """§10.4 — the whole matching trail as one downloadable file.
 
     Administrator-only when application authentication is enabled, because this
     is the endpoint that returns every actor, every source address and every
@@ -260,6 +260,14 @@ def export_audit(
         f"{key}={value}" for key, value in sorted(filters.items()) if value is not None
     ) or "no filters (the whole trail)"
 
+    # Everything is validated BEFORE the record is written, and the generator is
+    # built before it too. `stream()` is deliberately not a generator so its
+    # filter validation runs on the call — but running it after the audit write
+    # left a permanent, append-only record saying `outcome: applied` for an
+    # export that returned 422 and streamed zero bytes. The trail cannot be
+    # corrected afterwards; there is no delete endpoint, and that is the point.
+    rows = recorder.stream(**filters)
+
     recorder.record_console_event(
         verb="export",
         resource="audit",
@@ -271,7 +279,7 @@ def export_audit(
     media_type, extension = export_service.MEDIA_TYPES[chosen]
     stamp = (rfc3339(utcnow()) or "").replace(":", "").replace("-", "")
     return StreamingResponse(
-        export_service.render(chosen, recorder.stream(**filters)),
+        export_service.render(chosen, rows),
         media_type=media_type,
         headers={
             "Content-Disposition": (

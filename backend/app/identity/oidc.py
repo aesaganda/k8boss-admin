@@ -58,6 +58,7 @@ import base64
 import hashlib
 import logging
 import secrets
+import ssl
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -87,6 +88,19 @@ _DISCOVERY_TTL_SECONDS = 900
 
 _discovery_cache: dict[str, Any] | None = None
 _discovery_fetched_at: float = 0.0
+
+#: One JWKS client, reused across verifications.
+#:
+#: ``PyJWKClient`` caches keys **per instance**, so constructing one per call
+#: means an HTTP round trip to the issuer on every single sign-in — and two when
+#: a token carries an unknown ``kid``. Beyond the latency, it makes the console's
+#: sign-in path fail whenever the issuer is briefly unreachable, for a document
+#: that changes when keys rotate.
+#:
+#: Keyed by ``jwks_uri`` so that reconfiguring the issuer does not keep serving
+#: the previous one's keys, which would let a decommissioned provider keep
+#: minting valid logins.
+_jwk_clients: dict[str, Any] = {}
 
 
 @dataclass(frozen=True)
@@ -130,10 +144,43 @@ def require_enabled() -> None:
 
 
 def reset_discovery_cache() -> None:
-    """Forget the cached discovery document. For tests and for config reloads."""
+    """Forget the cached discovery document and signing keys.
+
+    Both, together: a stale JWKS client outliving a reconfigured issuer would
+    keep accepting tokens signed by the provider that was just replaced.
+    """
     global _discovery_cache, _discovery_fetched_at
     _discovery_cache = None
     _discovery_fetched_at = 0.0
+    _jwk_clients.clear()
+
+
+def _tls_context() -> "ssl.SSLContext | None":
+    """The TLS trust configuration, as an ``SSLContext`` for non-httpx callers.
+
+    ``httpx`` takes a CA bundle path or a bool directly; ``PyJWKClient`` fetches
+    the JWKS with ``urllib``, which takes neither. Without this the JWKS fetch
+    silently ignores ``OIDC_CA_CERTIFICATE_FILE`` and ``OIDC_VERIFY_TLS`` and
+    falls back to the system trust store.
+
+    The failure that produces: an issuer behind a private CA completes discovery
+    (httpx honoured the bundle) and then fails at key retrieval with
+    ``CERTIFICATE_VERIFY_FAILED``, reported as "the provider's signing keys could
+    not be read". Every sign-in fails, on a deployment whose CA is configured
+    correctly, and the one documented escape hatch does not cover the one fetch
+    that decides which key is trusted.
+
+    ``None`` means "the library's default", which is right only when neither
+    setting is in play.
+    """
+    if settings.oidc_ca_certificate_file:
+        return ssl.create_default_context(cafile=settings.oidc_ca_certificate_file)
+    if not settings.oidc_verify_tls:
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        return context
+    return None
 
 
 def _verify_tls() -> bool | str:
@@ -214,6 +261,22 @@ def discovery() -> dict[str, Any]:
             context={"provider": "oidc", "issuer": issuer},
         )
 
+    # OpenID Connect Discovery requires the document's `issuer` to equal the
+    # issuer it was fetched from. Checked rather than assumed, because this
+    # document supplies `jwks_uri` and `token_endpoint` AND the `iss` value that
+    # tokens are then validated against — so a document that names a different
+    # issuer would have the console validating tokens as consistent with itself
+    # rather than with the provider an operator configured.
+    declared = str(document.get("issuer") or "").rstrip("/")
+    if declared != issuer:
+        raise IdentityProviderUnavailable(
+            "The single sign-on provider's configuration names a different issuer.",
+            detail=f"OIDC_ISSUER is {issuer!r}; the document declares {declared!r}",
+            hint="Point OIDC_ISSUER at the issuer the provider publishes, exactly "
+                 "as it appears in its discovery document.",
+            context={"provider": "oidc", "issuer": issuer},
+        )
+
     _discovery_cache = document
     _discovery_fetched_at = time.monotonic()
     return document
@@ -284,12 +347,21 @@ def exchange_code(*, code: str, code_verifier: str, redirect_uri: str) -> dict[s
 
     if response.status_code != 200:
         # The body can echo the client secret back in an error description on
-        # some issuers, so it is not propagated — only the status, which is what
-        # distinguishes "we are misconfigured" (400/401) from "the issuer is
-        # unwell" (5xx).
-        logger.error(
-            "OIDC token exchange returned HTTP %s.", response.status_code,
-        )
+        # some issuers, so it is not propagated — only the status.
+        logger.error("OIDC token exchange returned HTTP %s.", response.status_code)
+        if response.status_code >= 500:
+            # The issuer is unwell. Reporting this as a refusal would record an
+            # outage in the audit trail as `denied` — the outcome reserved for a
+            # credential rejection, and the one that looks like an attack — and
+            # would tell the operator to check a client registration that is
+            # fine. The distinction is the same one the LDAP path already makes.
+            raise IdentityProviderUnavailable(
+                "The single sign-on provider could not complete the sign-in.",
+                detail=f"token endpoint returned HTTP {response.status_code}",
+                hint="The issuer returned a server error. Nothing about the "
+                     "account or this console's configuration is implied.",
+                context={"provider": "oidc"},
+            )
         raise PermissionDenied(
             "The single sign-on provider refused to complete the sign-in.",
             detail=f"token endpoint returned HTTP {response.status_code}",
@@ -309,15 +381,30 @@ def verify_id_token(id_token: str, *, nonce: str | None) -> dict[str, Any]:
     import jwt  # imported here so the module loads where SSO is not configured
 
     document = discovery()
+    jwks_uri = document["jwks_uri"]
     try:
-        jwk_client = jwt.PyJWKClient(
-            document["jwks_uri"], cache_keys=True, timeout=settings.oidc_timeout_seconds
-        )
+        jwk_client = _jwk_clients.get(jwks_uri)
+        if jwk_client is None:
+            # ssl_context, not just a timeout: urllib (which PyJWKClient uses)
+            # will otherwise fall back to the system trust store and ignore both
+            # OIDC_CA_CERTIFICATE_FILE and OIDC_VERIFY_TLS. See _tls_context.
+            jwk_client = jwt.PyJWKClient(
+                jwks_uri,
+                cache_keys=True,
+                timeout=settings.oidc_timeout_seconds,
+                ssl_context=_tls_context(),
+            )
+            _jwk_clients[jwks_uri] = jwk_client
         signing_key = jwk_client.get_signing_key_from_jwt(id_token)
     except Exception as exc:  # noqa: BLE001
+        # Dropped from the cache so a transient failure does not leave a client
+        # that has memoised nothing useful and will be reused forever.
+        _jwk_clients.pop(jwks_uri, None)
         raise IdentityProviderUnavailable(
             "The single sign-on provider's signing keys could not be read.",
             detail=type(exc).__name__,
+            hint="Check the console's network path to the issuer, and "
+                 "OIDC_CA_CERTIFICATE_FILE if it uses a private CA.",
             context={"provider": "oidc"},
         ) from exc
 

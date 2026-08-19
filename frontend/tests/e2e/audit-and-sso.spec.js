@@ -67,6 +67,78 @@ test.describe('audit', () => {
     await expect(page.getByText('session · someone-guessing')).toBeVisible();
   });
 
+  test('the default scope really is unscoped, not the active cluster', async ({ page }) => {
+    // The critical bug this file exists to keep fixed. `buildUrl` appends the
+    // active cluster to every request whose query lacks one, so the audit
+    // page's "Everything" position produced `?cluster_id=1` — while a banner
+    // stated it was showing every cluster and the console's own records, and the
+    // table contained one cluster's writes with no sign-ins in it. Nothing in
+    // the response, the page or the exported file disclosed the narrowing.
+    const listUrls = [];
+    page.on('request', (request) => {
+      if (request.url().includes('/api/audit?')) listUrls.push(request.url());
+    });
+
+    await mockApi(page);
+    await page.goto('/audit');
+    await expectPageRendered(page, 'Audit');
+
+    await expect.poll(() => listUrls.length).toBeGreaterThan(0);
+    for (const url of listUrls) {
+      expect(url, `the default scope must not be narrowed: ${url}`).not.toMatch(
+        /[?&]cluster_id=/,
+      );
+    }
+
+    // And the export has to agree with the table it was taken from — the file
+    // outlives the page, and whoever reads it never saw the banner.
+    const href = await page.getByTestId('audit-export-ndjson').getAttribute('href');
+    expect(href).not.toMatch(/[?&]cluster_id=/);
+  });
+
+  test('a failed reload does not leave a cursor from the previous query', async ({ page }) => {
+    // `continue` is an opaque "id < N" tied to the query that produced it. Kept
+    // across a failed filter change, "Load more" would fetch the NEW filter's
+    // records older than the OLD filter's last row — silently omitting every
+    // match newer than that id, which on an audit page means omitting the most
+    // recent records of exactly what the operator just filtered for.
+    const seen = [];
+    let failFiltered = false;
+
+    await mockApi(page);
+    await page.route('**/api/audit?**', async (route) => {
+      const url = new URL(route.request().url());
+      seen.push(url.search);
+      if (url.searchParams.get('outcome') === 'denied' && failFiltered) {
+        return route.fulfill({
+          status: 502,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            error: 'upstream_error', message: 'the database is unavailable',
+            detail: null, hint: null, context: {},
+          }),
+        });
+      }
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ ...FIXTURES.audit, continue: '4471', remaining: 90 }),
+      });
+    });
+
+    await page.goto('/audit');
+    await expectPageRendered(page, 'Audit');
+    await expect(page.getByTestId('audit-more')).toBeVisible();
+
+    failFiltered = true;
+    await page.getByTestId('audit-outcome').selectOption('denied');
+    await expect.poll(() => seen.some((q) => q.includes('outcome=denied'))).toBe(true);
+
+    // No paging control over a failed load, so no way to page with a cursor
+    // that belonged to a different question.
+    await expect(page.getByTestId('audit-more')).toHaveCount(0);
+  });
+
   test('the scope filter can select records that belong to no cluster', async ({ page }) => {
     await mockApi(page);
     await page.goto('/audit');
@@ -179,6 +251,28 @@ test.describe('audit export', () => {
     await expect
       .poll(() => page.getByTestId('audit-export-csv').getAttribute('href'))
       .toContain('format=csv');
+  });
+
+  test('a non-admin sees the export disabled with the reason, not hidden', async ({ page }) => {
+    // Contract rule 11.4. Hidden, an operator cannot tell the feature exists;
+    // live, clicking it navigates away from the SPA to a raw 403 JSON page,
+    // which reads as a broken console rather than as a permission they lack.
+    await mockApi(page, {
+      auth: {
+        authenticated: true,
+        user: {
+          id: 9, username: 'viewer', display_name: 'Viewer', email: null,
+          role: 'user', auth_source: 'local',
+        },
+      },
+    });
+    await page.goto('/audit');
+    await expectPageRendered(page, 'Audit');
+
+    const ndjson = page.getByTestId('audit-export-ndjson');
+    await expect(ndjson).toBeVisible();
+    await expect(ndjson).toHaveAttribute('aria-disabled', 'true');
+    await expect(ndjson).not.toHaveAttribute('href', /./);
   });
 
   test('the export is a navigation, not a blob built in the tab', async ({ page }) => {

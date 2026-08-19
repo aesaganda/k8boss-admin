@@ -1,5 +1,5 @@
 """
-The audit hash chain (§10.2).
+The audit hash chain (§10.3).
 
 The append-only guard already stops *this application* rewriting a record. These
 tests are about the guarantee that starts where that one ends: a record altered
@@ -191,6 +191,65 @@ def test_a_forged_record_inserted_into_the_middle_is_unreachable(db_engine):
     assert report["status"] == integrity.STATUS_BROKEN
     assert "cannot be reached" in report["first_break"]["reason"]
     assert "inserted" in report["first_break"]["reason"]
+
+
+def test_renumbering_a_record_is_detected(db_engine):
+    """The hash cannot cover the id, so the id is checked separately.
+
+    `id` is assigned by the database *after* the hash is computed, so a
+    renumbered record still verifies byte-for-byte and stays perfectly reachable
+    from GENESIS. It is not cosmetic: `GET /api/audit` pages by descending id, so
+    moving a record moves it in the listing an operator reads during an incident,
+    while every hash continues to check out.
+    """
+    for index in range(4):
+        write(detail=f"change {index}")
+    target = rows()[1]
+
+    db = database.SessionLocal()
+    try:
+        db.execute(update(AuditRecord).where(AuditRecord.id == target.id).values(id=99))
+        db.commit()
+    finally:
+        db.close()
+
+    report = verify()
+
+    assert report["status"] == integrity.STATUS_BROKEN
+    assert "id order" in report["first_break"]["reason"]
+
+
+def test_renumbering_does_not_wedge_the_chain(db_engine):
+    """A renumbered record must not stop the console recording anything again.
+
+    `chain_tip` used to pick the highest id. Renumbering one committed record to
+    the top made it the apparent tip; its `event_hash` was already the next
+    record's `prev_hash`, and `prev_hash` is UNIQUE, so every later INSERT
+    collided — deterministically, on every retry, forever. Each new record burned
+    its retries and landed unchained, and `verify` reported that as `partial`:
+    the verdict reserved for benign residue, over a chain that was dead.
+
+    The tip is now the record nothing links to, which no renumbering can forge.
+    """
+    for index in range(3):
+        write(detail=f"change {index}")
+    target = rows()[1]
+
+    db = database.SessionLocal()
+    try:
+        db.execute(update(AuditRecord).where(AuditRecord.id == target.id).values(id=500))
+        db.commit()
+    finally:
+        db.close()
+
+    after = write(detail="written after the renumbering")
+
+    assert after is not None
+    stored = [row for row in rows() if row.id == after][0]
+    assert stored.event_hash is not None, (
+        "a record written after a renumbering was forced outside the chain, so "
+        "the tamper wedged the chain instead of merely being detected"
+    )
 
 
 def test_blanking_one_hash_column_is_reported_as_a_break_not_as_unchained(db_engine):

@@ -382,7 +382,7 @@ means read-only.
 | `LDAP_USERNAME_ATTRIBUTE` / `LDAP_DISPLAY_NAME_ATTRIBUTE` / `LDAP_EMAIL_ATTRIBUTE` | `uid` / `cn` / `mail` | Profile attributes synchronized at login |
 | `LDAP_ADMIN_GROUP_DN` | *(empty)* | Exact `memberOf` DN whose members become console administrators. Applied only when the directory actually returns `memberOf`: an absent attribute means "we could not look", not "in no groups", and the stored role is left alone rather than reset |
 | `LDAP_CONNECT_TIMEOUT_SECONDS` | `5` | LDAP connect and response deadline |
-| `AUTH_THROTTLE_MAX_ATTEMPTS` | `10` | Failed sign-ins allowed per username per window before `429 too_many_attempts`. Counted from the audit trail, so the limit holds across replicas and survives a restart. `0` disables it, leaving `POST /api/auth/login` an unmetered password oracle |
+| `AUTH_THROTTLE_MAX_ATTEMPTS` | `10` | Sign-in attempts allowed per username per window before `429 too_many_attempts`. Each attempt reserves a row before the password is checked, so the limit holds across replicas, survives a restart, and cannot be walked through by a simultaneous burst. Cleared by a successful sign-in. `0` disables it, leaving `POST /api/auth/login` an unmetered password oracle |
 | `AUTH_THROTTLE_WINDOW_SECONDS` | `300` | Length of that window |
 | `OIDC_ENABLED` | `false` | Offers OpenID Connect single sign-on. Needs `AUTH_ENABLED`, plus an issuer and a client id — without all three the login page shows no SSO button, because a button that cannot work reads as a broken console |
 | `OIDC_ISSUER` | *(empty)* | Issuer URL. Its `/.well-known/openid-configuration` supplies every endpoint, so the flow cannot be half-configured across two deployments of the same provider |

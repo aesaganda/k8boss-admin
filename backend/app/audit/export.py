@@ -1,5 +1,5 @@
 """
-Serialising the audit trail for something that is not this console (§10.3).
+Serialising the audit trail for something that is not this console (§10.4).
 
 The paged UI answers "what happened around the time of the incident". It cannot
 answer "hand the quarter's administrative actions to an auditor" or "load this
@@ -84,7 +84,7 @@ def _defang(value: Any) -> Any:
 
     So a leading formula character gets a ``'`` in front of it. That *is* a
     modification of the recorded bytes, which is why it is confined to the CSV
-    path, stated here, stated in §10.3, and why ``ndjson`` exists and is the
+    path, stated here, stated in §10.4, and why ``ndjson`` exists and is the
     format to verify against.
     """
     if not isinstance(value, str) or not value:

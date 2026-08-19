@@ -1,5 +1,5 @@
 """
-Exporting the audit trail (§10.3).
+Exporting the audit trail (§10.4).
 
 An extract is read by someone who was not there, often months later, and usually
 without the console open beside it. That shapes what these tests care about:

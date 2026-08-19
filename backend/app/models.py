@@ -217,6 +217,52 @@ CATEGORY_CONSOLE = "console"   # a sign-in, a sign-out, a console user change
 CATEGORIES: frozenset[str] = frozenset({CATEGORY_CLUSTER, CATEGORY_CONSOLE})
 
 
+class LoginAttempt(Base):
+    """One in-flight or failed sign-in, counted by the throttle.
+
+    **Why this is not simply a COUNT over the audit trail.** That was the first
+    design, and it has two holes that only show up under the conditions the
+    throttle exists for:
+
+    * *Check-then-act.* The audit row for a rejection is written **after** the
+      password is verified, so a burst of simultaneous requests all run their
+      COUNT before any of them has recorded anything, all see the same number,
+      and all proceed. Measured: 30 concurrent guesses against a documented
+      budget of 3, none refused, every one of them reaching PBKDF2.
+    * *A failed INSERT disabled the limiter silently.* If the audit write could
+      not happen — disk full, a hot standby, INSERT revoked while SELECT was
+      retained — the COUNT returned a genuine, indistinguishable `0`, and the
+      login endpoint became the unmetered password oracle the throttle exists to
+      prevent, with nothing recorded and no signal that counting had stopped.
+
+    A row here is inserted **before** the password check, which makes the count
+    atomic per attempt rather than a read of somebody else's writes, and makes
+    the limiter independent of whether the audit write succeeds. It is deleted
+    again when the sign-in succeeds, so a working account never accumulates a
+    budget against itself.
+
+    This is a rate-limiting bucket, not an audit record. It is deliberately
+    *not* append-only, holds nothing but a username and a timestamp, and is
+    pruned. The trail remains the record of what happened; §10 is unaffected.
+    """
+
+    __tablename__ = "login_attempts"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    # The submitted username, normalised where it could be. Nothing has verified
+    # it — that is the whole point of counting it.
+    actor = Column(String(255), nullable=False)
+    ts = Column(DateTime, nullable=False, default=utcnow)
+
+    __table_args__ = (
+        # The only query: recent attempts for one actor.
+        Index("ix_login_attempt_actor_ts", "actor", "ts"),
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<LoginAttempt id={self.id} actor={self.actor!r}>"
+
+
 class AuditRecord(Base):
     """One attempted write, recorded whether or not it reached the cluster.
 
