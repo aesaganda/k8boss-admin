@@ -222,6 +222,19 @@ body {
   touch-action: none;
 }
 
+/*
+ * A 12px strip is a mouse target. On a touch screen it is under half of what
+ * WCAG 2.5.8 asks for, and there is no cursor to find it with — so on coarse
+ * pointers the grab area doubles. It costs the sort button 8px of its own tap
+ * area on those devices, which is the right way round: a mis-tap on the sort
+ * button re-sorts the table, a mis-tap on the handle does nothing at all.
+ */
+@media (pointer: coarse) {
+  .admin-col-resizer {
+    width: 1.5rem;
+  }
+}
+
 .admin-col-resizer::before {
   content: "";
   position: absolute;
@@ -248,22 +261,83 @@ body {
   outline-offset: -2px;
 }
 
-/* A pinned column is only honoured under a fixed layout; without it the browser
-   goes on sizing every column from its content and the drag does nothing. */
-.admin-table--sized {
-  table-layout: fixed;
+/*
+ * Forced-colors modes discard author background colours, and the indicator IS
+ * an author background — so in Windows High Contrast the handle had no cue at
+ * all for a mouse user, and the feature simply looked absent. A system colour
+ * is honoured there; `forced-color-adjust` is what keeps it painted.
+ */
+@media (forced-colors: active) {
+  .admin-col-resizer:hover::before,
+  .admin-col-resizer:focus-visible::before,
+  .admin-col-resizer--active::before {
+    background: CanvasText;
+    forced-color-adjust: none;
+  }
 }
 
-/* Header text in a narrowed column breaks rather than painting over its
-   neighbour. PatternFly already does this for body cells, not for headers. */
-.admin-table--sized thead th {
-  overflow-wrap: anywhere;
+/*
+ * A pinned column is only honoured under a fixed layout; without it the browser
+ * goes on sizing every column from its content and the drag does nothing. The
+ * `max()` keeps every pinned column at exactly the width it was dragged to: when
+ * their total outgrows the page the table scrolls sideways instead of squeezing
+ * the rest to nothing to make them fit.
+ */
+.admin-table--sized {
+  table-layout: fixed;
+  width: max(100%, var(--admin-table-min-width, 100%));
+}
+
+/*
+ * Below this width PatternFly restacks the table into one card per row: the
+ * header is `display: none` and there are no columns left for a pixel width to
+ * describe. Keeping the widths there leaves the card list frozen at a desktop
+ * table width, scrolled sideways, with every resize handle hidden along with
+ * the header — so the operator cannot even undo it from the table.
+ *
+ * Written as the same container query PatternFly restacks on, and as an undo of
+ * the rules above rather than as their condition: where the container does not
+ * exist, PatternFly does not restack either, and the widths correctly stay.
+ */
+@container pf-v6-contain-table (max-width: calc(48rem - 1px)) {
+  .admin-table--sized {
+    table-layout: auto;
+    width: auto;
+  }
+}
+
+/*
+ * Under a fixed layout a cell is exactly as wide as its column, and anything
+ * that cannot wrap — a status pill, an image reference, a link — is drawn
+ * straight over the next column's value instead. PatternFly clips its header
+ * labels for us; it does nothing for body cells, and a Status column dragged
+ * to its minimum painted "Progressing" across the Ready column's "4 / 5".
+ *
+ * The row-actions cell is exempt on purpose: PatternFly renders its kebab menu
+ * inline, inside that very cell, so clipping the cell would clip the menu shut.
+ * (The class is `pf-v6-c-table__action` — `pf-m-action` is a different thing,
+ * set on cells that merely *contain* an action.)
+ */
+.admin-table--sized tbody td:not(.pf-v6-c-table__action) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/*
+ * PatternFly's modal body scrolls vertically and hides the horizontal axis, so
+ * a table dragged wider than the modal is painted outside it and cannot be
+ * reached by any means the operator has — the drain plan's own columns end up
+ * off the dialog. The page has `<main>` for this; a dialog has to be told.
+ */
+.pf-v6-c-modal-box__body:has(.admin-table--sized),
+.pf-v6-c-drawer__panel-main:has(.admin-table--sized) {
+  overflow-x: auto;
 }
 
 .admin-table__widths {
   display: flex;
   justify-content: flex-end;
-  margin-block-end: var(--admin-gap-sm);
+  margin-block-start: var(--admin-gap-sm);
   font-size: var(--pf-t--global--font--size--body--sm, 0.875rem);
 }
 

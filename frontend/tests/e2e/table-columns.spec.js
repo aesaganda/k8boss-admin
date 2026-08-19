@@ -174,6 +174,203 @@ test.describe('resizable table columns', () => {
     expect(await headerWidth(page, 'Kind')).toBeCloseTo(kindBefore, 0);
   });
 
+  test('the table does not move under the pointer when the first drag starts', async ({ page }) => {
+    await openWorkloads(page);
+
+    const header = page.getByRole('columnheader', { name: 'Name', exact: true });
+    const before = await header.boundingBox();
+    await dragColumn(page, 'name', 100);
+    const after = await header.boundingBox();
+
+    // The "Reset column widths" control appears the first time a table is
+    // sized. Rendered above the table it pushed the header — and the handle
+    // being held — down by its own height, mid-gesture.
+    expect(after.y).toBeCloseTo(before.y, 0);
+  });
+
+  test('pinned widths are dropped where PatternFly restacks the table into cards', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await openWorkloads(page);
+    await dragColumn(page, 'name', 300);
+
+    await page.setViewportSize({ width: 700, height: 900 });
+    const stacked = await page.getByRole('grid', { name: 'Workloads' }).evaluate((table) => {
+      const main = table.closest('main');
+      return {
+        headerShown: getComputedStyle(table.querySelector('thead')).display !== 'none',
+        tableWidth: Math.round(table.getBoundingClientRect().width),
+        containerWidth: main.clientWidth,
+        overflow: main.scrollWidth - main.clientWidth,
+      };
+    });
+
+    // Below this width the header — and with it every resize handle — is gone,
+    // and the rows are cards rather than columns. A desktop pixel width left
+    // over from a wider window leaves that card list scrolled sideways with no
+    // handle left to undo it.
+    expect(stacked.headerShown).toBe(false);
+    expect(stacked.tableWidth).toBeLessThanOrEqual(stacked.containerWidth);
+    expect(stacked.overflow).toBe(0);
+
+    // And the widths come back with the columns, rather than being discarded.
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await expect(page.getByTestId('column-resizer-name')).toBeVisible();
+    expect(await headerWidth(page, 'Name')).toBeGreaterThan(300);
+  });
+
+  test('a column narrowed to its minimum clips rather than painting over its neighbour', async ({ page }) => {
+    await openWorkloads(page);
+
+    // 400px left of a 208px column: the drag clamps at the minimum width.
+    await dragColumn(page, 'status', -400);
+
+    const cells = await page.getByRole('grid', { name: 'Workloads' }).evaluate((table) => {
+      const row = table.querySelector('tbody tr');
+      return Array.from(row.querySelectorAll('td')).map((cell) => ({
+        label: cell.getAttribute('data-label'),
+        overflow: getComputedStyle(cell).overflow,
+        width: Math.round(cell.getBoundingClientRect().width),
+        content: cell.scrollWidth,
+        isAction: cell.classList.contains('pf-v6-c-table__action'),
+      }));
+    });
+
+    // Under a fixed layout a cell is exactly its column's width, and PatternFly
+    // clips only the columns its `truncate` modifier is on. A StatusBadge in a
+    // 56px Status column was painted across the Ready column's "4 / 5" — two
+    // columns' values overprinting each other. Asserted on the clip rather than
+    // on geometry: `overflow: hidden` bounds what is painted, not the boxes.
+    const status = cells.find((cell) => cell.label === 'Status');
+    expect(status.width).toBe(56);
+    expect(status.content).toBeGreaterThan(status.width);
+    expect(status.overflow).toBe('hidden');
+
+    // Every data cell, and deliberately not the actions cell: PatternFly renders
+    // the kebab's menu inline, inside that cell, so clipping it would clip the
+    // menu shut. Asserted rather than assumed, because the exemption is written
+    // against a PatternFly class name.
+    expect(cells.filter((cell) => cell.isAction)).toHaveLength(1);
+    for (const cell of cells) {
+      expect(cell.overflow).toBe(cell.isAction ? 'visible' : 'hidden');
+    }
+
+    // And the menu really does open to its full size inside that cell.
+    await page.getByRole('grid', { name: 'Workloads' }).getByRole('row').nth(1).getByRole('button').last().click();
+    const menu = page.getByRole('menu');
+    await expect(menu).toBeVisible();
+    const clipped = await menu.evaluate((node) => {
+      const cell = node.closest('td');
+      if (!cell) return 0;
+      const box = node.getBoundingClientRect();
+      const cellBox = cell.getBoundingClientRect();
+      return Math.round(Math.max(0, box.right - cellBox.right, cellBox.left - box.left));
+    });
+    expect(clipped).toBe(0);
+  });
+
+  test('resetting hands focus on rather than dropping it', async ({ page }) => {
+    await openWorkloads(page);
+    await dragColumn(page, 'name', 120);
+
+    await page.getByTestId('reset-column-widths').focus();
+    await page.keyboard.press('Enter');
+
+    // The control removes itself by succeeding. Left alone, focus falls to
+    // <body> and the operator's next Tab restarts at the masthead — roughly two
+    // dozen stops from the table they were working in.
+    const focused = await page.evaluate(() => ({
+      tag: document.activeElement?.tagName,
+      testid: document.activeElement?.getAttribute('data-testid'),
+    }));
+    expect(focused.testid).toBe('column-resizer-name');
+  });
+
+  test('a handle reports a width it measured, not one the browser invented', async ({ page }) => {
+    await openWorkloads(page);
+
+    const handle = page.getByTestId('column-resizer-kind');
+    const width = await headerWidth(page, 'Kind');
+    await handle.focus();
+
+    // Chrome fills a focusable separator's missing aria-valuenow with 50 — below
+    // the minimum this handle declares — so a screen reader announces a column
+    // as narrower than its own floor while it is 100px wide. Omitting the value
+    // is not silence.
+    expect(Number(await handle.getAttribute('aria-valuenow'))).toBeCloseTo(width, 0);
+    expect(await handle.getAttribute('aria-valuetext')).toContain('Automatic width');
+  });
+
+  test('a table inside a dialog scrolls the dialog rather than painting outside it', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await mockApi(page);
+    // The drain plan is the one table this console renders inside a modal, and
+    // a modal body scrolls vertically only.
+    await page.route('**/access/preflight**', (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          results: ['cordon', 'drain'].map((id) => ({
+            id,
+            allowed: true,
+            reason: '',
+            evaluationError: null,
+            hint: null,
+          })),
+        }),
+      }),
+    );
+    await page.route('**/nodes/*/drain**', (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          dryRun: true,
+          applied: false,
+          blocked: 0,
+          resourceVersion: '12345',
+          diff: '--- live\n+++ projected\n@@ -1,2 +1,3 @@\n spec:\n+  unschedulable: true\n',
+          plan: [
+            {
+              namespace: 'prod',
+              pod: 'checkout-7d9f8b6c5d-abcde',
+              action: 'evict',
+              reason: '',
+              controller: { kind: 'ReplicaSet', name: 'checkout-7d9f8b6c5d' },
+            },
+          ],
+        }),
+      }),
+    );
+
+    await page.goto('/nodes');
+    await expectPageRendered(page, 'Nodes');
+    await page.getByRole('grid', { name: 'Nodes' }).getByRole('row').nth(1).getByRole('button').last().click();
+    await page.getByRole('menuitem', { name: /Drain/ }).click();
+    await page.getByRole('button', { name: /Preview changes/ }).click();
+    await expect(page.getByRole('grid', { name: 'Drain plan' })).toBeVisible();
+
+    await dragColumn(page, 'controller', 500);
+
+    const geometry = await page.getByRole('grid', { name: 'Drain plan' }).evaluate((table) => {
+      const body = table.closest('.pf-v6-c-modal-box__body');
+      const box = table.closest('.pf-v6-c-modal-box');
+      body.scrollLeft = 5000;
+      return {
+        scrollable: body.scrollWidth - body.clientWidth,
+        scrolled: body.scrollLeft,
+        overhang: Math.round(table.getBoundingClientRect().right - box.getBoundingClientRect().right),
+      };
+    });
+
+    // Without the dialog being told to scroll sideways, the widened column is
+    // painted outside the modal box, where nothing the operator can do will
+    // bring it back — there is no scrollbar and no page scroll behind a modal.
+    expect(geometry.scrollable).toBeGreaterThan(0);
+    expect(geometry.scrolled).toBeGreaterThan(0);
+    expect(geometry.overhang).toBeLessThanOrEqual(0);
+  });
+
   test('the pods table carries the same handles', async ({ page }) => {
     await mockApi(page);
     await page.goto('/pods');

@@ -181,8 +181,11 @@ export function DataTable({
     isActive: hasSizedColumns,
     minTableWidth,
     headerRef,
+    colRef,
+    tableRef,
     resizerProps,
     resetAll: resetColumnWidths,
+    focusFirstResizer,
   } = useColumnWidths({
     tableId: tableId ?? ariaLabel,
     columnKeys: resizableKeys,
@@ -337,23 +340,19 @@ export function DataTable({
 
   return (
     <div className={className}>
-      {hasSizedColumns && (
-        <div className="admin-table__widths">
-          <Button variant="link" isInline onClick={resetColumnWidths} data-testid="reset-column-widths">
-            Reset column widths
-          </Button>
-        </div>
-      )}
       <Table
         aria-label={ariaLabel}
+        // A drag writes the column widths straight onto these elements rather
+        // than through a render; `columnWidths.js` says why.
+        ref={tableRef}
         variant={variant}
         isStickyHeader={isStickyHeader}
         className={hasSizedColumns ? 'admin-table--sized' : undefined}
-        // `max()` rather than a plain width: the pinned columns keep exactly the
-        // width they were given, and when their total outgrows the viewport the
-        // page scrolls sideways instead of squeezing every other column to
-        // nothing to make them fit.
-        style={hasSizedColumns ? { width: `max(100%, ${minTableWidth}px)` } : undefined}
+        // Handed to the stylesheet rather than applied here, because the width
+        // must not survive into PatternFly's stacked layout — see the
+        // `admin-table--sized` rules, which drop it at the same width where
+        // PatternFly turns the table into cards with no columns at all.
+        style={hasSizedColumns ? { '--admin-table-min-width': `${minTableWidth}px` } : undefined}
         // Announce a refresh-in-progress without swapping the rows out for
         // skeletons: a table that blanks on every 30s poll is unusable.
         aria-busy={loading || undefined}
@@ -361,7 +360,11 @@ export function DataTable({
         {hasSizedColumns && (
           <colgroup>
             {columnIds.map((id) => (
-              <col key={id} style={columnWidths[id] ? { width: `${columnWidths[id]}px` } : undefined} />
+              <col
+                key={id}
+                ref={resizableSet.has(id) ? colRef(id) : undefined}
+                style={columnWidths[id] ? { width: `${columnWidths[id]}px` } : undefined}
+              />
             ))}
             {hasActions && <col />}
           </colgroup>
@@ -370,6 +373,27 @@ export function DataTable({
         {body}
       </Table>
       {footer}
+      {hasSizedColumns && (
+        // Below the table, not above it. Above, this row appears the moment the
+        // first drag pins the columns — pushing the header, and the handle the
+        // operator is holding, 26px down mid-gesture.
+        <div className="admin-table__widths">
+          <Button
+            variant="link"
+            isInline
+            // This control removes itself by succeeding, so it hands focus to
+            // the first resize handle rather than letting it fall to <body> —
+            // from where the next Tab restarts at the top of the page.
+            onClick={() => {
+              resetColumnWidths();
+              focusFirstResizer();
+            }}
+            data-testid="reset-column-widths"
+          >
+            Reset column widths
+          </Button>
+        </div>
+      )}
     </div>
   );
 }
