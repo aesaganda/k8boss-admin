@@ -20,7 +20,7 @@
  */
 import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Button } from '@patternfly/react-core';
+import { Button, Dropdown, DropdownItem, DropdownList, MenuToggle } from '@patternfly/react-core';
 import SyncAltIcon from '@patternfly/react-icons/dist/esm/icons/sync-alt-icon';
 import {
   AgeCell,
@@ -33,6 +33,7 @@ import {
   StatusBadge,
   Toolbar,
 } from '../components/ui';
+import ImportYamlDialog from '../components/ImportYamlDialog';
 import ScaleDialog from '../components/ScaleDialog';
 import RestartDialog from '../components/RestartDialog';
 import SuspendDialog from '../components/SuspendDialog';
@@ -40,7 +41,14 @@ import { workloads as workloadsApi } from '../api/client';
 import { useCluster } from '../contexts/ClusterContext';
 import { useNamespace } from '../contexts/NamespaceContext';
 import { truncate } from '../utils/format';
-import { KIND_TO_PLURAL, WORKLOAD_KINDS, capabilityGate, useAsync, useGates } from './_data';
+import {
+  KIND_TO_PLURAL,
+  WORKLOAD_KINDS,
+  WORKLOAD_TEMPLATES,
+  capabilityGate,
+  useAsync,
+  useGates,
+} from './_data';
 import { ImagesCell, Muted, NoClusterState, UsageCell, menuAction } from './_parts';
 
 const KIND_OPTIONS = Object.entries(WORKLOAD_KINDS).map(([plural, spec]) => ({
@@ -61,6 +69,7 @@ const KIND_OPTIONS = Object.entries(WORKLOAD_KINDS).map(([plural, spec]) => ({
 function buildChecks(namespace) {
   const checks = [];
   for (const [plural, spec] of Object.entries(WORKLOAD_KINDS)) {
+    checks.push({ id: `create:${plural}`, verb: 'create', group: spec.group, resource: plural, namespace });
     checks.push({ id: `patch:${plural}`, verb: 'patch', group: spec.group, resource: plural, namespace });
     if (spec.scalable) {
       checks.push({
@@ -93,6 +102,51 @@ function withScopeNote(gate, namespace) {
   };
 }
 
+/**
+ * "Create workload" — one button standing in for six, since this page lists
+ * all six kinds side by side rather than dedicating a page to each. Each item
+ * is gated on that kind's own `create` check (rule 11.4): a ClusterRole that
+ * grants Deployments but not Jobs must show that difference here rather than
+ * disabling the whole menu on the first denial it happens to check.
+ */
+function CreateWorkloadMenu({ gate, onPick }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <Dropdown
+      isOpen={open}
+      onOpenChange={setOpen}
+      onSelect={() => setOpen(false)}
+      toggle={(ref) => (
+        <MenuToggle
+          ref={ref}
+          variant="primary"
+          onClick={() => setOpen((v) => !v)}
+          isExpanded={open}
+          data-testid="create-workload-menu"
+        >
+          Create workload
+        </MenuToggle>
+      )}
+    >
+      <DropdownList>
+        {Object.entries(WORKLOAD_KINDS).map(([plural, spec]) => {
+          const g = gate(`create:${plural}`);
+          return (
+            <DropdownItem
+              key={plural}
+              isAriaDisabled={!g.allowed}
+              description={!g.allowed ? g.reason : undefined}
+              onClick={() => g.allowed && onPick(plural, spec)}
+            >
+              {spec.kind}
+            </DropdownItem>
+          );
+        })}
+      </DropdownList>
+    </Dropdown>
+  );
+}
+
 export default function Workloads() {
   const { activeClusterId } = useCluster();
   const { selected: namespace } = useNamespace();
@@ -103,6 +157,7 @@ export default function Workloads() {
   const [scaleTarget, setScaleTarget] = useState(null);
   const [restartTarget, setRestartTarget] = useState(null);
   const [suspendTarget, setSuspendTarget] = useState(null);
+  const [createTarget, setCreateTarget] = useState(null);
 
   const { data, loading, error, reload } = useAsync(
     () => workloadsApi.list({ namespace, kind: kind ?? undefined }),
@@ -231,6 +286,7 @@ export default function Workloads() {
             ? 'Reading the cluster…'
             : `${rows.length} in ${namespace ? `namespace ${namespace}` : 'all namespaces'}`
         }
+        actions={<CreateWorkloadMenu gate={gate} onPick={(plural, spec) => setCreateTarget({ plural, spec })} />}
       />
 
       <PartialBanner unavailable={data?.unavailable} />
@@ -338,6 +394,19 @@ export default function Workloads() {
           onClose={() => setSuspendTarget(null)}
           onApplied={() => {
             setSuspendTarget(null);
+            reload();
+          }}
+        />
+      )}
+
+      {createTarget && (
+        <ImportYamlDialog
+          isOpen
+          title={`Create ${createTarget.spec.kind}`}
+          initialText={WORKLOAD_TEMPLATES[createTarget.plural]}
+          onClose={() => setCreateTarget(null)}
+          onApplied={() => {
+            setCreateTarget(null);
             reload();
           }}
         />
