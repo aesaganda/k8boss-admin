@@ -39,13 +39,21 @@
  * production manifest. `yamlSyntax.js` guarantees the other half of it: the
  * tokens for a line concatenate back to exactly that line.
  *
- * **Tab indents, Escape then Tab escapes.** A textarea that swallows Tab is a
- * keyboard trap — the operator gets into the editor and cannot get out without
- * a mouse. A textarea that does *not* swallow Tab cannot indent YAML, which is
- * the one language where indentation is the entire syntax. The standard
- * resolution is both: Tab inserts, and Escape arms the next Tab to move focus.
- * The hint under the box says so, because an undiscoverable escape hatch is the
- * same trap with extra steps.
+ * **Tab indents, Escape then Tab escapes, Escape twice leaves.** A textarea
+ * that swallows Tab is a keyboard trap — the operator gets into the editor and
+ * cannot get out without a mouse. A textarea that does *not* swallow Tab cannot
+ * indent YAML, which is the one language where indentation is the entire
+ * syntax. The standard resolution is both: Tab inserts, and Escape arms the
+ * next Tab to move focus. The hint under the box says so, because an
+ * undiscoverable escape hatch is the same trap with extra steps.
+ *
+ * That escape hatch did not work where the editor actually lives. Every use of
+ * it is inside a dialog, and PatternFly's Modal closes on Escape — so the
+ * keystroke the hint recommended discarded the manifest instead of arming
+ * anything, and the trap it was supposed to open was still shut. The first
+ * Escape is now stopped before it reaches the dialog and the second is not,
+ * which keeps both exits: out of the box with Tab, out of the dialog with
+ * Escape again.
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Split, SplitItem } from '@patternfly/react-core';
@@ -249,7 +257,28 @@ export function YamlEditor({
       const element = event.target;
 
       if (event.key === 'Escape') {
-        setTabEscapes(true);
+        // The editor's only home is inside a dialog, and PatternFly's Modal
+        // closes on Escape from a listener on `document.body`. Unstopped, the
+        // documented way out of the Tab trap is instead the way to throw away
+        // the manifest the operator has been typing — and they find that out by
+        // losing it. So the first Escape is kept: it arms the exit and goes no
+        // further.
+        //
+        // `stopImmediatePropagation` and not just `stopPropagation`, because
+        // React delegates from the same node PatternFly listens on: stopping
+        // propagation alone leaves a listener already attached to `body` to run
+        // anyway, and which of the two got there first is not something this
+        // component should be betting on.
+        if (!tabEscapes) {
+          event.stopPropagation();
+          event.nativeEvent?.stopImmediatePropagation?.();
+          setTabEscapes(true);
+          return;
+        }
+        // A second one is not kept. Escape twice is somebody asking to leave,
+        // not to indent, and a dialog that cannot be dismissed from the control
+        // that fills it is the trap wearing the other hat.
+        setTabEscapes(false);
         return;
       }
 
@@ -430,7 +459,10 @@ export function YamlEditor({
             rows={rows}
             aria-label={ariaLabel || label}
             aria-invalid={!validity.valid && !validity.empty}
-            aria-describedby={`${id}-status`}
+            // The hint as well as the status, because the hint is now the only
+            // statement of a two-step exit from a control that swallows Tab. A
+            // keyboard user who cannot see it is exactly the user it is for.
+            aria-describedby={`${id}-hint ${id}-status`}
             onChange={(event) => {
               updateCaret(event.target);
               onChangeRef.current?.(event.target.value);
@@ -446,9 +478,10 @@ export function YamlEditor({
       </div>
 
       <p
+        id={`${id}-hint`}
         style={{ color: 'var(--admin-muted, #6a6e73)', fontSize: '0.8125rem', margin: '0.25rem 0 0' }}
       >
-        Tab indents. Press Escape then Tab to move focus out of the editor.
+        Tab indents. Escape then Tab moves focus out of the editor; Escape twice closes this dialog.
       </p>
 
       <div id={`${id}-status`} aria-live="polite">
