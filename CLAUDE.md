@@ -7,8 +7,8 @@ happened — including what failed.
 
 **What it is not.** Not a monitoring system, not a deployment engine, not a
 GitOps controller, and not a security-posture product. It holds no cluster state:
-every page is a live read. Optional local/LDAP authentication protects the console;
-legacy proxy mode remains available when it is disabled. It was split out
+every page is a live read. Optional local, LDAP or OpenID Connect authentication
+protects the console; legacy proxy mode remains available when it is disabled. It was split out
 of [K8Boss](https://github.com/aesaganda/k8boss) and shares no code with it —
 `docs/adr-0002-lineage.md` says what came across and what deliberately did not.
 
@@ -21,8 +21,8 @@ of [K8Boss](https://github.com/aesaganda/k8boss) and shares no code with it —
 | `backend/app/resources/` | Catalog (discovery), reader (generic list/get/YAML), shaping (rows), envelope | `docs/api-contract.md` §1.2, §4, §8 |
 | `backend/app/services/` | Typed read models: the unified workload row, node rows | `docs/api-contract.md` §5, §6 |
 | `backend/app/admin/` | **Every write.** The funnel, preflight, diff, apply, scale, rollout, node drain | `docs/safety-model.md` |
-| `backend/app/audit/` | Append-only trail: `record()` and `query()` | `docs/api-contract.md` §10 |
-| `backend/app/identity/` | Local password hashing, opaque sessions, LDAP search-and-bind | `docs/api-contract.md` §12 |
+| `backend/app/audit/` | Append-only, hash-chained trail: `record()`, `query()`, `verify()`, export | `docs/api-contract.md` §10 |
+| `backend/app/identity/` | Local password hashing, opaque sessions, LDAP search-and-bind, OIDC single sign-on, sign-in throttling | `docs/api-contract.md` §12 |
 | `backend/tests/` | pytest on SQLite. The fake Kubernetes client **raises** on an unstubbed call | — |
 | `frontend/src/` | React 19 / Vite / PatternFly 6 SPA | `docs/api-contract.md` §11 |
 | `deploy/` | Namespace, RBAC, Deployments, Services, Ingress, kustomization | `docs/rbac.md` |
@@ -138,6 +138,19 @@ request context rather than from arguments, because a caller that can pass the
 actor can pass the wrong one. And a failed INSERT never fails the write: by then
 the cluster has already changed, and turning a logging fault into a 500 would
 tell the operator their action failed when it did not.
+
+That hook protects the table against *this application*, and against nothing
+else. Records are therefore also **hash-chained**, which prevents nothing and
+makes a `psql`-level edit **detectable** — the strongest honest promise an
+application can make about storage it does not own. Sign-ins are recorded the
+same way, because "who tried" is asked about the console as often as about a
+cluster.
+
+**Records that predate the chain are never back-filled.** Hashing them now would
+attest whatever they say today, turning "we do not know" into "verified" — the
+defect standard with a signature attached. They are counted, and the verdict for
+the trail is withheld as `partial`, which is never rendered as a pass. See
+`docs/adr-0003-audit-hash-chain.md`.
 
 ---
 
@@ -304,6 +317,10 @@ If a rule is wrong, change `eslint.config.js`, where the change gets reviewed.
 **Dev runs SQLite, production runs PostgreSQL, and CI only exercises SQLite.**
 Anything engine-divergent — a raw SQL fragment, a reliance on SQLite's permissive
 typing — needs a deliberate Postgres check before it is believed.
+`scripts/postgres-check.py` is that check for the audit schema and the sign-in
+throttle; point it at a scratch database and run it. It exists because the first
+version of `schema_upgrade.py` deadlocked PostgreSQL at startup — forever, before
+serving a request — and SQLite could not reproduce it.
 
 ---
 
@@ -317,5 +334,6 @@ typing — needs a deliberate Postgres check before it is believed.
 | `docs/rbac.md` | Every permission by feature, with the degradation from withholding it |
 | `docs/adr-0001-dry-run-first.md` | Why dry-run-then-confirm rather than optimistic-with-undo |
 | `docs/adr-0002-lineage.md` | What came from K8Boss, what did not, why the two stay separate |
+| `docs/adr-0003-audit-hash-chain.md` | Tamper *evidence* vs tamper prevention, and why pre-chain records are never back-filled |
 | `deploy/rbac.yaml` | The shipped roles. Each rule is annotated with the contract section it serves |
 | `README.md` | The front door: quickstart, feature list, every environment variable |

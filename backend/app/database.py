@@ -68,15 +68,27 @@ def get_db():
 
 
 def create_tables() -> None:
-    """Create every declared table. Idempotent.
+    """Create every declared table, upgrade older ones, install the audit guards.
 
     Importing ``app.models`` here rather than at module scope keeps the import
     graph one-directional (models -> database, never the reverse) while still
     guaranteeing that every model class is registered on ``Base.metadata`` before
     ``create_all`` runs. A model imported by nothing at startup would otherwise
     have its table silently missing until the first request touched it.
+
+    ``create_all`` creates missing *tables* and never adds a column to a table
+    that already exists, so it is followed by :mod:`app.schema_upgrade`, which
+    adds the additive columns an older database is missing and **refuses to
+    start** if any is still absent afterwards. Without that second step an
+    upgraded deployment serves every page correctly and fails on the first audit
+    write — a console that records nothing, with no signal until somebody looks
+    for a record that was never written.
     """
     from app import models  # noqa: F401  (registers the mapped classes)
+    from app import schema_upgrade
+    from app.audit import integrity
 
     Base.metadata.create_all(bind=engine)
+    schema_upgrade.upgrade(engine)
     models.install_audit_append_only_guard()
+    integrity.install_audit_chain()

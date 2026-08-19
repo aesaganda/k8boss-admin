@@ -150,12 +150,19 @@ function buildQuery(params) {
   return qs;
 }
 
-function buildUrl(path, params) {
+/**
+ * Build a request URL, scoping it to the active cluster unless told not to.
+ *
+ * §1.1: omitting cluster_id means "the active cluster" server-side. We always
+ * send it when we know it, so two browser tabs on two clusters cannot race each
+ * other through a single server-side "active cluster" notion.
+ *
+ * `scoped: false` is the opt-out, and §10 is the only caller that uses it — see
+ * the `audit` export below for why that endpoint inverts the rule.
+ */
+function buildUrl(path, params, { scoped = true } = {}) {
   const qs = buildQuery(params);
-  // §1.1: omitting cluster_id means "the active cluster" server-side. We always
-  // send it when we know it, so two browser tabs on two clusters cannot race
-  // each other through a single server-side "active cluster" notion.
-  if (activeClusterId != null && !qs.has('cluster_id')) {
+  if (scoped && activeClusterId != null && !qs.has('cluster_id')) {
     qs.set('cluster_id', String(activeClusterId));
   }
   const query = qs.toString();
@@ -301,6 +308,7 @@ async function attempt(url, init, expect) {
  * Core request. Options:
  *   method  — HTTP verb, default GET
  *   params  — query object; cluster_id is appended automatically
+ *   scoped  — false to suppress that (only the §10 audit endpoints; see buildUrl)
  *   body    — JSON-serialised when present
  *   expect  — 'json' (default) | 'text' | 'none' | 'blob'
  *   headers — extra headers
@@ -308,7 +316,7 @@ async function attempt(url, init, expect) {
  */
 export async function request(path, options = {}) {
   const method = (options.method || 'GET').toUpperCase();
-  const url = buildUrl(path, options.params);
+  const url = buildUrl(path, options.params, { scoped: options.scoped !== false });
   const headers = {
     Accept: options.expect === 'text' ? 'text/plain, application/json' : 'application/json',
     ...options.headers,
@@ -405,6 +413,24 @@ export const auth = {
   me: () => api.get('/auth/me'),
   login: (body) => request('/auth/login', { method: 'POST', body, retry: false }),
   logout: () => request('/auth/logout', { method: 'POST', expect: 'none', retry: false }),
+
+  /**
+   * Where to send the browser to begin single sign-on.
+   *
+   * A full-page navigation, not a `fetch`. The handshake is a redirect to the
+   * identity provider and back, and an XHR cannot follow that: the IdP needs to
+   * show a login form, possibly a second factor, possibly a consent screen, in a
+   * real browsing context. It also has to be a top-level navigation for the
+   * handshake cookie to come back at all — see the backend's
+   * `identity/handshake.py` on why that cookie is SameSite=Lax.
+   *
+   * `cluster_id` is deliberately not appended: `buildUrl` is bypassed because
+   * this is not an API call, and a cluster scope means nothing to a sign-in.
+   */
+  ssoStartUrl: (nextPath = '/') => {
+    const qs = new URLSearchParams({ next: nextPath || '/' });
+    return `${API_BASE}/auth/oidc/start?${qs.toString()}`;
+  },
 };
 
 export const users = {
@@ -518,9 +544,50 @@ export const access = {
 
 /* ── §10 Audit ──────────────────────────────────────────────────────────── */
 
+/**
+ * §10, and the one place in this client that is NOT cluster-scoped.
+ *
+ * Everywhere else, omitting `cluster_id` means "the active cluster" (§1.1) and
+ * `buildUrl` appends it for us. On the audit endpoints an omitted `cluster_id`
+ * means *every* cluster — the opposite — so `scoped: false` is passed on all
+ * three. Without it the page offers an "Everything" scope, states in a banner
+ * that it is showing every cluster and the console's own records, and fetches
+ * one cluster's writes with no sign-ins in it, disclosing the narrowing nowhere.
+ *
+ * `cluster_id: 0` is §10's sentinel for "records that belong to no cluster",
+ * and it survives `buildQuery` because a real `0` is deliberately kept there.
+ */
 export const audit = {
-  /** params: { limit, cursor, cluster_id, actor, outcome, since } */
-  list: (params) => api.get('/audit', params),
+  /**
+   * params: { limit, cursor, cluster_id, actor, outcome, since, until,
+   *           category, verb, dry_run }
+   */
+  list: (params) => request('/audit', { params, scoped: false }),
+
+  /** §10.3 — the hash-chain integrity report. */
+  verify: (params) => request('/audit/verify', { params, scoped: false }),
+
+  /**
+   * §10.4 — a full-page navigation to the export, not a `fetch`.
+   *
+   * The response is a `Content-Disposition: attachment` stream that can be far
+   * larger than the tab's memory. Reading it through `fetch` to build a blob URL
+   * would materialise the whole trail in the browser to hand it straight back to
+   * the disk, and would lose the streaming the backend went to the trouble of
+   * doing. Letting the browser handle the download is both correct and free.
+   *
+   * Unscoped, like the other two. An export narrower than the table it was taken
+   * from is the worse half of the same bug: the file outlives the page, and the
+   * person reading it never saw the banner.
+   */
+  exportUrl: (params) => {
+    const qs = new URLSearchParams();
+    for (const [key, value] of Object.entries(params || {})) {
+      if (value == null || value === '') continue;
+      qs.set(key, String(value));
+    }
+    return `${API_BASE}/audit/export?${qs.toString()}`;
+  },
 };
 
 /* ── §7 Pod logs ────────────────────────────────────────────────────────── */

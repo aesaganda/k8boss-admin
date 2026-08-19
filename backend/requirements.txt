@@ -12,6 +12,17 @@ httpx==0.28.1
 websockets==16.0
 ldap3==2.9.1
 
+# OpenID Connect ID-token verification. The [crypto] extra pulls in the RSA/EC
+# support PyJWT needs for the asymmetric algorithms an OIDC issuer signs with;
+# without it `jwt.decode` raises at runtime for every real token, which is a
+# packaging failure that only shows up on the first sign-in.
+#
+# Hand-rolling JWT verification to avoid this dependency was considered and
+# rejected: the failure modes (algorithm confusion, an unchecked audience, a
+# missing exp) are silent, and each one turns the login flow into an open door
+# that works perfectly in testing.
+pyjwt[crypto]==2.10.1
+
 # Postgres driver. Unpinned minor on purpose: the wheel is platform-specific and
 # the console never touches psycopg2-specific APIs — SQLAlchemy is the only
 # consumer. Dev runs SQLite, production runs Postgres, so anything engine-

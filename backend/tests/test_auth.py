@@ -35,8 +35,50 @@ def test_auth_discovery_is_public_and_disabled_by_default(client):
         "enabled": False,
         "localEnabled": True,
         "ldapEnabled": False,
+        "oidcEnabled": False,
         "methods": ["local"],
+        "oidc": None,
     }
+
+
+def test_auth_discovery_never_names_how_sso_is_configured(client, auth_enabled, monkeypatch):
+    """The public endpoint says a method exists, never how it is wired.
+
+    This is the one unauthenticated endpoint in the API, and the login page only
+    needs to know which buttons to draw. Returning the issuer, the client id or
+    the configured groups would let anyone who can reach the console enumerate
+    its identity provider, which is reconnaissance for free.
+    """
+    monkeypatch.setattr(settings, "oidc_enabled", True)
+    monkeypatch.setattr(settings, "oidc_issuer", "https://idp.internal.example/realms/x")
+    monkeypatch.setattr(settings, "oidc_client_id", "k8boss-admin-console")
+    monkeypatch.setattr(settings, "oidc_admin_group", "cn=platform-admins")
+
+    body = client.get("/api/auth/config").json()
+
+    assert body["oidcEnabled"] is True
+    assert body["methods"] == ["local", "oidc"]
+    assert body["oidc"] == {"label": "Single sign-on", "startPath": "/api/auth/oidc/start"}
+    serialized = client.get("/api/auth/config").text
+    for secret in ("idp.internal.example", "k8boss-admin-console", "platform-admins"):
+        assert secret not in serialized
+
+
+def test_sso_is_not_offered_without_an_issuer_and_client_id(client, auth_enabled, monkeypatch):
+    """A button that cannot work is worse than no button.
+
+    An operator who clicks an SSO button and gets an error concludes the console
+    is broken. One who sees no button concludes SSO is not set up, which is both
+    true and actionable.
+    """
+    monkeypatch.setattr(settings, "oidc_enabled", True)
+    monkeypatch.setattr(settings, "oidc_issuer", "")
+    monkeypatch.setattr(settings, "oidc_client_id", "")
+
+    body = client.get("/api/auth/config").json()
+
+    assert body["oidcEnabled"] is False
+    assert "oidc" not in body["methods"]
 
 
 def test_enabled_auth_protects_api_but_keeps_health_and_login_public(client, auth_enabled):
@@ -164,8 +206,14 @@ def test_administrator_can_manage_users_and_actions_use_the_verified_actor(
     db_session.expire_all()
     assert db_session.get(User, user_id).active is False
     audit = db_session.scalars(select(AuditRecord).order_by(AuditRecord.id)).all()
-    assert [row.actor for row in audit] == ["admin", "admin", "admin"]
+    # The sign-in itself is the first record, then the three user changes. Every
+    # one is attributed to the verified session identity — never to the
+    # `X-K8Boss-User` header the request also carried, which is advisory in
+    # legacy proxy mode and must be ignored outright once a session exists.
+    assert [row.verb for row in audit] == ["login", "create", "patch", "delete"]
+    assert [row.actor for row in audit] == ["admin"] * 4
     assert all(row.cluster_id is None for row in audit)
+    assert all(row.category == "console" for row in audit)
 
 
 def test_non_admin_cannot_list_or_manage_users(client, db_session, auth_enabled):
@@ -224,9 +272,16 @@ def test_successful_ldap_bind_synchronizes_profile_and_admin_group(
             username="directory.admin",
             display_name="Directory Admin",
             email="directory.admin@example.test",
-            is_admin=True,
+            groups=("CN=Platform Admins,OU=Groups,DC=example,DC=test",),
         )
 
+    # Configured with different casing from what the directory returned. Group
+    # DNs are case-insensitive by specification and real servers echo whatever
+    # casing the attribute was written with, so a verbatim comparison produces a
+    # configuration that looks right and grants nobody anything.
+    monkeypatch.setattr(
+        settings, "ldap_admin_group_dn", "cn=platform admins,ou=groups,dc=example,dc=test"
+    )
     monkeypatch.setattr("app.identity.ldap.authenticate", fake_authenticate)
     body = _login(client, "directory.admin", "directory-password", source="ldap")
     assert body["user"] == {

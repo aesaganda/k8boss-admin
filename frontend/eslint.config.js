@@ -46,6 +46,14 @@ export default [
       // reports a working file as broken is the defect standard applied to our
       // own tooling.
       'react/jsx-uses-vars': 'error',
+      // The rule that catches a component used in JSX and never imported. Core
+      // `no-undef` cannot: eslint-scope creates no reference for a JSXIdentifier,
+      // so `<Tooltip/>` with no import is invisible to it — which is why
+      // `jsx-uses-vars` above has to exist at all. Vite does not catch it either
+      // (an undefined global is legal JavaScript), so the whole toolchain was
+      // silent about two pages that threw ReferenceError on first render and
+      // showed the error boundary instead of their content.
+      'react/jsx-no-undef': 'error',
       'react-refresh/only-export-components': ['warn', { allowConstantExport: true }],
       // Contexts intentionally export both a provider component and its hook
       // from one file; that is the pattern the whole app consumes.

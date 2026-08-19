@@ -11,7 +11,26 @@ from app.config import settings
 from app.errors import AuthenticationRequired, PermissionDenied
 from app.identity.service import load_session
 
-_PUBLIC_PATHS = frozenset({"/api/health", "/api/auth/config", "/api/auth/login"})
+#: Reachable without a session. Exact strings, matched against ``scope["path"]``.
+#:
+#: The two OIDC routes have to be here for a reason that is obvious in hindsight
+#: and easy to miss: single sign-on *is how you get a session*, so challenging it
+#: for one makes the flow impossible to start and the symptom is a login button
+#: that 401s. Both are GET browser navigations, so the CSRF check below does not
+#: apply to them either; a future POST-mode callback would need explicit handling
+#: rather than inheriting this exemption.
+#:
+#: Being public is not the same as being unprotected. ``/oidc/start`` mints a
+#: sealed handshake and redirects; ``/oidc/callback`` refuses anything that does
+#: not match a handshake this console started, and issues a session only after a
+#: signature-verified assertion.
+_PUBLIC_PATHS = frozenset({
+    "/api/health",
+    "/api/auth/config",
+    "/api/auth/login",
+    "/api/auth/oidc/start",
+    "/api/auth/oidc/callback",
+})
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 

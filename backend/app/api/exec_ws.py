@@ -492,6 +492,22 @@ async def exec_in_pod(websocket: WebSocket, namespace: str, name: str) -> None:
     except AdminError as e:
         await terminator.send(error_frame(e))
         end_reason = f"refused: {e.code}"
+    except asyncio.CancelledError:
+        # The ASGI server cancels this task when the viewer's socket goes away,
+        # and that races _run_session's own _DISCONNECT branch. When cancellation
+        # wins, `end_reason` is still its initial generic value and the close
+        # record says "the session ended" about a session somebody walked away
+        # from — the same fact with the useful half missing, in the one row whose
+        # job is to say what happened.
+        #
+        # CancelledError is a BaseException, so the handler below does not catch
+        # it and this clause is not redundant. Re-raised rather than swallowed:
+        # suppressing cancellation leaves the task running after the server asked
+        # it to stop. The `finally` block still writes the close record, because
+        # every statement there up to the first `await` runs during cancellation
+        # — which is exactly why it was written that way.
+        end_reason = "the operator disconnected"
+        raise
     except Exception as e:  # noqa: BLE001 - a bug here must still end the session
         logger.exception("Unhandled failure on the exec session for %s", label)
         await terminator.send(error_frame(e))

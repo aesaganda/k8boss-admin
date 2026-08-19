@@ -160,6 +160,25 @@ def encrypt(plaintext: str | None) -> str:
     return _get_fernet().encrypt(plaintext.encode("utf-8")).decode("utf-8")
 
 
+def decrypt_with_ttl(ciphertext: str, *, ttl_seconds: int) -> str:
+    """Decrypt a token that is only valid for a bounded time.
+
+    Fernet stamps every token with an authenticated timestamp, so expiry is
+    checked *before* the payload is parsed. That ordering is the point: a payload
+    carrying its own ``expires_at`` can only be checked after it has been
+    decrypted and deserialised, which means the expiry check is one ``if`` a
+    future edit can move, reorder or forget. Here it is the library's job and
+    there is no code path that reads the contents of an expired token.
+
+    Raises ``cryptography.fernet.InvalidToken`` for an expired, forged or
+    corrupt value — deliberately one exception for all three, because a caller
+    that could tell them apart would be an oracle for whoever is submitting the
+    tokens. Used by :mod:`app.identity.handshake`; not for stored credentials,
+    which must never expire out from under the cluster they authenticate to.
+    """
+    return _get_fernet().decrypt(ciphertext.encode("utf-8"), ttl=ttl_seconds).decode("utf-8")
+
+
 def decrypt(ciphertext: str | None) -> str:
     """Decrypt a stored credential. Raises ``ValueError`` on tamper or wrong key."""
     if not ciphertext:

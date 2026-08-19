@@ -190,6 +190,25 @@ class PermissionDenied(AdminError):
     default_message = "Your console role does not permit that action."
 
 
+class TooManyAttempts(AdminError):
+    """The caller has exhausted the sign-in budget for the current window.
+
+    Its own code rather than ``invalid_credentials``, because the frontend has to
+    behave differently: an operator who mistyped a password should try again, and
+    an operator who is being told to wait should be shown for how long instead of
+    being invited to keep guessing. A shared code makes the login form
+    indistinguishable in the two cases and trains people to hammer it.
+
+    429 rather than 403: the request was well-formed and may well be permitted
+    later, which is exactly what 429 means. ``context.retryAfterSeconds`` carries
+    the wait.
+    """
+
+    code = "too_many_attempts"
+    http_status = 429
+    default_message = "Too many sign-in attempts. Wait a moment before trying again."
+
+
 class IdentityProviderUnavailable(AdminError):
     """LDAP could not answer, which is distinct from rejecting credentials."""
 
@@ -250,6 +269,7 @@ _UNAVAILABLE_REASON: dict[str, str] = {
     "invalid_credentials": "forbidden",
     "permission_denied": "forbidden",
     "identity_provider_unavailable": "unreachable",
+    "too_many_attempts": "unreachable",
     "upstream_error": "unreachable",
 }
 

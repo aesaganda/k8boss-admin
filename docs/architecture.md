@@ -166,7 +166,15 @@ reason.
 | `admin/scale.py` | Scale (via `/scale`), restart (template annotation), suspend |
 | `admin/rollout.py` | Revision history — ReplicaSets for Deployments, ControllerRevisions for the rest — and rollback |
 | `admin/nodes.py` | Cordon, and the drain planner: classify every pod, then execute per-pod |
-| `audit/recorder.py` | `record()` from the funnel and from the two privileged reads; `query()` for §10 |
+| `audit/recorder.py` | `record()` from the funnel and from the two privileged reads; `record_console_event()` for sign-ins and user changes; `query()`, `stream()` and `verify_chain()` for §10 |
+| `audit/integrity.py` | The hash chain. A flush listener that links every new record, and `verify()` — which reports `intact`, `broken` or `partial`, and never claims the third is the first |
+| `audit/export.py` | §10.4 serialisers. NDJSON is byte-faithful; CSV is flattened and defangs cells a spreadsheet would execute as a formula |
+| `identity/service.py` | Local passwords, opaque sessions, LDAP synchronisation, federated (SSO) provisioning and its two account-takeover refusals |
+| `identity/oidc.py` | OpenID Connect: discovery, PKCE, and the ID-token verification each of whose checks blocks a specific attack |
+| `identity/handshake.py` | The sealed, short-lived cookie carrying one sign-in across the redirect. `SameSite=Lax`, unlike the session cookie, and the module says why |
+| `identity/roles.py` | Group → console role, with the tri-state that keeps "in no groups" apart from "we could not look" |
+| `identity/throttle.py` | Sign-in rate limiting. Reserves before the password check, in its own table, so a burst cannot walk through the limit and a failed audit write cannot silently disable it |
+| `schema_upgrade.py` | Additive column upgrades for databases older than the current build, and a startup refusal when one could not be added |
 | `api/*.py` | Routers. Thin: parse, call, envelope. The logic lives below them |
 
 ### Frontend — `frontend/src/`
