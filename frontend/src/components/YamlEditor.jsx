@@ -25,6 +25,20 @@
  * "line 42, column 9: bad indentation of a mapping entry" is the difference
  * between an operator scanning 300 lines and fixing one.
  *
+ * **Line numbers and colour are painted behind a real textarea.** The editor is
+ * still one `<textarea>` — nothing here reimplements a caret, a selection, an
+ * undo stack or an IME. The gutter is a sibling column and the syntax colouring
+ * is a copy of the same text drawn underneath, with the textarea's own glyphs
+ * turned transparent and its scroll offset mirrored onto both. That buys the
+ * colour without buying a text editor's bug list; what it costs is one hard
+ * constraint, and `index.css` states it where the styles are: the two layers
+ * must lay out every character in the same place, so the highlight layer may
+ * change colour and nothing else. A different font, weight, letter-spacing or
+ * padding shifts the text out from under the caret — and an operator whose
+ * caret is not where the glyph says it is will edit the wrong line of somebody's
+ * production manifest. `yamlSyntax.js` guarantees the other half of it: the
+ * tokens for a line concatenate back to exactly that line.
+ *
  * **Tab indents, Escape then Tab escapes.** A textarea that swallows Tab is a
  * keyboard trap — the operator gets into the editor and cannot get out without
  * a mouse. A textarea that does *not* swallow Tab cannot indent YAML, which is
@@ -33,11 +47,24 @@
  * The hint under the box says so, because an undiscoverable escape hatch is the
  * same trap with extra steps.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Split, SplitItem } from '@patternfly/react-core';
 import yaml from 'js-yaml';
 
+import { tokenizeYaml } from './yamlSyntax';
+
 const INDENT = '  ';
+
+/**
+ * The size at which the highlight layer is dropped.
+ *
+ * Every keystroke re-tokenises the document and hands React one element per
+ * token, so the cost is linear in the manifest and paid on each character
+ * typed. Two thousand lines is comfortably past every Kubernetes object an
+ * operator writes by hand and short of the generated CRDs (cert-manager's is
+ * five figures) that would otherwise make typing lag a keystroke behind.
+ */
+const HIGHLIGHT_MAX_LINES = 2000;
 
 /**
  * Parse and report. Never throws — the result object is the whole vocabulary
@@ -163,6 +190,8 @@ export function YamlEditor({
   // direction.
   const [tabEscapes, setTabEscapes] = useState(false);
   const areaRef = useRef(null);
+  const gutterRef = useRef(null);
+  const highlightRef = useRef(null);
 
   const validity = useMemo(() => validateYaml(value), [value]);
 
@@ -185,6 +214,40 @@ export function YamlEditor({
   useEffect(() => {
     onValidityRef.current?.(validity);
   }, [validity]);
+
+  /**
+   * Mirror the textarea's scroll onto the two layers that cannot scroll
+   * themselves.
+   *
+   * A transform rather than a `scrollTop`/`scrollLeft` assignment: the layers'
+   * scrollable extents are not identical to the textarea's — a horizontal
+   * scrollbar alone takes a row's worth off it — and an assignment past a
+   * layer's own maximum is silently clamped, which shows up as the numbers
+   * drifting out of step with the lines at the very bottom of a long manifest.
+   * A transform has no maximum to clamp to.
+   *
+   * Written straight to the DOM, and deliberately not through state: this runs
+   * on every scroll event, and a re-render per frame would make scrolling a
+   * long manifest the slowest thing in the dialog. React never touches these
+   * two `style` attributes, so nothing overwrites what is set here.
+   */
+  const syncScroll = useCallback(() => {
+    const element = areaRef.current;
+    if (!element) return;
+    const { scrollLeft, scrollTop } = element;
+    if (highlightRef.current) {
+      highlightRef.current.style.transform = `translate(${-scrollLeft}px, ${-scrollTop}px)`;
+    }
+    if (gutterRef.current) {
+      gutterRef.current.style.transform = `translateY(${-scrollTop}px)`;
+    }
+  }, []);
+
+  // Also after a render, not only on the scroll event: typing at the bottom of
+  // the box scrolls the textarea, and the layers are re-rendered by that same
+  // keystroke — which drops the transform of a freshly mounted highlight layer
+  // back to zero while the text under it is scrolled.
+  useLayoutEffect(syncScroll, [syncScroll, value, rows]);
 
   const updateCaret = useCallback((element) => {
     const upto = element.value.slice(0, element.selectionStart);
@@ -259,7 +322,56 @@ export function YamlEditor({
   );
 
   const edited = originalValue != null && String(value ?? '') !== String(originalValue);
-  const lineCount = String(value ?? '').split('\n').length;
+  const lineCount = useMemo(() => String(value ?? '').split('\n').length, [value]);
+
+  // The highlight layer is dropped rather than degraded: a coloured manifest
+  // that stutters a keystroke behind the operator is worse than a plain one,
+  // and a CRD's `openAPIV3Schema` really does run to thousands of lines. The
+  // gutter stays either way — line numbers cost one element per line and are
+  // what the parse error's "line 137" is measured against.
+  //
+  // A disabled textarea is excluded for a different reason: the browser mutes
+  // its text, and a full-strength coloured copy painted behind it would read as
+  // an editor that is still live.
+  const highlighted = !isDisabled && lineCount <= HIGHLIGHT_MAX_LINES;
+
+  // Clamped: js-yaml can mark a truncated document one line past its end, and a
+  // gutter entry that does not exist would silently mark nothing at all.
+  const errorLine =
+    validity.error?.line && validity.error.line <= lineCount ? validity.error.line : null;
+
+  const gutterLines = useMemo(
+    () =>
+      Array.from({ length: lineCount }, (_, i) => (
+        <span
+          key={i}
+          className={`admin-yaml__lineno${i + 1 === errorLine ? ' admin-yaml__lineno--error' : ''}`}
+        >
+          {i + 1}
+        </span>
+      )),
+    [lineCount, errorLine],
+  );
+
+  const highlightLines = useMemo(() => {
+    if (!highlighted) return null;
+    return tokenizeYaml(value ?? '').map((tokens, index) => (
+      <span
+        key={index}
+        className={`admin-yaml__line${index + 1 === errorLine ? ' admin-yaml__line--error' : ''}`}
+      >
+        {tokens.map((token, i) =>
+          token.kind ? (
+            <span key={i} className={`admin-yaml__t--${token.kind}`}>
+              {token.text}
+            </span>
+          ) : (
+            token.text
+          ),
+        )}
+      </span>
+    ));
+  }, [highlighted, value, errorLine]);
 
   return (
     <div className={className} data-testid="yaml-editor">
@@ -274,59 +386,75 @@ export function YamlEditor({
           <span style={{ color: 'var(--admin-muted, #6a6e73)', fontSize: '0.8125rem' }}>
             {lineCount} {lineCount === 1 ? 'line' : 'lines'} · Ln {caret.line}, Col {caret.column}
             {edited ? ' · edited' : ''}
+            {/* Said out loud rather than left to be noticed: an editor that
+                silently stops colouring above a size looks broken, and the
+                operator goes hunting for the syntax error that turned it off. */}
+            {!highlighted && !isDisabled ? ' · highlighting off (large manifest)' : ''}
           </span>
         </SplitItem>
       </Split>
 
-      <textarea
-        id={id}
-        ref={areaRef}
-        value={value ?? ''}
-        readOnly={readOnly}
-        disabled={isDisabled}
-        spellCheck={false}
-        // Autocorrect and autocapitalise on a mobile keyboard silently rewrite
-        // `metadata` to `Metadata` and container image tags into sentences.
-        autoCorrect="off"
-        autoCapitalize="off"
-        autoComplete="off"
-        rows={rows}
-        aria-label={ariaLabel || label}
-        aria-invalid={!validity.valid && !validity.empty}
-        aria-describedby={`${id}-status`}
-        onChange={(event) => {
-          updateCaret(event.target);
-          onChangeRef.current?.(event.target.value);
-        }}
-        onKeyDown={handleKeyDown}
-        onKeyUp={(event) => updateCaret(event.target)}
-        onClick={(event) => updateCaret(event.target)}
-        onBlur={() => setTabEscapes(false)}
-        data-testid="yaml-editor-input"
-        style={{
-          width: '100%',
-          boxSizing: 'border-box',
-          fontFamily: 'var(--admin-mono, ui-monospace, SFMono-Regular, Menlo, monospace)',
-          fontSize: '0.8125rem',
-          lineHeight: 1.5,
-          padding: '0.5rem',
-          // Horizontal scroll rather than wrap, for the same reason DiffView
-          // does not wrap: a wrapped line in an indentation-significant language
-          // reads as a different indentation level than it is.
-          whiteSpace: 'pre',
-          overflowWrap: 'normal',
-          overflowX: 'auto',
-          resize: 'vertical',
-          color: 'var(--pf-t--global--text--color--regular, #151515)',
-          background: 'var(--pf-t--global--background--color--primary--default, #fff)',
-          border: `1px solid ${
-            !validity.valid && !validity.empty
-              ? 'var(--pf-t--global--border--color--status--danger--default, #c9190b)'
-              : 'var(--admin-border, #d2d2d2)'
-          }`,
-          borderRadius: 'var(--pf-t--global--border--radius--small, 4px)',
-        }}
-      />
+      {/* The border, the background and the focus ring belong to the frame: the
+          gutter and the box are one control, and a border drawn around the
+          textarea alone would leave the line numbers outside the thing it
+          encloses. The textarea's own background stays transparent, or there
+          would be nothing to see of the layer underneath it. */}
+      <div
+        className="admin-yaml"
+        data-invalid={!validity.valid && !validity.empty ? 'true' : undefined}
+        // The gutter is exactly as wide as the largest line number needs, so a
+        // 40-line manifest does not carry the indent of a 4000-line one.
+        style={{ '--admin-yaml-digits': String(lineCount).length }}
+      >
+        <div className="admin-yaml__gutter" aria-hidden="true" data-testid="yaml-editor-gutter">
+          <div className="admin-yaml__gutter-inner" ref={gutterRef}>
+            {gutterLines}
+          </div>
+        </div>
+
+        <div className="admin-yaml__code">
+          {highlighted && (
+            <div className="admin-yaml__highlight" aria-hidden="true">
+              <div
+                className="admin-yaml__highlight-inner"
+                ref={highlightRef}
+                data-testid="yaml-editor-highlight"
+              >
+                {highlightLines}
+              </div>
+            </div>
+          )}
+
+          <textarea
+            id={id}
+            ref={areaRef}
+            className={`admin-yaml__input${highlighted ? ' admin-yaml__input--overlaid' : ''}`}
+            value={value ?? ''}
+            readOnly={readOnly}
+            disabled={isDisabled}
+            spellCheck={false}
+            // Autocorrect and autocapitalise on a mobile keyboard silently rewrite
+            // `metadata` to `Metadata` and container image tags into sentences.
+            autoCorrect="off"
+            autoCapitalize="off"
+            autoComplete="off"
+            rows={rows}
+            aria-label={ariaLabel || label}
+            aria-invalid={!validity.valid && !validity.empty}
+            aria-describedby={`${id}-status`}
+            onChange={(event) => {
+              updateCaret(event.target);
+              onChangeRef.current?.(event.target.value);
+            }}
+            onKeyDown={handleKeyDown}
+            onKeyUp={(event) => updateCaret(event.target)}
+            onClick={(event) => updateCaret(event.target)}
+            onBlur={() => setTabEscapes(false)}
+            onScroll={syncScroll}
+            data-testid="yaml-editor-input"
+          />
+        </div>
+      </div>
 
       <p
         style={{ color: 'var(--admin-muted, #6a6e73)', fontSize: '0.8125rem', margin: '0.25rem 0 0' }}

@@ -284,6 +284,8 @@ version being that there is no undo for a deleted StatefulSet.
   than returning an empty list.
 * Cordon, uncordon and drain.
 * Create, replace and delete any resource from YAML, with optimistic concurrency.
+  The manifest editor numbers its lines and colours its syntax, so the line a
+  parse error names is the line you can see.
 
 **Operational**
 
