@@ -468,6 +468,258 @@ body.admin-resizing * {
   color: var(--admin-muted);
 }
 
+/* ── YAML editor ────────────────────────────────────────────────────────── */
+
+/*
+ * A textarea with a line-number gutter beside it and a syntax-coloured copy of
+ * its own text painted behind it.
+ *
+ * THE CONSTRAINT, because everything below exists to hold it: the highlight
+ * layer and the textarea must lay out every character in exactly the same
+ * place. Only colour may differ. A token class that also set a font, a weight,
+ * a font-style or a letter-spacing would move the glyphs under it and every
+ * glyph after them on that line — and then the caret is no longer where the
+ * character it sits on is drawn, which in this dialog means editing a different
+ * line of somebody's manifest than the one being read. `italic` comments are
+ * the tempting version of that mistake: monospace italics are not the same
+ * advance width in every font on every platform, and the drift only appears on
+ * the machines that have such a font.
+ *
+ * The same applies to the box: padding, font-size, line-height and tab-size are
+ * declared once on the frame and inherited by both layers, so there is no
+ * second place for them to be changed in.
+ */
+
+.admin-yaml {
+  --admin-yaml-pad: 0.5rem;
+
+  /* Light palette. Every entry clears 4.5:1 against the editor's white
+     background, the weakest at 5.1:1 — syntax colour nobody can read is
+     decoration on a manifest somebody is about to apply to a cluster. */
+  --admin-yaml-key: #0451a5;
+  --admin-yaml-string: #a30000;
+  --admin-yaml-number: #0f7b6c;
+  --admin-yaml-const: #6f42c1;
+  --admin-yaml-comment: var(--admin-muted);
+  --admin-yaml-punct: var(--admin-muted);
+  --admin-yaml-meta: #8a5a00;
+  --admin-yaml-selection: rgba(0, 102, 204, 0.3);
+  --admin-yaml-error-line: rgba(201, 25, 11, 0.1);
+
+  display: flex;
+  align-items: stretch;
+  overflow: hidden;
+  border: 1px solid var(--admin-border);
+  border-radius: var(--pf-t--global--border--radius--small, 4px);
+  background: var(--pf-t--global--background--color--primary--default, #fff);
+  font-family: var(--admin-mono);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  tab-size: 2;
+}
+
+.admin-yaml[data-invalid="true"] {
+  border-color: var(--pf-t--global--border--color--status--danger--default, #c9190b);
+}
+
+/*
+ * On the frame, not on the textarea: the gutter and the box read as one
+ * control, and a ring drawn around the textarea alone would leave the line
+ * numbers sitting outside the focused thing.
+ */
+.admin-yaml:focus-within {
+  outline: 2px solid var(--pf-t--global--color--brand--default, #06c);
+  outline-offset: -2px;
+}
+
+.admin-yaml__gutter {
+  position: relative;
+  flex: 0 0 auto;
+  box-sizing: border-box;
+  /* Wide enough for the largest line number this document has, and no wider —
+     a 40-line manifest should not carry the indent of a 4000-line one. The
+     slack past `digits * 1ch` is there because a monospace advance is rarely a
+     whole number of pixels, and 3ch of box for a 3-digit number rounds down
+     often enough to wrap "164" onto two lines and take the gutter out of step
+     with the text for the rest of the document. */
+  width: calc(var(--admin-yaml-digits, 2) * 1ch + 1.25rem);
+  /* No padding on the gutter itself: a scroll container clips at its padding
+     box, so vertical padding here would clip the numbers a few pixels later
+     than the textarea clips its lines, and the two would disagree by that much
+     at the top and bottom of every scroll. It lives on the inner element — the
+     one that moves. */
+  padding: 0;
+  overflow: hidden;
+  color: var(--admin-muted);
+  background: var(--admin-surface);
+  border-inline-end: 1px solid var(--admin-border);
+  /* Numbers are not part of the manifest: a select-all must not paste them into
+     someone's cluster. */
+  user-select: none;
+}
+
+/*
+ * Taken out of flow, because a thousand line numbers in flow are a thousand
+ * lines tall — and as a flex item that is the height the whole frame stretches
+ * to, textarea and all. Out of flow it contributes no height, and the row is
+ * sized by the textarea, which is the element the operator can actually resize.
+ */
+.admin-yaml__gutter-inner {
+  position: absolute;
+  inset-block-start: 0;
+  inset-inline: 0;
+  box-sizing: border-box;
+  padding-block: var(--admin-yaml-pad);
+  padding-inline: 0.6rem 0.45rem;
+  text-align: end;
+  white-space: nowrap;
+  /* Tabular figures keep 9 and 10 the same width, so the column does not
+     shimmer as a long manifest scrolls past. */
+  font-variant-numeric: tabular-nums;
+}
+
+.admin-yaml__lineno {
+  display: block;
+}
+
+/* The line js-yaml refused, marked where the operator is already looking. */
+.admin-yaml__lineno--error {
+  color: var(--pf-t--global--text--color--status--danger--default, #a30000);
+}
+
+.admin-yaml__code {
+  position: relative;
+  flex: 1 1 auto;
+  /* Without this the flex item refuses to shrink below its content, and a long
+     image reference stretches the dialog instead of scrolling inside it. */
+  min-width: 0;
+}
+
+.admin-yaml__highlight {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  /* Every click, drag and selection belongs to the textarea above. */
+  pointer-events: none;
+}
+
+.admin-yaml__highlight-inner {
+  box-sizing: border-box;
+  padding: var(--admin-yaml-pad);
+  /* Declared here as well as on the line, so that every metric-bearing property
+     can be compared against the textarea's on this one element. */
+  white-space: pre;
+  /* max-content so the coloured copy is as wide as its longest line even while
+     the box is narrower; min-width so a short manifest's marked error line
+     still spans the full width of the editor. */
+  width: max-content;
+  min-width: 100%;
+}
+
+.admin-yaml__line {
+  display: block;
+  white-space: pre;
+}
+
+/* An empty block has no height, and every blank line in the manifest would
+   otherwise pull the colouring one line further out of step with the text. */
+.admin-yaml__line:empty::after {
+  content: "\00a0";
+}
+
+.admin-yaml__line--error {
+  background: var(--admin-yaml-error-line);
+}
+
+.admin-yaml__t--key {
+  color: var(--admin-yaml-key);
+}
+.admin-yaml__t--string {
+  color: var(--admin-yaml-string);
+}
+.admin-yaml__t--number {
+  color: var(--admin-yaml-number);
+}
+.admin-yaml__t--const {
+  color: var(--admin-yaml-const);
+}
+.admin-yaml__t--comment {
+  color: var(--admin-yaml-comment);
+}
+.admin-yaml__t--punct {
+  color: var(--admin-yaml-punct);
+}
+.admin-yaml__t--meta {
+  color: var(--admin-yaml-meta);
+}
+/* Block scalar content is not YAML — it is a config file, a script or another
+   manifest, and colouring it as if the outer document's syntax applied would
+   draw structure that is not there. It gets the plain text colour. */
+.admin-yaml__t--literal {
+  color: var(--pf-t--global--text--color--regular, #151515);
+}
+
+.admin-yaml__input {
+  display: block;
+  /* Positioned so it paints above the highlight layer; later in the DOM, so no
+     z-index is needed to say which. */
+  position: relative;
+  box-sizing: border-box;
+  width: 100%;
+  margin: 0;
+  padding: var(--admin-yaml-pad);
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--pf-t--global--text--color--regular, #151515);
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+  tab-size: inherit;
+  /* Horizontal scroll rather than wrap, for the same reason DiffView does not
+     wrap: a wrapped line in an indentation-significant language reads as a
+     different indentation level than it is. */
+  white-space: pre;
+  overflow-wrap: normal;
+  overflow-x: auto;
+  resize: vertical;
+}
+
+/* Only when something is actually painted underneath. With the highlight layer
+   off — a manifest past the line limit, or a disabled editor — the textarea is
+   the only copy of the text there is. */
+.admin-yaml__input--overlaid {
+  color: transparent;
+  caret-color: var(--pf-t--global--text--color--regular, #151515);
+}
+
+/*
+ * The selection is drawn by the textarea, on top of the coloured copy. An
+ * opaque highlight would blank out every character the operator has selected —
+ * which is exactly the text they are looking at when they select it.
+ */
+.admin-yaml__input--overlaid::selection {
+  background: var(--admin-yaml-selection);
+}
+
+/*
+ * Forced-colors modes discard author colours, so the highlight layer becomes a
+ * second copy of the text in the system foreground — drawn under a textarea
+ * whose own glyphs are forced back to visible. Two identical copies of a
+ * manifest at slightly different weights is worse than no colour at all, so the
+ * layer is dropped and the textarea renders itself.
+ */
+@media (forced-colors: active) {
+  .admin-yaml__highlight {
+    display: none;
+  }
+
+  .admin-yaml__input--overlaid {
+    color: CanvasText;
+    caret-color: CanvasText;
+  }
+}
+
 /* ── Confirm dialog ─────────────────────────────────────────────────────── */
 
 .admin-confirm__description {
@@ -628,6 +880,27 @@ body.admin-resizing * {
 
 .pf-v6-theme-dark .admin-diff__del {
   background: rgba(201, 25, 11, 0.22);
+  color: #ff9b93;
+}
+
+/*
+ * The syntax palette is the one place a second set of colours is unavoidable:
+ * PatternFly has no token for "this run of characters is a key", and the light
+ * values above are picked for contrast against white — on charcoal the darkest
+ * of them is unreadable. These clear 4.5:1 on PatternFly's dark surfaces, the
+ * weakest at 5.5:1.
+ */
+.pf-v6-theme-dark .admin-yaml {
+  --admin-yaml-key: #79c0ff;
+  --admin-yaml-string: #ce9178;
+  --admin-yaml-number: #b5cea8;
+  --admin-yaml-const: #d2a8ff;
+  --admin-yaml-meta: #e3b341;
+  --admin-yaml-selection: rgba(121, 192, 255, 0.3);
+  --admin-yaml-error-line: rgba(201, 25, 11, 0.25);
+}
+
+.pf-v6-theme-dark .admin-yaml__lineno--error {
   color: #ff9b93;
 }
 

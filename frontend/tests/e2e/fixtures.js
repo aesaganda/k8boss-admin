@@ -276,6 +276,43 @@ export const FIXTURES = {
     window: { requested_limit: null, oldest_unchained_id: null },
   },
 
+  // Enough of §4's catalog for `ImportYamlDialog` to resolve a pasted
+  // `apiVersion` + `kind` into a route. `apiVersion` is precomputed on the item
+  // exactly as `_resource_item` computes it, because that single equality is
+  // what the dialog matches on.
+  catalog: {
+    items: [
+      {
+        group: 'apps',
+        version: 'v1',
+        kind: 'Deployment',
+        resource: 'deployments',
+        namespaced: true,
+        verbs: ['get', 'list', 'create', 'update', 'patch', 'delete'],
+        shortNames: ['deploy'],
+        categories: ['all'],
+        apiVersion: 'apps/v1',
+        preferred: true,
+      },
+      {
+        group: '',
+        version: 'v1',
+        kind: 'ConfigMap',
+        resource: 'configmaps',
+        namespaced: true,
+        verbs: ['get', 'list', 'create', 'update', 'patch', 'delete'],
+        shortNames: ['cm'],
+        categories: [],
+        apiVersion: 'v1',
+        preferred: true,
+      },
+    ],
+    continue: null,
+    remaining: null,
+    partial: false,
+    unavailable: [],
+  },
+
   emptyList: { items: [], continue: null, remaining: null, partial: false, unavailable: [] },
 };
 
@@ -342,6 +379,7 @@ export async function mockApi(
     if (/^\/clusters\/\d+\/test$/.test(path)) {
       return json({ reachable: true, server_version: 'v1.31.4', latency_ms: 42, permissions: [] });
     }
+    if (path === '/resources/catalog') return json(FIXTURES.catalog);
     if (path === '/namespaces') return json(FIXTURES.namespaces);
     if (path === '/nodes') return json(FIXTURES.nodes);
     if (path === '/workloads') return json(FIXTURES.workloads);
