@@ -45,6 +45,7 @@ import BarsIcon from '@patternfly/react-icons/dist/esm/icons/bars-icon';
 import ClusterIcon from '@patternfly/react-icons/dist/esm/icons/cluster-icon';
 import CubeIcon from '@patternfly/react-icons/dist/esm/icons/cube-icon';
 import MoonIcon from '@patternfly/react-icons/dist/esm/icons/moon-icon';
+import PlusIcon from '@patternfly/react-icons/dist/esm/icons/plus-icon';
 import SunIcon from '@patternfly/react-icons/dist/esm/icons/sun-icon';
 import LockIcon from '@patternfly/react-icons/dist/esm/icons/lock-icon';
 import SignOutAltIcon from '@patternfly/react-icons/dist/esm/icons/sign-out-alt-icon';
@@ -52,7 +53,9 @@ import UserIcon from '@patternfly/react-icons/dist/esm/icons/user-icon';
 import AppNav from './AppNav';
 import BrandMark from './BrandMark';
 import ErrorBoundary from './ErrorBoundary';
+import ImportYamlDialog from './ImportYamlDialog';
 import { LoadingState } from './ui';
+import { wireGroup } from '../api/client';
 import { useCluster } from '../contexts/ClusterContext';
 import { useHealth } from '../contexts/HealthContext';
 import { useNamespace } from '../contexts/NamespaceContext';
@@ -235,6 +238,60 @@ function ThemeToggle() {
   );
 }
 
+/**
+ * The masthead's "+" — the entry point into `ImportYamlDialog`.
+ *
+ * Gated on a selected cluster, since every write in this console is
+ * cluster-scoped (§1.1) and a click with none active would only produce a
+ * `409 no_cluster_selected` after a wasted catalog fetch. Disabled with the
+ * reason rather than hidden (rule 11.4) — an operator who has not yet chosen a
+ * cluster should still see that importing a manifest is something this console
+ * can do.
+ */
+function ImportYamlButton() {
+  const { activeClusterId } = useCluster();
+  const [open, setOpen] = useState(false);
+  const navigate = useNavigate();
+  const disabledReason = activeClusterId == null ? 'Select a cluster before importing an object' : null;
+
+  return (
+    <>
+      <Tooltip content={disabledReason || 'Import YAML'}>
+        <MenuToggle
+          variant="plain"
+          aria-label="Import YAML"
+          isAriaDisabled={Boolean(disabledReason)}
+          onClick={disabledReason ? undefined : () => setOpen(true)}
+          data-testid="import-yaml-button"
+        >
+          <PlusIcon />
+        </MenuToggle>
+      </Tooltip>
+      {open && (
+        <ImportYamlDialog
+          isOpen
+          onClose={() => setOpen(false)}
+          onApplied={(result) => {
+            setOpen(false);
+            // Land on the object that was just created, the way Explorer's own
+            // catalog click does — reusing its `?name=&namespace=` convention
+            // rather than inventing a second one.
+            const target = result?.target;
+            if (!target?.resource) return;
+            const qs = new URLSearchParams();
+            if (target.name) qs.set('name', target.name);
+            if (target.namespace) qs.set('namespace', target.namespace);
+            const suffix = qs.toString() ? `?${qs.toString()}` : '';
+            navigate(
+              `/explorer/${encodeURIComponent(wireGroup(target.group))}/${encodeURIComponent(target.version)}/${encodeURIComponent(target.resource)}${suffix}`,
+            );
+          }}
+        />
+      )}
+    </>
+  );
+}
+
 function ReadOnlyBadge() {
   const { readOnly, reason } = useHealth();
   if (!readOnly) return null;
@@ -326,6 +383,9 @@ function AppMasthead() {
             <ToolbarGroup align={{ default: 'alignEnd' }}>
               <ToolbarItem>
                 <ReadOnlyBadge />
+              </ToolbarItem>
+              <ToolbarItem>
+                <ImportYamlButton />
               </ToolbarItem>
               <ToolbarItem>
                 <UserMenu />

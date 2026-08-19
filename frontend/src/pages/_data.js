@@ -436,6 +436,223 @@ export const KIND_LIMITS = {
   },
 };
 
+/* ── Starter templates for "Create <kind>" ──────────────────────────────── */
+
+/**
+ * What `ImportYamlDialog` seeds its editor with when opened from a "Create"
+ * button instead of the masthead's blank "+". Each one is a minimal manifest
+ * that parses, matches its own `apiVersion`/`kind`, and applies cleanly against
+ * a cluster running Kubernetes' restricted Pod Security Standard — the profile
+ * most clusters enforce by default — so the dry-run diff an operator sees on
+ * first click is "this creates a container", not an admission rejection about
+ * `runAsNonRoot`.
+ *
+ * None of these set `metadata.namespace`: `ImportYamlDialog` already falls
+ * back to the masthead's selected namespace, and hardcoding one into the
+ * template would go stale the moment the operator switched namespaces after
+ * opening the dialog but before clicking Create.
+ */
+export const POD_TEMPLATE = `apiVersion: v1
+kind: Pod
+metadata:
+  name: example
+  labels:
+    app: example
+spec:
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: example
+      image: registry.k8s.io/pause:3.9
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+            - ALL
+`;
+
+// Written out per kind rather than assembled from a shared fragment: the
+// nesting depth of `spec.template` differs (a bare Deployment vs. a CronJob's
+// `spec.jobTemplate.spec.template`), and YAML's meaning is its indentation —
+// string-splicing four spaces into the right place for six kinds is exactly
+// the kind of code nobody can eyeball-verify. Six literals are more lines and
+// zero risk of a template that silently reindents itself wrong.
+export const WORKLOAD_TEMPLATES = {
+  deployments: `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: example
+  labels:
+    app: example
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: example
+  template:
+    metadata:
+      labels:
+        app: example
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: example
+          image: registry.k8s.io/pause:3.9
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+`,
+  statefulsets: `apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: example
+  labels:
+    app: example
+spec:
+  serviceName: example
+  replicas: 1
+  selector:
+    matchLabels:
+      app: example
+  template:
+    metadata:
+      labels:
+        app: example
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: example
+          image: registry.k8s.io/pause:3.9
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+`,
+  daemonsets: `apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: example
+  labels:
+    app: example
+spec:
+  selector:
+    matchLabels:
+      app: example
+  template:
+    metadata:
+      labels:
+        app: example
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: example
+          image: registry.k8s.io/pause:3.9
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+`,
+  replicasets: `apiVersion: apps/v1
+kind: ReplicaSet
+metadata:
+  name: example
+  labels:
+    app: example
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: example
+  template:
+    metadata:
+      labels:
+        app: example
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: example
+          image: registry.k8s.io/pause:3.9
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+`,
+  jobs: `apiVersion: batch/v1
+kind: Job
+metadata:
+  name: example
+  labels:
+    app: example
+spec:
+  template:
+    metadata:
+      labels:
+        app: example
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: example
+          image: registry.k8s.io/pause:3.9
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+`,
+  cronjobs: `apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: example
+  labels:
+    app: example
+spec:
+  schedule: '*/5 * * * *'
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app: example
+        spec:
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: example
+              image: registry.k8s.io/pause:3.9
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop:
+                    - ALL
+`,
+};
+
 /**
  * Combine a kind capability with a permission gate.
  *

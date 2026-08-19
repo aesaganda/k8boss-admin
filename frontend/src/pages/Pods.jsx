@@ -29,10 +29,12 @@ import {
   StatusBadge,
   Toolbar,
 } from '../components/ui';
+import ImportYamlDialog from '../components/ImportYamlDialog';
 import { useCluster } from '../contexts/ClusterContext';
 import { useNamespace } from '../contexts/NamespaceContext';
-import { useGates, useResourceList } from './_data';
+import { POD_TEMPLATE, useGates, useResourceList } from './_data';
 import {
+  ActionButton,
   ImagesCell,
   Muted,
   NoClusterState,
@@ -45,6 +47,7 @@ import {
 const CHECKS = [
   { id: 'logs', verb: 'get', group: 'core', resource: 'pods', subresource: 'log' },
   { id: 'exec', verb: 'create', group: 'core', resource: 'pods', subresource: 'exec' },
+  { id: 'create', verb: 'create', group: 'core', resource: 'pods' },
 ];
 
 const PHASES = [
@@ -68,6 +71,7 @@ export default function Pods() {
   const [search, setSearch] = useState('');
   const [phase, setPhase] = useState(null);
   const [podConsole, setPodConsole] = useState(null);
+  const [createOpen, setCreateOpen] = useState(false);
 
   const listing = useResourceList('core', 'v1', 'pods', {
     namespace,
@@ -177,6 +181,11 @@ export default function Pods() {
                 namespace ? `namespace ${namespace}` : 'all namespaces'
               }`
         }
+        actions={
+          <ActionButton variant="primary" gate={gate('create')} onClick={() => setCreateOpen(true)}>
+            Create Pod
+          </ActionButton>
+        }
       />
 
       <PartialBanner unavailable={listing.unavailable} />
@@ -241,6 +250,19 @@ export default function Pods() {
           initialTab={podConsole.tab}
           execGate={gate('exec')}
           onClose={() => setPodConsole(null)}
+        />
+      )}
+
+      {createOpen && (
+        <ImportYamlDialog
+          isOpen
+          title="Create Pod"
+          initialText={POD_TEMPLATE}
+          onClose={() => setCreateOpen(false)}
+          onApplied={() => {
+            setCreateOpen(false);
+            listing.reload();
+          }}
         />
       )}
     </>
