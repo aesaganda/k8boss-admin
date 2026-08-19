@@ -1,0 +1,12 @@
+# Source is text, and has to be diffed as text.
+#
+# `DataTable.jsx` carried a literal NUL byte in its search separator, which is
+# how git classifies a file as binary: `git diff` printed "Bin 9519 -> 14416
+# bytes" for the one component every list page in this console renders through,
+# `grep -r` reported "binary file matches" instead of the line, and a review UI
+# showed the change as an opaque blob. The byte is now written as an escape —
+# this is what stops the next one from hiding a diff before anyone notices.
+*.js  diff
+*.jsx diff
+*.css diff
+*.md  diff

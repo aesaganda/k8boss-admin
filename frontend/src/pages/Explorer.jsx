@@ -337,6 +337,10 @@ function Listing({ group, version, plural, catalog, initialName, initialNamespac
 
       <DataTable
         ariaLabel={`${plural} objects`}
+        // `plural` alone is not the resource: core/v1/events and
+        // events.k8s.io/v1/events are different kinds with the same plural, and
+        // they must not share one set of column widths.
+        tableId={`explorer:${group}/${version}/${plural}`}
         columns={columns}
         rows={listing.items}
         rowKey={(row, index) => `${objectNamespace(row) ?? ''}/${objectName(row) ?? index}`}

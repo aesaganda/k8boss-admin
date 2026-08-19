@@ -199,6 +199,165 @@ body {
   cursor: help;
 }
 
+/* ── Resizable table columns ────────────────────────────────────────────── */
+
+/*
+ * The grab area sits INSIDE its header cell rather than straddling the column
+ * boundary. A column with the `truncate` modifier sets `overflow: hidden`, and
+ * anything hanging over that edge is clipped away on exactly the columns whose
+ * content is long enough to be worth widening — the handle would be missing
+ * from the ones that need it most.
+ */
+.admin-col-resizer {
+  position: absolute;
+  inset-block: 0;
+  inset-inline-end: 0;
+  z-index: 1;
+  width: 0.75rem;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: col-resize;
+  /* Without this a touch drag scrolls the page and the column never moves. */
+  touch-action: none;
+}
+
+/*
+ * A 12px strip is a mouse target. On a touch screen it is under half of what
+ * WCAG 2.5.8 asks for, and there is no cursor to find it with — so on coarse
+ * pointers the grab area doubles. It costs the sort button 8px of its own tap
+ * area on those devices, which is the right way round: a mis-tap on the sort
+ * button re-sorts the table, a mis-tap on the handle does nothing at all.
+ */
+@media (pointer: coarse) {
+  .admin-col-resizer {
+    width: 1.5rem;
+  }
+}
+
+.admin-col-resizer::before {
+  content: "";
+  position: absolute;
+  inset-block: 0.3rem;
+  inset-inline-end: 0.3rem;
+  width: 2px;
+  border-radius: 1px;
+  background: transparent;
+}
+
+/*
+ * Drawn on approach, on keyboard focus, and for the length of a drag — and at
+ * no other time. A header row with a permanent rule between every column reads
+ * as a spreadsheet, and this is a table of live cluster state.
+ */
+.admin-col-resizer:hover::before,
+.admin-col-resizer:focus-visible::before,
+.admin-col-resizer--active::before {
+  background: var(--pf-t--global--color--brand--default, #06c);
+}
+
+.admin-col-resizer:focus-visible {
+  outline: 2px solid var(--pf-t--global--color--brand--default, #06c);
+  outline-offset: -2px;
+}
+
+/*
+ * Forced-colors modes discard author background colours, and the indicator IS
+ * an author background — so in Windows High Contrast the handle had no cue at
+ * all for a mouse user, and the feature simply looked absent. A system colour
+ * is honoured there; `forced-color-adjust` is what keeps it painted.
+ */
+@media (forced-colors: active) {
+  .admin-col-resizer:hover::before,
+  .admin-col-resizer:focus-visible::before,
+  .admin-col-resizer--active::before {
+    background: CanvasText;
+    forced-color-adjust: none;
+  }
+}
+
+/*
+ * A pinned column is only honoured under a fixed layout; without it the browser
+ * goes on sizing every column from its content and the drag does nothing. The
+ * `max()` keeps every pinned column at exactly the width it was dragged to: when
+ * their total outgrows the page the table scrolls sideways instead of squeezing
+ * the rest to nothing to make them fit.
+ */
+.admin-table--sized {
+  table-layout: fixed;
+  width: max(100%, var(--admin-table-min-width, 100%));
+}
+
+/*
+ * Below this width PatternFly restacks the table into one card per row: the
+ * header is `display: none` and there are no columns left for a pixel width to
+ * describe. Keeping the widths there leaves the card list frozen at a desktop
+ * table width, scrolled sideways, with every resize handle hidden along with
+ * the header — so the operator cannot even undo it from the table.
+ *
+ * Written as the same container query PatternFly restacks on, and as an undo of
+ * the rules above rather than as their condition: where the container does not
+ * exist, PatternFly does not restack either, and the widths correctly stay.
+ */
+@container pf-v6-contain-table (max-width: calc(48rem - 1px)) {
+  .admin-table--sized {
+    table-layout: auto;
+    width: auto;
+  }
+}
+
+/*
+ * Under a fixed layout a cell is exactly as wide as its column, and anything
+ * that cannot wrap — a status pill, an image reference, a link — is drawn
+ * straight over the next column's value instead. PatternFly clips its header
+ * labels for us; it does nothing for body cells, and a Status column dragged
+ * to its minimum painted "Progressing" across the Ready column's "4 / 5".
+ *
+ * The row-actions cell is exempt: it is the column that gives up its width to
+ * whatever the others release, so it is also the one that ends up at its
+ * narrowest when they take width back — and clipping it there cuts into the
+ * kebab button itself, which is the whole of that cell's content. The menu is
+ * safe either way; PatternFly renders it in a portal, not in the cell.
+ *
+ * The class is `pf-v6-c-table__action`. `pf-m-action` is a different thing —
+ * PatternFly sets it from the `hasAction` prop, which nothing here passes, so a
+ * rule written against it exempts nothing at all.
+ */
+.admin-table--sized tbody td:not(.pf-v6-c-table__action) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/*
+ * PatternFly's modal body scrolls vertically and hides the horizontal axis, so
+ * a table dragged wider than the modal is painted outside it and cannot be
+ * reached by any means the operator has — the drain plan's own columns end up
+ * off the dialog. The page has `<main>` for this; a dialog has to be told.
+ */
+.pf-v6-c-modal-box__body:has(.admin-table--sized),
+.pf-v6-c-drawer__panel-main:has(.admin-table--sized) {
+  overflow-x: auto;
+}
+
+.admin-table__widths {
+  display: flex;
+  justify-content: flex-end;
+  margin-block-start: var(--admin-gap-sm);
+  font-size: var(--pf-t--global--font--size--body--sm, 0.875rem);
+}
+
+/*
+ * For the length of a drag the pointer is captured by the handle, so every
+ * element it passes over would otherwise show its own cursor and paint a text
+ * selection across the rows — both of which read as the drag having been
+ * dropped somewhere in the middle of the table.
+ */
+body.admin-resizing,
+body.admin-resizing * {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+
 /* ── Nullable values (contract rule 11.2) ───────────────────────────────── */
 
 /*

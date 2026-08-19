@@ -604,6 +604,9 @@ function ResourceTabBody({ tab }) {
       </Toolbar>
       <DataTable
         ariaLabel={tab.title}
+        // Column widths are filed under the API resource rather than the tab's
+        // title: the title is display text that a rename would silently orphan.
+        tableId={`resources:${tab.group}/${tab.version}/${tab.plural}`}
         columns={columns}
         rows={listing.items}
         rowKey={tab.rowKey}
