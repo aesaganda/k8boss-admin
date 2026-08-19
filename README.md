@@ -144,13 +144,25 @@ already had.
 ### Register a cluster
 
 Registration is an API server endpoint plus a bearer token. Create a
-ServiceAccount in the target cluster and bind it to the console's read-only
-ClusterRole:
+ServiceAccount in the target cluster and bind it to the console's RBAC:
+
+```bash
+scripts/onboard-cluster.sh --context <kubectl-context> --name <cluster-name>
+```
+
+Applies `deploy/namespace.yaml` and `deploy/rbac.yaml` to that context (and only
+that context — it never touches your ambient `kubectl` current-context), mints a
+ServiceAccount token, signs in to the console if it requires a session, registers
+or updates the cluster, and runs the connection test — printing exactly which
+baseline permissions are missing, if any. Run it with `--help` for every flag.
+The steps it automates, if you want to do them by hand or understand what it is
+doing:
 
 ```bash
 kubectl apply -f deploy/namespace.yaml
-kubectl apply -f deploy/rbac.yaml          # reader role + binding; writer role
-                                           # is defined but NOT bound
+kubectl apply -f deploy/rbac.yaml          # binds BOTH the reader and the
+                                           # writer role — see that file's own
+                                           # top comment before applying it
 TOKEN=$(kubectl -n k8boss-admin create token k8boss-admin --duration=8760h)
 APISERVER=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}')
 CA=$(kubectl config view --minify --raw \
@@ -169,6 +181,22 @@ curl -X POST localhost:8020/api/clusters \
 ```
 
 The token is encrypted at rest and is never returned by any endpoint.
+
+**If `AUTH_ENABLED=true`** (the default), both calls above need a console
+session: sign in first and carry the cookie and CSRF token, the same handshake
+the SPA does —
+
+```bash
+curl -sS -c cookies.txt -X POST localhost:8020/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"<console password>"}'
+# {"csrfToken": "...", ...} — read it from the response and pass it back:
+curl -sS -b cookies.txt -H "X-CSRF-Token: <csrfToken from above>" ...
+```
+
+`scripts/onboard-cluster.sh` does this automatically; it is the reason to prefer
+it over the raw `curl` calls below for anything but understanding the shape of
+the API.
 
 ### Check what it can actually do there
 
