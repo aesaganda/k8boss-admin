@@ -464,10 +464,15 @@ export const resources = {
     api.get(`${gvp(group, version, plural)}/${encodeURIComponent(name)}`, { namespace }),
 
   /** text/plain YAML for the editor (§4). */
-  yaml: (group, version, plural, name, namespace) =>
+  // `signal` is optional and, unlike most reads here, actually used: the YAML
+  // panel re-reads on a timer, and a poll that outlives the panel it was
+  // started for is a request nobody is waiting for against a cluster somebody
+  // is paying for.
+  yaml: (group, version, plural, name, namespace, signal) =>
     request(`${gvp(group, version, plural)}/${encodeURIComponent(name)}/yaml`, {
       params: { namespace },
       expect: 'text',
+      signal,
     }),
 
   /** body: { yaml, namespace, dryRun } */

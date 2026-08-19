@@ -29,6 +29,44 @@ export const OVERVIEW_UNAVAILABLE = [
   },
 ];
 
+/**
+ * One object's manifest, as `GET .../{name}/yaml` returns it: `text/plain`, and
+ * carrying a `resourceVersion`, which is what every concurrency assertion in
+ * the suite is actually about.
+ */
+export function objectYaml({
+  kind = 'Pod',
+  name = 'checkout-7d9f8b6c4-hk2xv',
+  namespace = 'prod',
+  resourceVersion = '884213',
+  image = 'registry.example:5000/checkout:1.4.2',
+  replicas = null,
+} = {}) {
+  return [
+    'apiVersion: v1',
+    `kind: ${kind}`,
+    'metadata:',
+    `  name: ${name}`,
+    `  namespace: ${namespace}`,
+    `  resourceVersion: "${resourceVersion}"`,
+    '  labels:',
+    '    app: checkout',
+    'spec:',
+    ...(replicas == null ? [] : [`  replicas: ${replicas}`]),
+    '  nodeName: ip-10-0-1-4',
+    '  containers:',
+    '    - name: app',
+    `      image: ${image}`,
+    '      ports:',
+    '        - containerPort: 8080',
+    '  restartPolicy: Always',
+    'status:',
+    '  phase: Running',
+    '  podIP: 10.128.4.17',
+    '',
+  ].join('\n');
+}
+
 export const FIXTURES = {
   authConfig: {
     enabled: false,
@@ -313,14 +351,58 @@ export const FIXTURES = {
     unavailable: [],
   },
 
+  // §6 pod rows. Two, and the second is the reason this page exists: `phase` is
+  // Running and the container is not, so the Status column has to show the
+  // detail rather than the phase.
+  pods: {
+    items: [
+      {
+        name: 'checkout-7d9f8b6c4-hk2xv',
+        namespace: 'prod',
+        phase: 'Running',
+        phase_detail: null,
+        ready: '1/1',
+        restarts: 0,
+        node: 'ip-10-0-1-4',
+        qos_class: 'Burstable',
+        containers: [{ name: 'app', image: 'registry.example:5000/checkout:1.4.2', ready: true, restart_count: 0 }],
+        age_seconds: 86400,
+        creationTimestamp: '2026-08-18T09:00:00Z',
+      },
+      {
+        name: 'payments-5c8d9f7b6-qq4mn',
+        namespace: 'prod',
+        phase: 'Running',
+        phase_detail: 'CrashLoopBackOff',
+        ready: '0/1',
+        // Null, not zero: the restart count for this pod could not be read, and
+        // a pod in CrashLoopBackOff showing "0 restarts" is the wrong answer
+        // delivered confidently.
+        restarts: null,
+        node: 'ip-10-0-1-5',
+        qos_class: 'Burstable',
+        containers: [{ name: 'app', image: 'registry.example:5000/payments:2.0.1', ready: false, restart_count: null }],
+        age_seconds: 3600,
+        creationTimestamp: '2026-08-19T08:00:00Z',
+      },
+    ],
+    continue: null,
+    remaining: null,
+    partial: false,
+    unavailable: [],
+  },
+
   emptyList: { items: [], continue: null, remaining: null, partial: false, unavailable: [] },
 };
 
 /** Answer every /api call from the fixtures above. */
 export async function mockApi(
   page,
-  { health = FIXTURES.health, auth = null, audit = null, chain = null } = {},
+  { health = FIXTURES.health, auth = null, audit = null, chain = null, yaml = null } = {},
 ) {
+  // Counted so a spec can hand back a different manifest on the second read —
+  // which is how "the panel notices the object changed" is testable at all.
+  let yamlReads = 0;
   let signedIn = Boolean(auth?.authenticated);
   const authUser = auth?.user ?? {
     id: 7,
@@ -380,6 +462,18 @@ export async function mockApi(
       return json({ reachable: true, server_version: 'v1.31.4', latency_ms: 42, permissions: [] });
     }
     if (path === '/resources/catalog') return json(FIXTURES.catalog);
+    // `text/plain`, not JSON: §4's YAML read is the one endpoint in the API that
+    // does not answer with an envelope, and a mock that returned JSON here
+    // would let a client-side parse bug through.
+    if (path.endsWith('/yaml')) {
+      yamlReads += 1;
+      const body =
+        typeof yaml === 'function'
+          ? yaml(yamlReads, new URL(route.request().url()))
+          : yaml ?? objectYaml({ name: decodeURIComponent(path.split('/').at(-2) ?? 'object') });
+      return route.fulfill({ status: 200, contentType: 'text/plain; charset=utf-8', body });
+    }
+    if (path === '/resources/core/v1/pods') return json(FIXTURES.pods);
     if (path === '/namespaces') return json(FIXTURES.namespaces);
     if (path === '/nodes') return json(FIXTURES.nodes);
     if (path === '/workloads') return json(FIXTURES.workloads);

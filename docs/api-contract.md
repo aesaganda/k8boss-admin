@@ -736,6 +736,11 @@ trace.
    action exists and why it is unavailable.
 5. When `health.mutations === "disabled"`, the app renders a read-only banner
    and disables write affordances globally.
+6. A view that re-reads on a timer says **when the data on screen was read**, and
+   a refresh that fails keeps what it has and says the refresh failed. It never
+   blanks, and it never advances the timestamp on an attempt that did not
+   return: an unlabelled view is indistinguishable from a live one, and a stale
+   object presented as current is the defect standard applied to time.
 
 ---
 

@@ -314,6 +314,12 @@ version being that there is no undo for a deleted StatefulSet.
 * Create, replace and delete any resource from YAML, with optimistic concurrency.
   The manifest editor numbers its lines and colours its syntax, so the line a
   parse error names is the line you can see.
+* Every object's YAML, rendered the same way, wherever the object is — including
+  a pod's, from the row you clicked. Each panel says when it was read, re-reads
+  on a timer, and has a Reload button for when a timer is not fast enough. A
+  refresh that fails keeps the manifest and says the refresh failed rather than
+  presenting an older copy as current, and an object that changes while it is
+  open in the editor raises a warning instead of quietly rewriting the edit.
 
 **Operational**
 

@@ -14,12 +14,16 @@
  * **The invariant that makes it safe to be approximate.** The tokens for a line
  * concatenate back to exactly that line, character for character — that is
  * asserted per line in `tokenizeYaml`, and a line that fails falls back to one
- * uncoloured token. The highlight layer is painted *behind* a transparent
+ * uncoloured token. Both consumers depend on it and one of them cannot survive
+ * without it: in the editor the coloured copy is painted *behind* a transparent
  * textarea, so a token that drops or adds a single space slides every glyph
  * after it out from under the operator's caret, and the manifest they are
- * reading is no longer the manifest they are editing. Mis-coloured is
- * cosmetic. Mis-aligned is a lie about which line you are on, told at the exact
- * moment somebody is deciding whether to apply it.
+ * reading is no longer the manifest they are editing. Mis-coloured is cosmetic.
+ * Mis-aligned is a lie about which line you are on, told at the exact moment
+ * somebody is deciding whether to apply it. (The read-only block in
+ * `ui/CodeBlock.jsx` is a single layer and cannot drift, but it renders the
+ * same tokens so that an object read on a detail page and the same object open
+ * in the editor are one rendering rather than two that resemble each other.)
  *
  * **Block scalars are tracked across lines, and that is not a nicety.** Inside
  * a `|` block, `key: value` is literal text — a ConfigMap holding an nginx
@@ -33,6 +37,20 @@
  * nulls), `comment`, `punct`, `meta` (anchors, aliases, tags, document
  * markers), `literal` (block scalar content), and undefined for plain text.
  */
+
+/**
+ * The document size past which a caller should stop colouring.
+ *
+ * Tokenising is linear and cheap; handing React one element per token is what
+ * costs, and an editor pays that on every keystroke. Two thousand lines is
+ * comfortably past every Kubernetes object an operator writes by hand and short
+ * of the generated CRDs (cert-manager's is five figures) that would otherwise
+ * make typing lag a keystroke behind. Exported so the editor and the read-only
+ * block agree on where colour stops — an operator who sees a manifest coloured
+ * in one place and plain in the other, at the same size, learns nothing from
+ * either.
+ */
+export const HIGHLIGHT_MAX_LINES = 2000;
 
 /** Everything YAML 1.1 treats as a boolean or a null in an unquoted scalar. */
 const CONSTANT = new Set([

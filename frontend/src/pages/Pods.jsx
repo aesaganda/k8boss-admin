@@ -227,6 +227,15 @@ export default function Pods() {
           menuAction('View logs', gate('logs', { requiresWrite: false }), () =>
             setPodConsole({ pod: row, tab: 'logs' }),
           ),
+          // Straight to the manifest, rather than opening on Logs and asking
+          // the operator to find the tab. Not gated: the pod is already in
+          // front of them, so `get` on it has demonstrably been allowed —
+          // greying this out on a preflight this page never ran would be
+          // rule 11.4 used to hide a thing that works.
+          {
+            title: 'View YAML',
+            onClick: () => setPodConsole({ pod: row, tab: 'yaml' }),
+          },
           menuAction('Open terminal', gate('exec'), () => setPodConsole({ pod: row, tab: 'exec' })),
           { isSeparator: true },
           {

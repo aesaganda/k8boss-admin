@@ -51,20 +51,9 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { Alert, Split, SplitItem } from '@patternfly/react-core';
 import yaml from 'js-yaml';
 
-import { tokenizeYaml } from './yamlSyntax';
+import { HIGHLIGHT_MAX_LINES, tokenizeYaml } from './yamlSyntax';
 
 const INDENT = '  ';
-
-/**
- * The size at which the highlight layer is dropped.
- *
- * Every keystroke re-tokenises the document and hands React one element per
- * token, so the cost is linear in the manifest and paid on each character
- * typed. Two thousand lines is comfortably past every Kubernetes object an
- * operator writes by hand and short of the generated CRDs (cert-manager's is
- * five figures) that would otherwise make typing lag a keystroke behind.
- */
-const HIGHLIGHT_MAX_LINES = 2000;
 
 /**
  * Parse and report. Never throws — the result object is the whole vocabulary
