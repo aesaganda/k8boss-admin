@@ -50,9 +50,20 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Button } from '@patternfly/react-core';
+import ColumnsIcon from '@patternfly/react-icons/dist/esm/icons/columns-icon';
 import { ActionsColumn, Table, Tbody, Td, Th, Thead, Tr } from '@patternfly/react-table';
 import { EmptyState, ErrorState, Skeleton } from './states';
 import { useColumnWidths } from './columnWidths';
+import { useColumnVisibility } from './columnVisibility';
+import { FacetFilter, FilterChips, ManageColumnsDialog } from './TableControls';
+import {
+  applyFacets,
+  facetOptionsWithCounts,
+  readFacets,
+  selectedChips,
+  selectionCount,
+  toggleSelection,
+} from './tableFilters';
 import { sortBy as sortRows } from '../../utils/format';
 
 const SKELETON_ROWS = 5;
@@ -82,7 +93,7 @@ function searchHaystack(columns, row) {
 }
 
 export function DataTable({
-  columns = [],
+  columns: declaredColumns = [],
   rows = [],
   rowKey,
   loading = false,
@@ -98,6 +109,7 @@ export function DataTable({
   ariaLabel,
   tableId,
   resizableColumns = true,
+  manageableColumns = false,
   density = 'comfy',
   variant = 'compact',
   isStickyHeader = true,
@@ -136,19 +148,77 @@ export function DataTable({
     [controlled, onSort],
   );
 
-  const visible = useMemo(() => {
-    let out = rows ?? [];
+  // Hidden columns are remembered under the same identity as the widths, and
+  // for the same reason: two unnamed tables must not share one preference.
+  const {
+    visibleColumns: columns,
+    hiddenSet,
+    setHidden,
+    lockedKey,
+    isCustomised: hasHiddenColumns,
+  } = useColumnVisibility({
+    tableId: tableId ?? ariaLabel,
+    columns: declaredColumns,
+    enabled: manageableColumns,
+  });
+  const [columnsDialogOpen, setColumnsDialogOpen] = useState(false);
 
+  // Read from every declared column, not the visible ones: filtering by a
+  // column you chose not to display is legitimate, and dropping the filter
+  // along with the column would put rows back on screen without saying so.
+  const facets = useMemo(() => readFacets(declaredColumns), [declaredColumns]);
+
+  // Not persisted, and that is the decision rather than the shortcut. A
+  // remembered filter is rows missing from a table that looks complete, days
+  // later, with nothing on screen having been clicked — which is how somebody
+  // concludes a namespace is empty and deletes it. `columnVisibility.js` says
+  // why a hidden column is a different bargain.
+  const [selections, setSelections] = useState({});
+
+  // A filter set on one resource kind means nothing on the next, and a
+  // selection that survives the switch silently hides rows in a table the
+  // operator has only just opened.
+  const facetSignature = facets.map((facet) => facet.key).join('|');
+  const lastFacetSignature = useRef(facetSignature);
+  useEffect(() => {
+    if (lastFacetSignature.current === facetSignature) return;
+    lastFacetSignature.current = facetSignature;
+    setSelections({});
+  }, [facetSignature]);
+
+  // Text first, and the facets are counted against its result: the search box
+  // narrows what the menu is describing, rather than the two disagreeing.
+  const searched = useMemo(() => {
     const needle = (filterText || '').trim().toLowerCase();
-    if (needle) {
-      // Whitespace-separated terms are ANDed, so "prod checkout" finds the
-      // checkout Deployment in prod rather than every row mentioning either.
-      const terms = needle.split(/\s+/);
-      out = out.filter((row) => {
-        const hay = searchHaystack(columns, row);
-        return terms.every((t) => hay.includes(t));
-      });
-    }
+    if (!needle) return rows ?? [];
+    // Whitespace-separated terms are ANDed, so "prod checkout" finds the
+    // checkout Deployment in prod rather than every row mentioning either.
+    // Matched against every declared column, including hidden ones — a search
+    // whose results changed with the column dialog would be a third thing to
+    // reason about.
+    const terms = needle.split(/\s+/);
+    return (rows ?? []).filter((row) => {
+      const hay = searchHaystack(declaredColumns, row);
+      return terms.every((t) => hay.includes(t));
+    });
+  }, [rows, declaredColumns, filterText]);
+
+  const facetViews = useMemo(
+    () =>
+      facets.map((facet) => ({
+        facet,
+        options: facetOptionsWithCounts(facet, searched, facets, selections),
+      })),
+    [facets, searched, selections],
+  );
+
+  const chips = useMemo(
+    () => selectedChips(facets, selections, searched),
+    [facets, selections, searched],
+  );
+
+  const visible = useMemo(() => {
+    let out = applyFacets(searched, facets, selections);
 
     // Server-side sorting means the rows arrived in order; re-sorting them here
     // would sort only the chunk we hold and silently disagree with the server.
@@ -159,7 +229,7 @@ export function DataTable({
       }
     }
     return out;
-  }, [rows, columns, filterText, controlled, activeSort]);
+  }, [searched, facets, selections, columns, controlled, activeSort]);
 
   const keyOf = useCallback(
     (row, index) => {
@@ -222,6 +292,10 @@ export function DataTable({
   ]
     .filter(Boolean)
     .join(' ');
+
+  const activeSelections = selectionCount(selections);
+  const narrowed = visible.length !== (rows ?? []).length;
+  const showControls = facets.length > 0 || manageableColumns;
 
   const header = (
     <Thead>
@@ -302,15 +376,22 @@ export function DataTable({
       </Tbody>
     );
   } else if (!visible.length) {
+    // Which filter emptied the table, named. "No resources" under a filter the
+    // operator set ten minutes ago reads as a cluster with nothing in it.
+    const filtered = Boolean(filterText) || activeSelections > 0;
+    let emptyReason = emptyDescription;
+    if (filterText && activeSelections) {
+      emptyReason = `Nothing matches “${filterText}” with the selected filters. Clear them to see all ${rows.length} rows.`;
+    } else if (filterText) {
+      emptyReason = `Nothing matches “${filterText}”. Clear the filter to see all ${rows.length} rows.`;
+    } else if (activeSelections) {
+      emptyReason = `No row matches the selected filters. Clear them to see all ${rows.length} rows.`;
+    }
     body = fullWidthCell(
       empty ?? (
         <EmptyState
-          title={filterText ? 'No rows match this filter' : emptyTitle}
-          description={
-            filterText
-              ? `Nothing matches “${filterText}”. Clear the filter to see all ${rows.length} rows.`
-              : emptyDescription
-          }
+          title={filtered ? 'No rows match this filter' : emptyTitle}
+          description={emptyReason}
           variant="sm"
         />
       ),
@@ -382,6 +463,64 @@ export function DataTable({
 
   return (
     <div className={className}>
+      {showControls && (
+        <div className="admin-table-controls">
+          {facets.length > 0 && (
+            <FacetFilter
+              facets={facetViews}
+              selections={selections}
+              rowCount={(rows ?? []).length}
+              onToggle={(facetKey, value) =>
+                setSelections((current) => toggleSelection(current, facetKey, value))
+              }
+            />
+          )}
+          <FilterChips
+            chips={chips}
+            onRemove={(facetKey, value) =>
+              setSelections((current) => toggleSelection(current, facetKey, value))
+            }
+            onClearAll={() => setSelections({})}
+          />
+          {/* What the controls above are costing, in rows. The chips say what
+              is filtered; this says how much of the listing that leaves, so a
+              short table is never mistaken for a short cluster. */}
+          {narrowed && (
+            <span className="admin-table-controls__count" data-testid="table-row-count">
+              {`Showing ${visible.length} of ${(rows ?? []).length}`}
+            </span>
+          )}
+          <span className="admin-table-controls__spacer" />
+          {manageableColumns && (
+            <Button
+              variant="link"
+              isInline
+              icon={<ColumnsIcon />}
+              onClick={() => setColumnsDialogOpen(true)}
+              data-testid="manage-columns"
+            >
+              {hasHiddenColumns
+                ? `Manage columns (${columns.length} of ${declaredColumns.length})`
+                : 'Manage columns'}
+            </Button>
+          )}
+        </div>
+      )}
+
+      {columnsDialogOpen && (
+        <ManageColumnsDialog
+          isOpen
+          columns={declaredColumns}
+          hiddenSet={hiddenSet}
+          lockedKey={lockedKey}
+          onClose={() => setColumnsDialogOpen(false)}
+          onSave={(hidden) => {
+            setHidden(hidden);
+            setColumnsDialogOpen(false);
+          }}
+        />
+      )}
+
       <Table
         aria-label={label}
         // A drag writes the column widths straight onto these elements rather

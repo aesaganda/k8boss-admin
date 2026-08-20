@@ -62,6 +62,7 @@ export default function Namespaces() {
         key: 'status',
         title: 'Status',
         sortable: true,
+        facet: { options: ['Active', 'Terminating'] },
         cell: (row) => (
           <StatusBadge
             status={row.status}
@@ -144,6 +145,7 @@ export default function Namespaces() {
 
       <DataTable
         ariaLabel="Namespaces"
+        manageableColumns
         columns={columns}
         rows={rows}
         rowKey="name"

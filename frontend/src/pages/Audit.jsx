@@ -709,6 +709,11 @@ export default function Audit() {
         error={error}
         onRetry={() => load()}
         ariaLabel="Audit trail"
+        // Columns, but no Filter menu: this table is one server-side page of a
+        // longer trail, so a menu counting the rows in front of it would put a
+        // number on the wrong set. §10's own filters are above, and they ask
+        // the server.
+        manageableColumns
         emptyTitle="No matching audit records"
         emptyDescription={
           'Nothing in this console’s trail matches these filters. The trail records dry runs and denials ' +

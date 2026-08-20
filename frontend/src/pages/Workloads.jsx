@@ -189,6 +189,11 @@ export default function Workloads() {
         key: 'status',
         title: 'Status',
         sortable: true,
+        // §6's five, declared rather than discovered, so "Degraded 0" is on the
+        // menu during the incident where it matters. `Unknown` is one of them:
+        // a controller that has not reported is a state an operator filters
+        // for, not an absence to leave off the list.
+        facet: { options: ['Healthy', 'Progressing', 'Degraded', 'Suspended', 'Unknown'] },
         cell: (row) => (
           <span className="admin-cell-inline">
             <StatusBadge status={row.status} tooltip={row.status_reason ?? undefined} />
@@ -339,6 +344,7 @@ export default function Workloads() {
       <DataTable
         ariaLabel="Workloads"
         density={density}
+        manageableColumns
         columns={namespace ? columns.filter((column) => column.key !== 'namespace') : columns}
         rows={rows}
         rowKey={(row) => `${row.kind}/${row.namespace}/${row.name}`}
