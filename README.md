@@ -336,6 +336,14 @@ version being that there is no undo for a deleted StatefulSet.
   per table in the browser, so a column widened to read an image digest is still
   that wide after the next poll and the next visit. `Home`, a double-click, or
   the **Reset column widths** link puts them back.
+* A **Comfy / Compact** row density on the workload and pod tables, in the
+  toolbar above each. Comfy is the default and lets a long name, status reason
+  or image list wrap; Compact holds every row to one line and tightens the
+  spacing, which is around four times as many rows on screen for a namespace
+  full of generated names. It changes no column widths — a clipped value ends
+  in an ellipsis, keeps its tooltip, and is one drag or one click away from
+  being readable again. The choice is remembered in the browser and shared by
+  both tables.
 
 ---
 

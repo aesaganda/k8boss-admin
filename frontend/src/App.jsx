@@ -13,6 +13,7 @@ import Layout from './components/Layout';
 import { EmptyState, ErrorState, LoadingState } from './components/ui';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { ClusterProvider } from './contexts/ClusterContext';
+import { DensityProvider } from './contexts/DensityContext';
 import { HealthProvider } from './contexts/HealthContext';
 import { NamespaceProvider } from './contexts/NamespaceContext';
 import { NotificationProvider } from './contexts/NotificationContext';
@@ -150,13 +151,18 @@ export default function App() {
     // still leaves a usable error panel rather than an empty root.
     <ErrorBoundary title="The console failed to start">
       <ThemeProvider>
-        <NotificationProvider>
-          <BrowserRouter>
-            <AuthProvider>
-              <AuthenticationGate />
-            </AuthProvider>
-          </BrowserRouter>
-        </NotificationProvider>
+        {/* Alongside the theme rather than inside the router: both are console
+            preferences that belong to the operator, not to a route, and a
+            provider under the router would reset the choice on navigation. */}
+        <DensityProvider>
+          <NotificationProvider>
+            <BrowserRouter>
+              <AuthProvider>
+                <AuthenticationGate />
+              </AuthProvider>
+            </BrowserRouter>
+          </NotificationProvider>
+        </DensityProvider>
       </ThemeProvider>
     </ErrorBoundary>
   );

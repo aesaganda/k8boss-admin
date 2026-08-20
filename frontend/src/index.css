@@ -358,6 +358,189 @@ body.admin-resizing * {
   user-select: none !important;
 }
 
+/* ── Row density ────────────────────────────────────────────────────────── */
+
+/*
+ * The Compact half of the Comfy/Compact choice — `contexts/DensityContext.jsx`
+ * says why it exists and `DataTable` says which prop turns it on. Comfy has no
+ * rules here at all, deliberately: it IS the table this console has always
+ * rendered, so the default path cannot drift away from it by someone editing a
+ * "comfy" block.
+ *
+ * The class is `--dense`, not `--compact`: PatternFly's own `pf-m-compact` is
+ * already on every one of these tables and means its cell-padding preset,
+ * which both densities start from.
+ */
+.admin-table--dense {
+  /*
+   * Overriding the variable PatternFly's own `pf-m-compact` rule reads, rather
+   * than setting padding on the cells: the cell rule resolves this at use time
+   * and inherits it from the table, so one declaration here reaches every cell
+   * — including the ones PatternFly gives their own padding (headers, the
+   * actions cell) without us having to enumerate them and get it wrong when
+   * they add a seventh.
+   */
+  --pf-v6-c-table--m-compact--cell--PaddingBlockStart: var(--pf-t--global--spacer--xs, 0.25rem);
+  --pf-v6-c-table--m-compact--cell--PaddingBlockEnd: var(--pf-t--global--spacer--xs, 0.25rem);
+}
+
+/*
+ * Every cell's content sits in one of these, in both densities: a `<td>` cannot
+ * clamp itself, because clamping needs `display: -webkit-box` and a cell that
+ * is not `display: table-cell` is not a cell. In Comfy it is an ordinary block
+ * box and changes nothing.
+ */
+.admin-cell-clamp {
+  display: block;
+  /* A grid or flex item defaults to `min-width: auto`, which refuses to shrink
+     below its content and would defeat the clamp inside PatternFly's stacked
+     card layout. */
+  min-width: 0;
+}
+
+/*
+ * One line per row, and what does not fit ends in an ellipsis.
+ *
+ * This is the whole point of the density: the padding above is worth 8px a row,
+ * while a workload name with a ReplicaSet hash on it, a status pill beside its
+ * reason, and two image references are worth two or three LINES a row — which
+ * is what turns 76 workloads into four screens of scrolling.
+ *
+ * Clamped rather than `white-space: nowrap`, and the difference is the whole
+ * layout. A nowrapped cell has the full string as its *minimum* width, so an
+ * automatic table layout hands the column that much: the rows do collapse to
+ * one line, and the table grows past the window instead — trading vertical
+ * scrolling for horizontal, which is the worse one. Clamping leaves the text
+ * wrappable, so every column keeps exactly the width it has in Comfy, and only
+ * the lines after the first are dropped.
+ *
+ * An ellipsis rather than a hard clip because a clipped value is a wrong answer
+ * delivered confidently: "checkout-7d9f8b6c4" reads as a complete name where
+ * "checkout-7d9f8b6c4…" reads as the start of one. The full text stays
+ * reachable — the cells that can be clamped here carry it in a `title` or a
+ * tooltip, the column can be dragged wider, and Comfy is one click away.
+ *
+ * The actions cell is exempt for the same reason it is exempt from the pinned
+ * widths: its content is a button, and clipping a button clips the affordance
+ * rather than some text beyond it.
+ */
+.admin-table--dense tbody td:not(.pf-v6-c-table__action) .admin-cell-clamp {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
+  line-clamp: 1;
+  overflow: hidden;
+}
+
+/*
+ * Cells whose content is a row of inline pieces — images, a status pill and its
+ * reason — are a flex container, and a flex container is one atomic box to the
+ * clamp above: it wraps to three lines internally, the line box grows to fit
+ * it, and the clamp has one line to show that is three lines tall. Nothing is
+ * clamped and the row does not shrink.
+ *
+ * Laying those pieces out as inline content instead puts them in the same
+ * formatting context as the clamp, where they flow into line boxes it can
+ * count — and the ellipsis then lands on the images or the status reason, the
+ * two cells that most need to say they were cut. `flex-wrap: nowrap` would not
+ * do: it makes the whole row of pieces the cell's minimum width, which is the
+ * horizontal-scrolling trade this density exists to avoid.
+ */
+.admin-table--dense .admin-cell-inline {
+  display: inline;
+}
+
+/* The flex `gap` does not apply to inline content, and without it the pill runs
+   into its reason and one image reference into the next. */
+.admin-table--dense .admin-cell-inline > * + * {
+  margin-inline-start: 0.35rem;
+}
+
+/*
+ * A zero-width space, which is a line-break opportunity and nothing else.
+ *
+ * Inline content only breaks where the text says it may, and two adjacent
+ * elements with a margin between them say nothing — so "coordinator:2.11.4" and
+ * "sidecar-proxy:1.0.9" became one unbreakable run, the Images column's minimum
+ * width became the two of them side by side, and the table grew 63px wider in
+ * Compact than in Comfy. Restoring the break puts the column back to the width
+ * it has in Comfy, which is the promise this density makes: fewer lines, same
+ * columns.
+ */
+.admin-table--dense .admin-cell-inline > * + *::before {
+  content: "\200B";
+}
+
+/*
+ * The kebab is the tallest thing in a compact row: a MenuToggle is a line of
+ * text plus its own control padding, so with the cell padding down to 4px the
+ * button, not the content, is what sets the row height. Removing only its
+ * block padding leaves it exactly one line tall — the same height as the text
+ * beside it — without touching its width or its hit area horizontally.
+ */
+.admin-table--dense tbody .pf-v6-c-table__action .pf-v6-c-menu-toggle {
+  --pf-v6-c-menu-toggle--PaddingBlockStart: 0;
+  --pf-v6-c-menu-toggle--PaddingBlockEnd: 0;
+}
+
+/*
+ * Not on a touch screen. One line of text is about 21px, which is under the
+ * 24px WCAG 2.5.8 asks of a target with no pointer to aim it — and the row
+ * menu is how every write on these pages is reached. A finger keeps the
+ * full-size button; the rows are a few pixels taller for it, which is the
+ * right way round.
+ */
+@media (pointer: coarse) {
+  .admin-table--dense tbody .pf-v6-c-table__action .pf-v6-c-menu-toggle {
+    --pf-v6-c-menu-toggle--PaddingBlockStart: revert;
+    --pf-v6-c-menu-toggle--PaddingBlockEnd: revert;
+  }
+}
+
+/*
+ * Below 48rem PatternFly restacks the table into one card per row: the header
+ * is gone, and with it every column a truncated value could be widened out of.
+ * A name clipped there is clipped for good — there is nothing left on screen to
+ * undo it with — so the clamp is dropped and the content wraps again.
+ * The tighter padding stays: it costs nothing and is what was asked for.
+ *
+ * Written as the same container query PatternFly restacks on, and as an undo,
+ * for the same reason `.admin-table--sized` is: where the container does not
+ * exist, PatternFly does not restack either, and the rules correctly stay.
+ */
+@container pf-v6-contain-table (max-width: calc(48rem - 1px)) {
+  .admin-table--dense tbody td:not(.pf-v6-c-table__action) .admin-cell-clamp {
+    display: block;
+    -webkit-line-clamp: none;
+    line-clamp: none;
+    overflow: visible;
+  }
+
+  .admin-table--dense .admin-cell-inline {
+    display: inline-flex;
+  }
+
+  .admin-table--dense .admin-cell-inline > * + * {
+    margin-inline-start: 0;
+  }
+}
+
+/*
+ * The inline-flex cells the density rules above reach into. The layout is here
+ * rather than in a `style={{…}}` on each cell so that one stylesheet rule can
+ * change it: an inline style can only be overridden with `!important`, and a
+ * table density implemented in `!important` would be the next person's
+ * afternoon.
+ */
+.admin-cell-inline {
+  display: inline-flex;
+  gap: 0.35rem;
+  align-items: center;
+  flex-wrap: wrap;
+  /* Bounded by the cell, so the ellipsis above has something to clip. */
+  max-width: 100%;
+}
+
 /* ── Nullable values (contract rule 11.2) ───────────────────────────────── */
 
 /*
