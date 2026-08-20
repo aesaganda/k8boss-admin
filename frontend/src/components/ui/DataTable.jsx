@@ -35,6 +35,14 @@
  * that passes neither an `ariaLabel` nor a `tableId` still resizes; it has no
  * identity to file the widths under, so it does not remember them.
  *
+ * `density` is the Comfy/Compact choice from `contexts/DensityContext.jsx`.
+ * `comfy` — the default — is the rendering this table has always had: a cell
+ * wraps onto as many lines as its content needs. `compact` tightens the row
+ * padding and holds every row to one line, clipping what does not fit with an
+ * ellipsis. It is a prop rather than a context read because this component is
+ * a pure design-system piece; the pages that offer the toggle pass their
+ * preference down.
+ *
  * Sorting is uncontrolled by default. Pass `sort` + `onSort` together to hand
  * sorting to the server (the API returns chunked lists, so a page that pages
  * through `continue` must sort server-side or it sorts one chunk and calls it
@@ -42,9 +50,20 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Button } from '@patternfly/react-core';
+import ColumnsIcon from '@patternfly/react-icons/dist/esm/icons/columns-icon';
 import { ActionsColumn, Table, Tbody, Td, Th, Thead, Tr } from '@patternfly/react-table';
 import { EmptyState, ErrorState, Skeleton } from './states';
 import { useColumnWidths } from './columnWidths';
+import { useColumnVisibility } from './columnVisibility';
+import { FacetFilter, FilterChips, ManageColumnsDialog } from './TableControls';
+import {
+  applyFacets,
+  facetOptionsWithCounts,
+  readFacets,
+  selectedChips,
+  selectionCount,
+  toggleSelection,
+} from './tableFilters';
 import { sortBy as sortRows } from '../../utils/format';
 
 const SKELETON_ROWS = 5;
@@ -74,7 +93,7 @@ function searchHaystack(columns, row) {
 }
 
 export function DataTable({
-  columns = [],
+  columns: declaredColumns = [],
   rows = [],
   rowKey,
   loading = false,
@@ -90,6 +109,8 @@ export function DataTable({
   ariaLabel,
   tableId,
   resizableColumns = true,
+  manageableColumns = false,
+  density = 'comfy',
   variant = 'compact',
   isStickyHeader = true,
   onRetry,
@@ -127,19 +148,77 @@ export function DataTable({
     [controlled, onSort],
   );
 
-  const visible = useMemo(() => {
-    let out = rows ?? [];
+  // Hidden columns are remembered under the same identity as the widths, and
+  // for the same reason: two unnamed tables must not share one preference.
+  const {
+    visibleColumns: columns,
+    hiddenSet,
+    setHidden,
+    lockedKey,
+    isCustomised: hasHiddenColumns,
+  } = useColumnVisibility({
+    tableId: tableId ?? ariaLabel,
+    columns: declaredColumns,
+    enabled: manageableColumns,
+  });
+  const [columnsDialogOpen, setColumnsDialogOpen] = useState(false);
 
+  // Read from every declared column, not the visible ones: filtering by a
+  // column you chose not to display is legitimate, and dropping the filter
+  // along with the column would put rows back on screen without saying so.
+  const facets = useMemo(() => readFacets(declaredColumns), [declaredColumns]);
+
+  // Not persisted, and that is the decision rather than the shortcut. A
+  // remembered filter is rows missing from a table that looks complete, days
+  // later, with nothing on screen having been clicked — which is how somebody
+  // concludes a namespace is empty and deletes it. `columnVisibility.js` says
+  // why a hidden column is a different bargain.
+  const [selections, setSelections] = useState({});
+
+  // A filter set on one resource kind means nothing on the next, and a
+  // selection that survives the switch silently hides rows in a table the
+  // operator has only just opened.
+  const facetSignature = facets.map((facet) => facet.key).join('|');
+  const lastFacetSignature = useRef(facetSignature);
+  useEffect(() => {
+    if (lastFacetSignature.current === facetSignature) return;
+    lastFacetSignature.current = facetSignature;
+    setSelections({});
+  }, [facetSignature]);
+
+  // Text first, and the facets are counted against its result: the search box
+  // narrows what the menu is describing, rather than the two disagreeing.
+  const searched = useMemo(() => {
     const needle = (filterText || '').trim().toLowerCase();
-    if (needle) {
-      // Whitespace-separated terms are ANDed, so "prod checkout" finds the
-      // checkout Deployment in prod rather than every row mentioning either.
-      const terms = needle.split(/\s+/);
-      out = out.filter((row) => {
-        const hay = searchHaystack(columns, row);
-        return terms.every((t) => hay.includes(t));
-      });
-    }
+    if (!needle) return rows ?? [];
+    // Whitespace-separated terms are ANDed, so "prod checkout" finds the
+    // checkout Deployment in prod rather than every row mentioning either.
+    // Matched against every declared column, including hidden ones — a search
+    // whose results changed with the column dialog would be a third thing to
+    // reason about.
+    const terms = needle.split(/\s+/);
+    return (rows ?? []).filter((row) => {
+      const hay = searchHaystack(declaredColumns, row);
+      return terms.every((t) => hay.includes(t));
+    });
+  }, [rows, declaredColumns, filterText]);
+
+  const facetViews = useMemo(
+    () =>
+      facets.map((facet) => ({
+        facet,
+        options: facetOptionsWithCounts(facet, searched, facets, selections),
+      })),
+    [facets, searched, selections],
+  );
+
+  const chips = useMemo(
+    () => selectedChips(facets, selections, searched),
+    [facets, selections, searched],
+  );
+
+  const visible = useMemo(() => {
+    let out = applyFacets(searched, facets, selections);
 
     // Server-side sorting means the rows arrived in order; re-sorting them here
     // would sort only the chunk we hold and silently disagree with the server.
@@ -150,7 +229,7 @@ export function DataTable({
       }
     }
     return out;
-  }, [rows, columns, filterText, controlled, activeSort]);
+  }, [searched, facets, selections, columns, controlled, activeSort]);
 
   const keyOf = useCallback(
     (row, index) => {
@@ -202,6 +281,21 @@ export function DataTable({
     // data column before the table has to start scrolling sideways.
     trailingMinWidth: hasActions ? 48 : 96,
   });
+
+  // "dense" rather than "compact": `pf-m-compact` is already on this table and
+  // means a different thing — PatternFly's cell-padding preset, which BOTH
+  // densities start from. A second class by that name in this stylesheet would
+  // read as the PatternFly one to whoever edits it next.
+  const tableClass = [
+    hasSizedColumns ? 'admin-table--sized' : null,
+    density === 'compact' ? 'admin-table--dense' : null,
+  ]
+    .filter(Boolean)
+    .join(' ');
+
+  const activeSelections = selectionCount(selections);
+  const narrowed = visible.length !== (rows ?? []).length;
+  const showControls = facets.length > 0 || manageableColumns;
 
   const header = (
     <Thead>
@@ -282,15 +376,22 @@ export function DataTable({
       </Tbody>
     );
   } else if (!visible.length) {
+    // Which filter emptied the table, named. "No resources" under a filter the
+    // operator set ten minutes ago reads as a cluster with nothing in it.
+    const filtered = Boolean(filterText) || activeSelections > 0;
+    let emptyReason = emptyDescription;
+    if (filterText && activeSelections) {
+      emptyReason = `Nothing matches “${filterText}” with the selected filters. Clear them to see all ${rows.length} rows.`;
+    } else if (filterText) {
+      emptyReason = `Nothing matches “${filterText}”. Clear the filter to see all ${rows.length} rows.`;
+    } else if (activeSelections) {
+      emptyReason = `No row matches the selected filters. Clear them to see all ${rows.length} rows.`;
+    }
     body = fullWidthCell(
       empty ?? (
         <EmptyState
-          title={filterText ? 'No rows match this filter' : emptyTitle}
-          description={
-            filterText
-              ? `Nothing matches “${filterText}”. Clear the filter to see all ${rows.length} rows.`
-              : emptyDescription
-          }
+          title={filtered ? 'No rows match this filter' : emptyTitle}
+          description={emptyReason}
           variant="sm"
         />
       ),
@@ -326,7 +427,21 @@ export function DataTable({
                   dataLabel={typeof column.title === 'string' ? column.title : undefined}
                   modifier={column.modifier}
                 >
-                  {typeof column.cell === 'function' ? column.cell(row, index) : defaultValue(column, row)}
+                  {/*
+                    * A block wrapper inside the cell, in both densities, so the
+                    * compact one has something to clamp. A `<td>` cannot do it
+                    * itself: line clamping needs `display: -webkit-box`, and a
+                    * cell that is not `display: table-cell` is not a cell.
+                    *
+                    * Always rendered, never conditional. It changes nothing in
+                    * comfy — a block box where the cell already had an
+                    * anonymous one — and a wrapper that appeared only under one
+                    * density would make that density a second layout to get
+                    * right rather than the same one, clamped.
+                    */}
+                  <span className="admin-cell-clamp">
+                    {typeof column.cell === 'function' ? column.cell(row, index) : defaultValue(column, row)}
+                  </span>
                 </Td>
               ))}
               {hasActions && (
@@ -348,6 +463,64 @@ export function DataTable({
 
   return (
     <div className={className}>
+      {showControls && (
+        <div className="admin-table-controls">
+          {facets.length > 0 && (
+            <FacetFilter
+              facets={facetViews}
+              selections={selections}
+              rowCount={(rows ?? []).length}
+              onToggle={(facetKey, value) =>
+                setSelections((current) => toggleSelection(current, facetKey, value))
+              }
+            />
+          )}
+          <FilterChips
+            chips={chips}
+            onRemove={(facetKey, value) =>
+              setSelections((current) => toggleSelection(current, facetKey, value))
+            }
+            onClearAll={() => setSelections({})}
+          />
+          {/* What the controls above are costing, in rows. The chips say what
+              is filtered; this says how much of the listing that leaves, so a
+              short table is never mistaken for a short cluster. */}
+          {narrowed && (
+            <span className="admin-table-controls__count" data-testid="table-row-count">
+              {`Showing ${visible.length} of ${(rows ?? []).length}`}
+            </span>
+          )}
+          <span className="admin-table-controls__spacer" />
+          {manageableColumns && (
+            <Button
+              variant="link"
+              isInline
+              icon={<ColumnsIcon />}
+              onClick={() => setColumnsDialogOpen(true)}
+              data-testid="manage-columns"
+            >
+              {hasHiddenColumns
+                ? `Manage columns (${columns.length} of ${declaredColumns.length})`
+                : 'Manage columns'}
+            </Button>
+          )}
+        </div>
+      )}
+
+      {columnsDialogOpen && (
+        <ManageColumnsDialog
+          isOpen
+          columns={declaredColumns}
+          hiddenSet={hiddenSet}
+          lockedKey={lockedKey}
+          onClose={() => setColumnsDialogOpen(false)}
+          onSave={(hidden) => {
+            setHidden(hidden);
+            setColumnsDialogOpen(false);
+          }}
+        />
+      )}
+
       <Table
         aria-label={label}
         // A drag writes the column widths straight onto these elements rather
@@ -355,7 +528,11 @@ export function DataTable({
         ref={tableRef}
         variant={variant}
         isStickyHeader={isStickyHeader}
-        className={hasSizedColumns ? 'admin-table--sized' : undefined}
+        className={tableClass || undefined}
+        // Rendered as an attribute as well as a class so the density a table is
+        // actually in can be asserted on, and read off the DOM, without
+        // depending on which class name happens to spell it this month.
+        data-density={density}
         // Handed to the stylesheet rather than applied here, because the width
         // must not survive into PatternFly's stacked layout — see the
         // `admin-table--sized` rules, which drop it at the same width where

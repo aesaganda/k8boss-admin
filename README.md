@@ -336,6 +336,27 @@ version being that there is no undo for a deleted StatefulSet.
   per table in the browser, so a column widened to read an image digest is still
   that wide after the next poll and the next visit. `Home`, a double-click, or
   the **Reset column widths** link puts them back.
+* A **Filter** menu on every list table whose columns declare one — pod status,
+  workload status, node readiness and roles, namespace phase, service type,
+  volume status. Checkboxes, several at once, each with the number of rows it
+  would leave. A value the console knows about is listed even when nothing is in
+  it ("Pending 0" is an answer), a value only the cluster knows about is added
+  from the rows themselves, and the counts are stated as counts of the rows the
+  page has loaded rather than as cluster totals. What is filtered is shown as
+  chips beside the menu, with "Showing 3 of 76" next to them; filters are not
+  remembered between visits, on purpose.
+* **Manage columns** on the same tables: choose which columns to show, keep the
+  choice per table in the browser, and restore the defaults in one click. The
+  name column cannot be turned off. Hiding a column hides a column — no row is
+  filtered and nothing stops being read from the cluster.
+* A **Comfy / Compact** row density on the workload and pod tables, in the
+  toolbar above each. Comfy is the default and lets a long name, status reason
+  or image list wrap; Compact holds every row to one line and tightens the
+  spacing, which is around four times as many rows on screen for a namespace
+  full of generated names. It changes no column widths — a clipped value ends
+  in an ellipsis, keeps its tooltip, and is one drag or one click away from
+  being readable again. The choice is remembered in the browser and shared by
+  both tables.
 
 ---
 

@@ -25,6 +25,7 @@ import SyncAltIcon from '@patternfly/react-icons/dist/esm/icons/sync-alt-icon';
 import {
   AgeCell,
   DataTable,
+  DensityToggle,
   NullableCell,
   PageHeader,
   PartialBanner,
@@ -39,6 +40,7 @@ import RestartDialog from '../components/RestartDialog';
 import SuspendDialog from '../components/SuspendDialog';
 import { workloads as workloadsApi } from '../api/client';
 import { useCluster } from '../contexts/ClusterContext';
+import { useDensity } from '../contexts/DensityContext';
 import { useNamespace } from '../contexts/NamespaceContext';
 import { truncate } from '../utils/format';
 import {
@@ -150,6 +152,7 @@ function CreateWorkloadMenu({ gate, onPick }) {
 export default function Workloads() {
   const { activeClusterId } = useCluster();
   const { selected: namespace } = useNamespace();
+  const { density, setDensity } = useDensity();
   const navigate = useNavigate();
 
   const [kind, setKind] = useState(null);
@@ -186,8 +189,13 @@ export default function Workloads() {
         key: 'status',
         title: 'Status',
         sortable: true,
+        // §6's five, declared rather than discovered, so "Degraded 0" is on the
+        // menu during the incident where it matters. `Unknown` is one of them:
+        // a controller that has not reported is a state an operator filters
+        // for, not an absence to leave off the list.
+        facet: { options: ['Healthy', 'Progressing', 'Degraded', 'Suspended', 'Unknown'] },
         cell: (row) => (
-          <span style={{ display: 'inline-flex', gap: '0.4rem', alignItems: 'center', flexWrap: 'wrap' }}>
+          <span className="admin-cell-inline">
             <StatusBadge status={row.status} tooltip={row.status_reason ?? undefined} />
             {row.status_reason && (
               <Muted title={row.status_reason}>{truncate(row.status_reason, 34)}</Muted>
@@ -322,6 +330,12 @@ export default function Workloads() {
           </div>
         </Toolbar.Item>
         <Toolbar.Spacer />
+        {/* Beside the refresh control rather than among the filters: density
+            changes how the rows are drawn, not which rows are in them, and a
+            control that looks like a filter gets read as one. */}
+        <Toolbar.Item>
+          <DensityToggle value={density} onChange={setDensity} />
+        </Toolbar.Item>
         <Toolbar.Item>
           <Button variant="plain" aria-label="Refresh workloads" icon={<SyncAltIcon />} onClick={reload} />
         </Toolbar.Item>
@@ -329,6 +343,8 @@ export default function Workloads() {
 
       <DataTable
         ariaLabel="Workloads"
+        density={density}
+        manageableColumns
         columns={namespace ? columns.filter((column) => column.key !== 'namespace') : columns}
         rows={rows}
         rowKey={(row) => `${row.kind}/${row.namespace}/${row.name}`}

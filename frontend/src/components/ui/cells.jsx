@@ -129,16 +129,23 @@ export function ResourceLink({ kind, name, namespace, plural, group, version, to
   const label = children ?? name;
   if (name == null && !children) return <NullableCell value={null} />;
 
+  // The name alone when there is no kind to qualify it, rather than no title at
+  // all. In a compact table the cell is one line and a long name is clipped
+  // with an ellipsis; the pod listing passes group/version/plural rather than a
+  // kind, so without this fallback those were exactly the rows whose full name
+  // had nowhere left to be read.
+  const title = kind && name ? `${kind} ${name}` : name ?? undefined;
+
   const href = to ?? deriveHref({ kind, name, namespace, plural, group, version });
   if (!href) {
     return (
-      <span className={className} title={kind ? `${kind} ${name}` : undefined}>
+      <span className={className} title={title}>
         {label}
       </span>
     );
   }
   return (
-    <Link to={href} className={className} title={kind ? `${kind} ${name}` : undefined}>
+    <Link to={href} className={className} title={title}>
       {label}
     </Link>
   );

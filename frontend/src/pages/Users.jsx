@@ -272,6 +272,7 @@ export default function Users() {
         rowKey="id"
         loading={loading}
         ariaLabel="Console users"
+        manageableColumns
         emptyTitle="No managed users"
         emptyDescription="Create a local user or sign in through LDAP to synchronize a directory identity."
         actions={(row) => [

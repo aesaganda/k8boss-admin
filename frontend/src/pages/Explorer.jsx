@@ -341,6 +341,7 @@ function Listing({ group, version, plural, catalog, initialName, initialNamespac
         // events.k8s.io/v1/events are different kinds with the same plural, and
         // they must not share one set of column widths.
         tableId={`explorer:${group}/${version}/${plural}`}
+        manageableColumns
         columns={columns}
         rows={listing.items}
         rowKey={(row, index) => `${objectNamespace(row) ?? ''}/${objectName(row) ?? index}`}

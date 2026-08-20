@@ -17,6 +17,7 @@
  */
 export { PageHeader, SectionHeader } from './PageHeader';
 export { DataTable } from './DataTable';
+export { DensityToggle } from './DensityToggle';
 export { EmptyState, ErrorState, LoadingState, Skeleton } from './states';
 export { StatusBadge } from './StatusBadge';
 export { MetricCard, StatGrid } from './MetricCard';

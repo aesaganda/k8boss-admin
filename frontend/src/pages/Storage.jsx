@@ -46,6 +46,7 @@ export default function Storage() {
           {
             key: 'status',
             title: 'Status',
+            facet: { options: ['Bound', 'Pending', 'Lost'] },
             sortable: true,
             cell: (row) => (
               <StatusBadge
@@ -144,7 +145,13 @@ export default function Storage() {
         detailTitle: (row) => `PersistentVolume ${row?.name}`,
         columns: [
           { key: 'name', title: 'Name', sortable: true },
-          { key: 'status', title: 'Status', sortable: true, cell: (row) => <StatusBadge status={row.status} /> },
+          {
+            key: 'status',
+            title: 'Status',
+            sortable: true,
+            facet: { options: ['Available', 'Bound', 'Released', 'Failed'] },
+            cell: (row) => <StatusBadge status={row.status} />,
+          },
           {
             key: 'capacity_bytes',
             title: 'Capacity',
