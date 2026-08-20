@@ -21,6 +21,7 @@ import SyncAltIcon from '@patternfly/react-icons/dist/esm/icons/sync-alt-icon';
 import {
   AgeCell,
   DataTable,
+  DensityToggle,
   NullableCell,
   PageHeader,
   PartialBanner,
@@ -31,6 +32,7 @@ import {
 } from '../components/ui';
 import ImportYamlDialog from '../components/ImportYamlDialog';
 import { useCluster } from '../contexts/ClusterContext';
+import { useDensity } from '../contexts/DensityContext';
 import { useNamespace } from '../contexts/NamespaceContext';
 import { POD_TEMPLATE, useGates, useResourceList } from './_data';
 import {
@@ -66,6 +68,7 @@ function displayState(row) {
 export default function Pods() {
   const { activeClusterId } = useCluster();
   const { selected: namespace } = useNamespace();
+  const { density, setDensity } = useDensity();
   const navigate = useNavigate();
 
   const [search, setSearch] = useState('');
@@ -208,6 +211,11 @@ export default function Pods() {
           <Muted>State matches what the pill shows, not the raw phase.</Muted>
         </Toolbar.Item>
         <Toolbar.Spacer />
+        {/* The same preference the workload table reads, so an operator who
+            asked for compact rows once does not have to ask again here. */}
+        <Toolbar.Item>
+          <DensityToggle value={density} onChange={setDensity} />
+        </Toolbar.Item>
         <Toolbar.Item>
           <Button variant="plain" aria-label="Refresh pods" icon={<SyncAltIcon />} onClick={listing.reload} />
         </Toolbar.Item>
@@ -215,6 +223,7 @@ export default function Pods() {
 
       <DataTable
         ariaLabel="Pods"
+        density={density}
         columns={namespace ? columns.filter((column) => column.key !== 'namespace') : columns}
         rows={rows}
         rowKey={(row) => `${row.namespace}/${row.name}`}

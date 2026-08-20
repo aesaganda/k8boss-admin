@@ -35,6 +35,14 @@
  * that passes neither an `ariaLabel` nor a `tableId` still resizes; it has no
  * identity to file the widths under, so it does not remember them.
  *
+ * `density` is the Comfy/Compact choice from `contexts/DensityContext.jsx`.
+ * `comfy` — the default — is the rendering this table has always had: a cell
+ * wraps onto as many lines as its content needs. `compact` tightens the row
+ * padding and holds every row to one line, clipping what does not fit with an
+ * ellipsis. It is a prop rather than a context read because this component is
+ * a pure design-system piece; the pages that offer the toggle pass their
+ * preference down.
+ *
  * Sorting is uncontrolled by default. Pass `sort` + `onSort` together to hand
  * sorting to the server (the API returns chunked lists, so a page that pages
  * through `continue` must sort server-side or it sorts one chunk and calls it
@@ -90,6 +98,7 @@ export function DataTable({
   ariaLabel,
   tableId,
   resizableColumns = true,
+  density = 'comfy',
   variant = 'compact',
   isStickyHeader = true,
   onRetry,
@@ -202,6 +211,17 @@ export function DataTable({
     // data column before the table has to start scrolling sideways.
     trailingMinWidth: hasActions ? 48 : 96,
   });
+
+  // "dense" rather than "compact": `pf-m-compact` is already on this table and
+  // means a different thing — PatternFly's cell-padding preset, which BOTH
+  // densities start from. A second class by that name in this stylesheet would
+  // read as the PatternFly one to whoever edits it next.
+  const tableClass = [
+    hasSizedColumns ? 'admin-table--sized' : null,
+    density === 'compact' ? 'admin-table--dense' : null,
+  ]
+    .filter(Boolean)
+    .join(' ');
 
   const header = (
     <Thead>
@@ -326,7 +346,21 @@ export function DataTable({
                   dataLabel={typeof column.title === 'string' ? column.title : undefined}
                   modifier={column.modifier}
                 >
-                  {typeof column.cell === 'function' ? column.cell(row, index) : defaultValue(column, row)}
+                  {/*
+                    * A block wrapper inside the cell, in both densities, so the
+                    * compact one has something to clamp. A `<td>` cannot do it
+                    * itself: line clamping needs `display: -webkit-box`, and a
+                    * cell that is not `display: table-cell` is not a cell.
+                    *
+                    * Always rendered, never conditional. It changes nothing in
+                    * comfy — a block box where the cell already had an
+                    * anonymous one — and a wrapper that appeared only under one
+                    * density would make that density a second layout to get
+                    * right rather than the same one, clamped.
+                    */}
+                  <span className="admin-cell-clamp">
+                    {typeof column.cell === 'function' ? column.cell(row, index) : defaultValue(column, row)}
+                  </span>
                 </Td>
               ))}
               {hasActions && (
@@ -355,7 +389,11 @@ export function DataTable({
         ref={tableRef}
         variant={variant}
         isStickyHeader={isStickyHeader}
-        className={hasSizedColumns ? 'admin-table--sized' : undefined}
+        className={tableClass || undefined}
+        // Rendered as an attribute as well as a class so the density a table is
+        // actually in can be asserted on, and read off the DOM, without
+        // depending on which class name happens to spell it this month.
+        data-density={density}
         // Handed to the stylesheet rather than applied here, because the width
         // must not survive into PatternFly's stacked layout — see the
         // `admin-table--sized` rules, which drop it at the same width where

@@ -241,7 +241,10 @@ export function ImagesCell({ images, max = 2 }) {
   if (!list.length) return <Muted>none</Muted>;
   const shown = list.slice(0, max);
   return (
-    <span style={{ display: 'inline-flex', gap: '0.35rem', flexWrap: 'wrap', alignItems: 'center' }}>
+    // `admin-cell-inline` rather than an inline style: a compact table has to be
+    // able to stop this wrapping, and an inline style can only be overridden
+    // with `!important`.
+    <span className="admin-cell-inline">
       {shown.map((image) => {
         const short = image.includes('/') ? image.slice(image.lastIndexOf('/') + 1) : image;
         return (

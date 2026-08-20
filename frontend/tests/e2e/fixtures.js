@@ -398,7 +398,7 @@ export const FIXTURES = {
 /** Answer every /api call from the fixtures above. */
 export async function mockApi(
   page,
-  { health = FIXTURES.health, auth = null, audit = null, chain = null, yaml = null } = {},
+  { health = FIXTURES.health, auth = null, audit = null, chain = null, yaml = null, workloads = null } = {},
 ) {
   // Counted so a spec can hand back a different manifest on the second read —
   // which is how "the panel notices the object changed" is testable at all.
@@ -476,7 +476,7 @@ export async function mockApi(
     if (path === '/resources/core/v1/pods') return json(FIXTURES.pods);
     if (path === '/namespaces') return json(FIXTURES.namespaces);
     if (path === '/nodes') return json(FIXTURES.nodes);
-    if (path === '/workloads') return json(FIXTURES.workloads);
+    if (path === '/workloads') return json(workloads ?? FIXTURES.workloads);
     if (path === '/access/preflight') {
       return json(
         route.request().method() === 'POST'
