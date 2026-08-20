@@ -233,6 +233,11 @@ export default function Events() {
 
       <DataTable
         ariaLabel="Events"
+        // No Filter menu: Type, kind and namespace are asked of the API server
+        // above this table (a field selector, not a client-side pass), and a
+        // second filter with its own counts over the fetched page would be two
+        // answers to one question.
+        manageableColumns
         columns={columns}
         rows={rows}
         rowKey={(row, index) => `${row.namespace ?? ''}/${row.involved?.name ?? ''}/${row.reason ?? ''}/${row.last_seen ?? index}`}

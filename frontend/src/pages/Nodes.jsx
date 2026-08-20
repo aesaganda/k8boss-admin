@@ -82,6 +82,22 @@ export default function Nodes() {
         title: 'Status',
         sortable: true,
         value: (row) => readyStatus(row),
+        facet: {
+          options: [
+            'Ready',
+            'NotReady',
+            'Unknown',
+            {
+              value: 'Cordoned',
+              label: 'Cordoned',
+              // Not a readiness value, so it cannot be matched against one: a
+              // cordoned node is usually also Ready, and the two facts are
+              // exactly the pair the Status cell refuses to collapse.
+              match: (row) => Boolean(row.unschedulable),
+            },
+          ],
+          note: 'Cordoned is a separate fact from Ready — a node can be both.',
+        },
         cell: (row) => (
           <span style={{ display: 'inline-flex', gap: '0.35rem', flexWrap: 'wrap' }}>
             <StatusBadge status={readyStatus(row)} />
@@ -97,6 +113,9 @@ export default function Nodes() {
         key: 'roles',
         title: 'Roles',
         value: (row) => (row.roles ?? []).join(','),
+        // A row holds several roles and matches any of them; the options come
+        // from the cluster, because role labels are whatever an installer chose.
+        facet: { value: (row) => row.roles ?? [] },
         cell: (row) => <ChipList values={row.roles} max={2} emptyText="none" />,
       },
       { key: 'kubelet_version', title: 'Version', sortable: true },
@@ -208,6 +227,7 @@ export default function Nodes() {
 
       <DataTable
         ariaLabel="Nodes"
+        manageableColumns
         columns={columns}
         rows={rows}
         rowKey="name"

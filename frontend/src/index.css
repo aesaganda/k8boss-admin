@@ -358,6 +358,106 @@ body.admin-resizing * {
   user-select: none !important;
 }
 
+/* ── Table controls (filter menu, chips, manage columns) ────────────────── */
+
+/*
+ * One strip above the table, holding the Filter menu on the left and Manage
+ * columns on the right, with whatever is currently filtering between them.
+ * `TableControls.jsx` says why those controls live with the table rather than
+ * in each page's own toolbar.
+ */
+.admin-table-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--admin-gap-sm);
+  margin-block-end: var(--admin-gap-sm);
+}
+
+.admin-table-controls__spacer {
+  flex-grow: 1;
+}
+
+.admin-table-controls__chips {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--admin-gap-sm);
+}
+
+/*
+ * "Showing 3 of 76". Muted, because it is a caveat rather than a value, but not
+ * hidden: it is the sentence that keeps a filtered table from reading as a
+ * short cluster.
+ */
+.admin-table-controls__count {
+  margin-inline-start: var(--admin-gap-sm);
+  color: var(--admin-muted);
+  font-size: var(--pf-t--global--font--size--body--sm, 0.875rem);
+  white-space: nowrap;
+}
+
+/*
+ * The count sits hard against the inline-end edge of each option so the numbers
+ * form a column the eye can run down — which is the whole reason for putting
+ * them in the menu instead of leaving the operator to filter and see.
+ */
+.admin-facet-menu {
+  max-height: 24rem;
+  overflow-y: auto;
+}
+
+.admin-facet-menu__option {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--admin-gap);
+  min-width: 12rem;
+}
+
+.admin-facet-menu__count {
+  color: var(--admin-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/*
+ * The caveat on the counts, inside the menu that shows them rather than in a
+ * tooltip: a number and its qualification have to be readable in one look, or
+ * the qualification is not doing anything.
+ */
+.admin-facet-menu__note {
+  padding: var(--admin-gap-sm) var(--admin-gap);
+  max-width: 22rem;
+  color: var(--admin-muted);
+  font-size: var(--pf-t--global--font--size--body--sm, 0.875rem);
+}
+
+.admin-manage-columns__intro {
+  margin: 0 0 var(--admin-gap);
+  color: var(--admin-muted);
+}
+
+.admin-manage-columns__list {
+  display: grid;
+  gap: var(--admin-gap-sm);
+}
+
+.admin-manage-columns__count {
+  margin: var(--admin-gap) 0 0;
+  color: var(--admin-muted);
+  font-size: var(--pf-t--global--font--size--body--sm, 0.875rem);
+}
+
+/*
+ * Pushed to the opposite end of the footer from Save and Cancel. It is not a
+ * third way of confirming the dialog — it edits the checkboxes above and still
+ * needs saving — and sitting next to Save is how it gets read as one.
+ */
+.admin-manage-columns__restore {
+  margin-inline-end: auto;
+  order: -1;
+}
+
 /* ── Row density ────────────────────────────────────────────────────────── */
 
 /*

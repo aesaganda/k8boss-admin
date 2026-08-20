@@ -38,9 +38,7 @@ import { POD_TEMPLATE, useGates, useResourceList } from './_data';
 import {
   ActionButton,
   ImagesCell,
-  Muted,
   NoClusterState,
-  PickList,
   PodConsoleModal,
   TruncationFooter,
   menuAction,
@@ -52,18 +50,40 @@ const CHECKS = [
   { id: 'create', verb: 'create', group: 'core', resource: 'pods' },
 ];
 
-const PHASES = [
-  { value: 'Running', label: 'Running' },
-  { value: 'Pending', label: 'Pending' },
-  { value: 'Failed', label: 'Failed' },
-  { value: 'Succeeded', label: 'Succeeded' },
-  { value: 'Unhealthy', label: 'Not healthy (any reason)' },
-];
-
 /** What the Status pill actually says, which is what a filter must match. */
 function displayState(row) {
   return row.phase_detail || row.phase || 'Unknown';
 }
+
+/**
+ * The Status filter, as §6's vocabulary rather than as whatever this cluster
+ * happens to be running right now.
+ *
+ * Declared so that a state with no pods in it is still listed, at zero: "no
+ * pods are Pending" is an answer, and an option that vanishes when it empties
+ * makes it indistinguishable from a console that does not track Pending.
+ * Anything a cluster produces that is not on this list — a container reason
+ * nobody here has seen — is added to the menu from the rows themselves.
+ */
+const PHASE_OPTIONS = [
+  'Running',
+  'Pending',
+  'Succeeded',
+  'Failed',
+  'CrashLoopBackOff',
+  'Terminating',
+  'Unknown',
+  {
+    value: 'Unhealthy',
+    label: 'Not healthy (any reason)',
+    // A predicate, not a value, and that is the point: it keeps matching states
+    // this list has never heard of. During an incident the question is "what is
+    // not fine", and enumerating the ways to be unwell is how one gets missed.
+    match: (row) => !['Running', 'Succeeded'].includes(displayState(row)),
+  },
+];
+
+const QOS_OPTIONS = ['Guaranteed', 'Burstable', 'BestEffort'];
 
 export default function Pods() {
   const { activeClusterId } = useCluster();
@@ -72,7 +92,6 @@ export default function Pods() {
   const navigate = useNavigate();
 
   const [search, setSearch] = useState('');
-  const [phase, setPhase] = useState(null);
   const [podConsole, setPodConsole] = useState(null);
   const [createOpen, setCreateOpen] = useState(false);
 
@@ -86,17 +105,7 @@ export default function Pods() {
     { enabled: activeClusterId != null },
   );
 
-  const rows = useMemo(() => {
-    const items = listing.items ?? [];
-    if (!phase) return items;
-    if (phase === 'Unhealthy') {
-      // Anything whose displayed state is not one of the two settled ones. A
-      // CrashLoopBackOff pod is `phase: Running`, so this cannot be written
-      // against `phase` — that is the whole point of `phase_detail`.
-      return items.filter((row) => !['Running', 'Succeeded'].includes(displayState(row)));
-    }
-    return items.filter((row) => displayState(row) === phase);
-  }, [listing.items, phase]);
+  const rows = listing.items ?? [];
 
   const columns = useMemo(
     () => [
@@ -114,6 +123,10 @@ export default function Pods() {
         title: 'Status',
         sortable: true,
         value: (row) => displayState(row),
+        facet: {
+          options: PHASE_OPTIONS,
+          note: 'Matches what the pill shows — the container state — rather than the raw phase.',
+        },
         cell: (row) => (
           <StatusBadge
             status={row.phase}
@@ -152,7 +165,7 @@ export default function Pods() {
             <NullableCell value={null} reason="This pod has not been scheduled to a node yet." />
           ),
       },
-      { key: 'qos_class', title: 'QoS' },
+      { key: 'qos_class', title: 'QoS', facet: { options: QOS_OPTIONS } },
       {
         key: 'containers',
         title: 'Images',
@@ -177,12 +190,13 @@ export default function Pods() {
     <>
       <PageHeader
         title="Pods"
+        // What was read, not what is on screen. The table's own strip says how
+        // many rows a filter is leaving of this number, and two places
+        // computing "how many" differently is how they come to disagree.
         subtitle={
           listing.loading
             ? 'Reading the cluster…'
-            : `${rows.length}${rows.length !== listing.items.length ? ` of ${listing.items.length}` : ''} in ${
-                namespace ? `namespace ${namespace}` : 'all namespaces'
-              }`
+            : `${rows.length} in ${namespace ? `namespace ${namespace}` : 'all namespaces'}`
         }
         actions={
           <ActionButton variant="primary" gate={gate('create')} onClick={() => setCreateOpen(true)}>
@@ -196,19 +210,6 @@ export default function Pods() {
       <Toolbar ariaLabel="Pod filters">
         <Toolbar.Item>
           <SearchInput value={search} onChange={setSearch} placeholder="Filter by name, node, image…" />
-        </Toolbar.Item>
-        <Toolbar.Item>
-          <PickList
-            id="pod-phase"
-            label="State"
-            value={phase}
-            options={PHASES}
-            onChange={setPhase}
-            placeholder="Any state"
-          />
-        </Toolbar.Item>
-        <Toolbar.Item>
-          <Muted>State matches what the pill shows, not the raw phase.</Muted>
         </Toolbar.Item>
         <Toolbar.Spacer />
         {/* The same preference the workload table reads, so an operator who
@@ -224,6 +225,7 @@ export default function Pods() {
       <DataTable
         ariaLabel="Pods"
         density={density}
+        manageableColumns
         columns={namespace ? columns.filter((column) => column.key !== 'namespace') : columns}
         rows={rows}
         rowKey={(row) => `${row.namespace}/${row.name}`}
@@ -253,7 +255,7 @@ export default function Pods() {
             onClick: () => row.node && navigate(`/nodes/${encodeURIComponent(row.node)}`),
           },
         ]}
-        emptyTitle={phase ? `No pods in state "${phase}"` : 'No pods in scope'}
+        emptyTitle="No pods in scope"
         emptyDescription={
           listing.partial
             ? 'Some namespaces could not be read — see the banner above. This table is not a complete answer.'

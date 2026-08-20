@@ -60,7 +60,12 @@ export default function Network() {
         columns: [
           { key: 'name', title: 'Name', sortable: true },
           NAMESPACE_COLUMN,
-          { key: 'type', title: 'Type', sortable: true },
+          {
+            key: 'type',
+            title: 'Type',
+            sortable: true,
+            facet: { options: ['ClusterIP', 'NodePort', 'LoadBalancer', 'ExternalName'] },
+          },
           {
             key: 'clusterIP',
             title: 'Cluster IP',
