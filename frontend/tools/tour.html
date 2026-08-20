@@ -1,0 +1,1018 @@
+<title>k8boss-admin Field Guide</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Serif:ital,wght@0,400;0,600;1,400&display=swap">
+
+<style>
+/* ─────────────────────────────────────────────────────────────────────────
+   Tokens. The bare :root carries the complete light palette; the two blocks
+   below redefine only tokens, so nothing in this sheet declares a colour that
+   exists in one theme and not the other.
+
+   The signal trio is lifted from the console itself, and it is three colours
+   rather than two on purpose: affirm / refuse / *unknown*. A console that only
+   has "yes" and "no" has to file "we could not find out" under one of them.
+   ───────────────────────────────────────────────────────────────────────── */
+:root {
+  --paper:      #f5f7f7;
+  --surface:    #ffffff;
+  --surface-2:  #eceff0;
+  --ink:        #111b1f;
+  --ink-soft:   #445055;
+  --ink-mute:   #6a767b;
+  --hair:       #d3dadc;
+  --hair-soft:  #e3e8e9;
+
+  --rule:       #0d5c6b;
+  --rule-lift:  #0b7186;
+  --affirm:     #1c6b47;
+  --refuse:     #9e2b1c;
+  --unknown:    #8a6410;
+
+  --affirm-wash: #eaf3ee;
+  --refuse-wash: #f8ecea;
+  --unknown-wash:#f7f0e0;
+  --rule-wash:   #e7f0f2;
+
+  --shadow: 0 1px 2px rgba(17, 27, 31, .05), 0 12px 28px -18px rgba(17, 27, 31, .35);
+
+  --step: clamp(.95rem, .9rem + .2vw, 1.02rem);
+  --measure: 68ch;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper:      #0c1315;
+    --surface:    #121b1e;
+    --surface-2:  #182326;
+    --ink:        #e4ecee;
+    --ink-soft:   #b0bfc3;
+    --ink-mute:   #7f9096;
+    --hair:       #2a383c;
+    --hair-soft:  #1e2b2e;
+
+    --rule:       #5fb6c9;
+    --rule-lift:  #86cfdf;
+    --affirm:     #63c08f;
+    --refuse:     #e8836f;
+    --unknown:    #d8ab4a;
+
+    --affirm-wash: #13291f;
+    --refuse-wash: #2c1815;
+    --unknown-wash:#2a2213;
+    --rule-wash:   #11282e;
+
+    --shadow: 0 1px 2px rgba(0, 0, 0, .5), 0 14px 32px -20px rgba(0, 0, 0, .9);
+  }
+}
+
+:root[data-theme="dark"] {
+  --paper:      #0c1315;
+  --surface:    #121b1e;
+  --surface-2:  #182326;
+  --ink:        #e4ecee;
+  --ink-soft:   #b0bfc3;
+  --ink-mute:   #7f9096;
+  --hair:       #2a383c;
+  --hair-soft:  #1e2b2e;
+
+  --rule:       #5fb6c9;
+  --rule-lift:  #86cfdf;
+  --affirm:     #63c08f;
+  --refuse:     #e8836f;
+  --unknown:    #d8ab4a;
+
+  --affirm-wash: #13291f;
+  --refuse-wash: #2c1815;
+  --unknown-wash:#2a2213;
+  --rule-wash:   #11282e;
+
+  --shadow: 0 1px 2px rgba(0, 0, 0, .5), 0 14px 32px -20px rgba(0, 0, 0, .9);
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: var(--step);
+  line-height: 1.62;
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: var(--rule); text-decoration-thickness: 1px; text-underline-offset: .18em; }
+a:hover { color: var(--rule-lift); }
+:focus-visible { outline: 2px solid var(--rule-lift); outline-offset: 3px; border-radius: 2px; }
+
+code, .mono { font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace; }
+code {
+  font-size: .88em;
+  background: var(--surface-2);
+  border: 1px solid var(--hair-soft);
+  border-radius: 3px;
+  padding: .08em .34em;
+}
+
+/* ── Shell ──────────────────────────────────────────────────────────────── */
+
+.shell {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0;
+  max-width: 1400px;
+  margin-inline: auto;
+  padding-inline: clamp(1.1rem, 4vw, 3rem);
+}
+
+@media (min-width: 1080px) {
+  .shell {
+    grid-template-columns: 220px minmax(0, 1fr);
+    gap: clamp(2rem, 4vw, 4.5rem);
+  }
+}
+
+/* ── Route rail: the console has a sidebar, so does its guide ───────────── */
+
+.route { display: none; }
+
+@media (min-width: 1080px) {
+  .route {
+    display: block;
+    position: sticky;
+    top: 0;
+    align-self: start;
+    max-height: 100vh;
+    overflow-y: auto;
+    padding-block: 2.6rem 3rem;
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: .74rem;
+    line-height: 1.5;
+  }
+}
+
+.route__title {
+  font-size: .66rem;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+  margin: 0 0 1rem;
+  padding-block-end: .6rem;
+  border-block-end: 1px solid var(--hair);
+}
+
+.route__part {
+  font-size: .66rem;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--unknown);
+  margin: 1.5rem 0 .5rem;
+}
+.route__part:first-of-type { margin-block-start: 0; }
+
+.route__list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: .1rem; }
+
+.route__link {
+  display: grid;
+  grid-template-columns: 1.6rem 1fr;
+  gap: .35rem;
+  padding: .28rem .4rem .28rem 0;
+  color: var(--ink-soft);
+  text-decoration: none;
+  border-inline-start: 2px solid transparent;
+  padding-inline-start: .55rem;
+}
+.route__link:hover { color: var(--rule); border-inline-start-color: var(--hair); background: var(--surface-2); }
+.route__num { color: var(--ink-mute); font-variant-numeric: tabular-nums; }
+
+/* ── Main column ────────────────────────────────────────────────────────── */
+
+main { padding-block: 2.4rem 5rem; min-width: 0; }
+.prose { max-width: var(--measure); }
+
+/* ── Masthead ───────────────────────────────────────────────────────────── */
+
+.masthead { padding-block: 1.2rem 3.2rem; border-block-end: 1px solid var(--hair); margin-block-end: 3.2rem; }
+
+.eyebrow {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: .7rem;
+  letter-spacing: .18em;
+  text-transform: uppercase;
+  color: var(--unknown);
+  margin: 0 0 1.1rem;
+}
+
+.masthead h1 {
+  font-family: "IBM Plex Serif", Georgia, serif;
+  font-weight: 600;
+  font-size: clamp(2.5rem, 1.7rem + 3.4vw, 4.1rem);
+  line-height: 1.02;
+  letter-spacing: -.022em;
+  margin: 0 0 1.1rem;
+  text-wrap: balance;
+}
+
+.deck {
+  font-family: "IBM Plex Serif", Georgia, serif;
+  font-size: clamp(1.12rem, 1rem + .55vw, 1.42rem);
+  line-height: 1.42;
+  color: var(--ink-soft);
+  max-width: 36ch;
+  margin: 0 0 1.8rem;
+  text-wrap: balance;
+}
+.deck em { color: var(--unknown); font-style: italic; }
+
+.masthead__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .4rem 1.4rem;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: .74rem;
+  color: var(--ink-mute);
+  padding-block-start: 1.4rem;
+  border-block-start: 1px solid var(--hair-soft);
+  max-width: var(--measure);
+}
+.masthead__meta b { color: var(--ink-soft); font-weight: 500; }
+
+/* ── Sections and stops ─────────────────────────────────────────────────── */
+
+.part { margin-block: 4.6rem 2.6rem; }
+.part:first-of-type { margin-block-start: 0; }
+
+.part__label {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: .7rem;
+  letter-spacing: .16em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+  margin: 0 0 .5rem;
+}
+
+.part__title {
+  font-family: "IBM Plex Serif", Georgia, serif;
+  font-weight: 600;
+  font-size: clamp(1.6rem, 1.3rem + 1.1vw, 2.1rem);
+  line-height: 1.14;
+  letter-spacing: -.014em;
+  margin: 0 0 .9rem;
+  text-wrap: balance;
+}
+
+.part__lead { color: var(--ink-soft); margin: 0; max-width: var(--measure); }
+
+.stop { margin-block: 3.4rem; scroll-margin-top: 1.5rem; }
+
+.stop__head { display: flex; align-items: baseline; gap: .7rem; margin-block-end: .55rem; }
+
+.stop__num {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: .82rem;
+  font-weight: 500;
+  color: var(--unknown);
+  font-variant-numeric: tabular-nums;
+  padding-block-end: .1rem;
+  border-block-end: 2px solid currentColor;
+  flex: none;
+}
+
+.stop h3 {
+  font-family: "IBM Plex Serif", Georgia, serif;
+  font-weight: 600;
+  font-size: clamp(1.3rem, 1.15rem + .65vw, 1.66rem);
+  line-height: 1.2;
+  letter-spacing: -.012em;
+  margin: 0;
+  text-wrap: balance;
+}
+
+.stop__lead { color: var(--ink-soft); margin: 0 0 1.3rem; max-width: var(--measure); }
+.stop__lead + .stop__lead { margin-top: -.6rem; }
+
+/* ── Rule chip: which repo invariant the stop demonstrates ──────────────── */
+
+.chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: .5rem;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: .71rem;
+  letter-spacing: .02em;
+  color: var(--ink-soft);
+  background: var(--rule-wash);
+  border-inline-start: 2px solid var(--rule);
+  padding: .3rem .6rem;
+  margin-block-end: 1rem;
+}
+.chip b { color: var(--rule); font-weight: 600; letter-spacing: .08em; text-transform: uppercase; }
+
+/* ── Screenshot frame ───────────────────────────────────────────────────── */
+
+figure { margin: 0 0 1.5rem; }
+
+.shot {
+  background: var(--surface);
+  border: 1px solid var(--hair);
+  border-radius: 4px;
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+.shot__bar {
+  display: flex;
+  align-items: center;
+  gap: .45rem;
+  padding: .5rem .75rem;
+  background: var(--surface-2);
+  border-block-end: 1px solid var(--hair);
+}
+.shot__dot { width: 8px; height: 8px; border-radius: 50%; background: var(--hair); flex: none; }
+.shot__path {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: .7rem;
+  color: var(--ink-mute);
+  margin-inline-start: .5rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shot img { display: block; width: 100%; height: auto; }
+
+figcaption {
+  font-size: .82rem;
+  color: var(--ink-mute);
+  margin-block-start: .7rem;
+  max-width: var(--measure);
+}
+
+/* ── Annotations: marker colour says which state the note is about ──────── */
+
+.notes { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: .8rem; max-width: var(--measure); }
+
+.note { display: grid; grid-template-columns: 1.1rem 1fr; gap: .7rem; align-items: start; }
+
+.note::before {
+  content: "";
+  width: .52rem;
+  height: .52rem;
+  margin-block-start: .52rem;
+  border-radius: 1px;
+  transform: rotate(45deg);
+  background: var(--rule);
+}
+.note[data-state="affirm"]::before  { background: var(--affirm); }
+.note[data-state="refuse"]::before  { background: var(--refuse); }
+.note[data-state="unknown"]::before { background: var(--unknown); }
+
+.note b { font-weight: 600; }
+.note[data-state="affirm"] b  { color: var(--affirm); }
+.note[data-state="refuse"] b  { color: var(--refuse); }
+.note[data-state="unknown"] b { color: var(--unknown); }
+.note[data-state="rule"] b    { color: var(--rule); }
+
+/* ── The withheld-answer callout, lifted from the console's own null cell ─ */
+
+.withheld {
+  margin: 2.2rem 0;
+  padding: 1.3rem 1.5rem;
+  background: var(--unknown-wash);
+  border-inline-start: 3px solid var(--unknown);
+  max-width: var(--measure);
+  font-family: "IBM Plex Serif", Georgia, serif;
+  font-size: 1.06rem;
+  line-height: 1.5;
+  color: var(--ink);
+}
+.withheld p { margin: 0; }
+.withheld p + p { margin-block-start: .7rem; }
+.withheld .dash {
+  color: var(--unknown);
+  border-block-end: 1px dotted currentColor;
+  cursor: help;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+}
+.withheld cite {
+  display: block;
+  margin-block-start: .9rem;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: .72rem;
+  font-style: normal;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+}
+
+/* ── Funnel diagram ─────────────────────────────────────────────────────── */
+
+.funnel {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .4rem;
+  margin: 1.8rem 0 2.2rem;
+  padding: 0;
+  list-style: none;
+  counter-reset: fstep;
+}
+
+.funnel li {
+  flex: 1 1 8.5rem;
+  min-width: 8.5rem;
+  background: var(--surface);
+  border: 1px solid var(--hair);
+  border-block-start: 2px solid var(--rule);
+  padding: .7rem .8rem .8rem;
+}
+.funnel li:nth-child(1) { border-block-start-color: var(--refuse); }
+.funnel li:nth-child(2) { border-block-start-color: var(--unknown); }
+.funnel li:nth-child(5) { border-block-start-color: var(--affirm); }
+
+.funnel dt {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: .76rem;
+  font-weight: 600;
+  color: var(--ink);
+  margin-block-end: .25rem;
+}
+.funnel dd { margin: 0; font-size: .78rem; line-height: 1.42; color: var(--ink-mute); }
+
+/* ── Compact trio for the closing stops ─────────────────────────────────── */
+
+.trio { display: grid; grid-template-columns: 1fr; gap: 2.2rem; margin-block: 2rem; }
+@media (min-width: 900px) { .trio { grid-template-columns: repeat(3, 1fr); gap: 1.4rem; } }
+
+.trio .stop { margin: 0; }
+.trio h3 { font-size: 1.14rem; }
+.trio .stop__lead { font-size: .87rem; margin-block-end: 1rem; }
+.trio figcaption { font-size: .76rem; }
+
+/* ── Tables ─────────────────────────────────────────────────────────────── */
+
+.tablewrap { overflow-x: auto; margin-block: 1.6rem 2rem; border: 1px solid var(--hair); border-radius: 3px; background: var(--surface); }
+
+table { border-collapse: collapse; width: 100%; font-size: .84rem; }
+
+th, td { text-align: start; padding: .62rem .85rem; border-block-end: 1px solid var(--hair-soft); vertical-align: top; }
+thead th {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: .68rem;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--ink-mute);
+  font-weight: 500;
+  background: var(--surface-2);
+  border-block-end: 1px solid var(--hair);
+  white-space: nowrap;
+}
+tbody tr:last-child td { border-block-end: 0; }
+td.mono { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: .8rem; white-space: nowrap; }
+td.mono b { color: var(--rule); font-weight: 600; }
+
+/* ── Closing ────────────────────────────────────────────────────────────── */
+
+.colophon {
+  margin-block-start: 4.5rem;
+  padding-block-start: 1.8rem;
+  border-block-start: 1px solid var(--hair);
+  font-size: .82rem;
+  color: var(--ink-mute);
+  max-width: var(--measure);
+}
+.colophon h2 {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: .7rem;
+  letter-spacing: .16em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+  margin: 0 0 .8rem;
+}
+.colophon p { margin: 0 0 .7rem; }
+.colophon code { font-size: .8em; }
+
+h2, h3 { text-wrap: balance; }
+p { margin-block: 0 1rem; }
+strong { font-weight: 600; }
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+}
+</style>
+
+<div class="shell">
+
+<nav class="route" aria-label="Tour route">
+  <p class="route__title">The route</p>
+
+  <p class="route__part">Reading a cluster</p>
+  <ul class="route__list">
+    <li><a class="route__link" href="#s1"><span class="route__num">01</span><span>Overview</span></a></li>
+    <li><a class="route__link" href="#s2"><span class="route__num">02</span><span>Nodes</span></a></li>
+    <li><a class="route__link" href="#s3"><span class="route__num">03</span><span>Workloads</span></a></li>
+    <li><a class="route__link" href="#s4"><span class="route__num">04</span><span>Pods</span></a></li>
+    <li><a class="route__link" href="#s5"><span class="route__num">05</span><span>Namespaces</span></a></li>
+    <li><a class="route__link" href="#s6"><span class="route__num">06</span><span>Events</span></a></li>
+  </ul>
+
+  <p class="route__part">Changing a cluster</p>
+  <ul class="route__list">
+    <li><a class="route__link" href="#s7"><span class="route__num">07</span><span>The form</span></a></li>
+    <li><a class="route__link" href="#s8"><span class="route__num">08</span><span>The diff</span></a></li>
+    <li><a class="route__link" href="#s9"><span class="route__num">09</span><span>Applied</span></a></li>
+    <li><a class="route__link" href="#s10"><span class="route__num">10</span><span>Drain</span></a></li>
+  </ul>
+
+  <p class="route__part">The long tail</p>
+  <ul class="route__list">
+    <li><a class="route__link" href="#s11"><span class="route__num">11</span><span>API explorer</span></a></li>
+    <li><a class="route__link" href="#s12"><span class="route__num">12</span><span>YAML</span></a></li>
+    <li><a class="route__link" href="#s13"><span class="route__num">13</span><span>Audit</span></a></li>
+    <li><a class="route__link" href="#s14"><span class="route__num">14</span><span>Clusters</span></a></li>
+  </ul>
+
+  <p class="route__part">The console itself</p>
+  <ul class="route__list">
+    <li><a class="route__link" href="#s15"><span class="route__num">15</span><span>Read-only</span></a></li>
+    <li><a class="route__link" href="#s16"><span class="route__num">16</span><span>Sign-in</span></a></li>
+    <li><a class="route__link" href="#s17"><span class="route__num">17</span><span>Dark mode</span></a></li>
+  </ul>
+
+  <p class="route__part">Reference</p>
+  <ul class="route__list">
+    <li><a class="route__link" href="#codes"><span class="route__num">§</span><span>Error codes</span></a></li>
+    <li><a class="route__link" href="#colophon"><span class="route__num">§</span><span>Colophon</span></a></li>
+  </ul>
+</nav>
+
+<main>
+
+<header class="masthead">
+  <p class="eyebrow">Product tour · 17 stops</p>
+  <h1>k8boss-admin</h1>
+  <p class="deck">A Kubernetes console that will not tell you something it <em>does not know</em>.</p>
+  <div class="prose">
+    <p>It browses every resource a cluster serves, and it changes them through a path that
+    preflights the permission, dry-runs the write, shows you a diff, waits for your confirmation,
+    and records what happened — including what failed. It holds no cluster state: every page you
+    are about to see is a live read.</p>
+    <p>What follows is the console as an operator meets it, in the order they meet it. Every image
+    is a real screenshot of the running build.</p>
+  </div>
+  <div class="masthead__meta">
+    <span><b>Cluster</b> prod-eu · v1.31.4</span>
+    <span><b>Console</b> 0.1.0</span>
+    <span><b>Writes</b> enabled</span>
+    <span><b>Shot</b> production build, every API call mocked</span>
+  </div>
+</header>
+
+<section class="prose" id="preamble">
+  <h2 class="part__title">The cluster in these screenshots is having a bad morning</h2>
+  <p>That is deliberate. A tour is where a console usually starts lying: every table full, every
+  number green, every read successful. This one is shot against a fixture cluster mid-incident,
+  with reads that failed — because the failures are where the product's argument lives.</p>
+  <p>So: <code>payments</code> is crash-looping, one node's pod listing was refused, the
+  <code>metrics.k8s.io</code> APIService is down, and a DaemonSet controller has gone quiet. Watch
+  what the console does with each of those, and in particular watch what it does
+  <em>not</em> claim.</p>
+
+  <div class="withheld">
+    <p>A number this console could not derive renders as <span class="dash" title="This value could not be read, so it is unknown — it is not zero.">—</span>, never as <code>0</code>.</p>
+    <p>A node showing zero requested cores and zero pods reads as idle, and an idle node is the one
+    an operator picks to drain.</p>
+    <cite>Repo invariant 1, corollary</cite>
+  </div>
+</section>
+
+<!-- ══ PART I ═════════════════════════════════════════════════════════════ -->
+
+<section class="part" id="part-read">
+  <p class="part__label">Part one</p>
+  <h2 class="part__title">Reading a cluster</h2>
+  <p class="part__lead">Six surfaces, and one rule running through all of them: an empty list means
+  the cluster has none of the thing. A read that could not happen says so, by name.</p>
+</section>
+
+<article class="stop" id="s1">
+  <div class="stop__head"><span class="stop__num">01</span><h3>Overview</h3></div>
+  <p class="chip"><b>Rule 1</b> Empty is never blind</p>
+  <p class="stop__lead">The landing page is six independent collectors. One failing sets its own key
+  to <code>null</code> and names itself in the banner; the other five are unaffected. There is no
+  code path here that turns a missing measurement into a small one.</p>
+  <figure>
+    <div class="shot">
+      <div class="shot__bar"><span class="shot__dot"></span><span class="shot__dot"></span><span class="shot__dot"></span><span class="shot__path">/</span></div>
+      <img src="tour-shots/01-overview.png" alt="The k8boss-admin overview page for cluster prod-eu. A warning banner reads 'This view is incomplete — 2 sources could not be read', naming core/nodes as not permitted to read and metrics.k8s.io/nodemetrics as not present on this cluster. Below it, tiles show Kubernetes version v1.31.4, 12 nodes, 34 namespaces, 280 workloads and 1204 pods, while every Capacity and requests tile shows an em dash.">
+    </div>
+    <figcaption>Node counts survive; the capacity tiles that depended on the denied node listing do not.</figcaption>
+  </figure>
+  <ul class="notes">
+    <li class="note" data-state="unknown"><span><b>Five dashes, no zeroes.</b> CPU capacity, CPU requested, memory capacity, memory requested and pod capacity all derive from the node listing, and that listing was refused. Each renders as <code>—</code> with a tooltip saying the read never happened.</span></li>
+    <li class="note" data-state="rule"><span><b>The banner names its sources.</b> Not "some data is missing" — <code>core/nodes</code> and <code>metrics.k8s.io/nodemetrics</code>, each with the reason. It is persistent, not a toast: a toast expires while you are still working out why a tile is blank.</span></li>
+    <li class="note" data-state="affirm"><span><b>A missing API is not an error.</b> <code>metrics.k8s.io</code> is absent, and the row says "not present on this cluster. Nothing is wrong". Rendering ordinary facts in red trains people to ignore red.</span></li>
+  </ul>
+</article>
+
+<article class="stop" id="s2">
+  <div class="stop__head"><span class="stop__num">02</span><h3>Nodes</h3></div>
+  <p class="chip"><b>Rule 1</b> A number we could not derive is null, never zero</p>
+  <p class="stop__lead">Capacity, allocatable, and what the scheduler has actually committed. The
+  column this page exists for is <code>requested / allocatable</code>, and the reason it is built
+  the way it is fits in one row of the table.</p>
+  <figure>
+    <div class="shot">
+      <div class="shot__bar"><span class="shot__dot"></span><span class="shot__dot"></span><span class="shot__dot"></span><span class="shot__path">/nodes</span></div>
+      <img src="tour-shots/02-nodes.png" alt="The Nodes page listing eight nodes. Most rows show CPU and memory requests such as 11.2 / 15.8 and 42.0 GiB / 62.0 GiB. The row for ip-10-0-1-6 instead shows an em dash over 15.8, an em dash over 62.0 GiB and an em dash over 110 pods. A banner above names core/pods as not permitted to read.">
+    </div>
+    <figcaption>Seven nodes measured, one not. The difference is visible without reading the banner.</figcaption>
+  </figure>
+  <ul class="notes">
+    <li class="note" data-state="unknown"><span><b><code>ip-10-0-1-6</code> is the point.</b> Its pod listing failed, so requested CPU, requested memory and pod count are <code>—</code>. Had they rendered as <code>0</code>, that row would be the most attractive node on the page to drain.</span></li>
+    <li class="note" data-state="rule"><span><b>Cordoned is not a health state.</b> <code>ip-10-0-2-11</code> carries both <em>Ready</em> and <em>Cordoned</em>, because it is both. One badge does not replace the other.</span></li>
+    <li class="note" data-state="affirm"><span><b>Requests, not usage.</b> The subtitle says so outright: this console reads no metrics API, and it does not imply otherwise by labelling a request as a measurement.</span></li>
+  </ul>
+</article>
+
+<article class="stop" id="s3">
+  <div class="stop__head"><span class="stop__num">03</span><h3>Workloads</h3></div>
+  <p class="chip"><b>Defect standard</b> A wrong answer delivered confidently is worse than no answer</p>
+  <p class="stop__lead">Deployments, StatefulSets, DaemonSets, Jobs, CronJobs and ReplicaSets in one
+  table — because an operator asking "what is broken in prod" does not think in terms of which
+  controller owns the pods.</p>
+  <figure>
+    <div class="shot">
+      <div class="shot__bar"><span class="shot__dot"></span><span class="shot__dot"></span><span class="shot__dot"></span><span class="shot__path">/workloads</span></div>
+      <img src="tour-shots/03-workloads.png" alt="The Workloads page showing nine workloads of six kinds in one table. Statuses include Progressing for checkout, Degraded for payments, Healthy for web and sessions, a grey Unknown for the log-shipper DaemonSet, and Suspended for the nightly-report CronJob. The log-shipper row shows an em dash over 12 replicas.">
+    </div>
+    <figcaption>Six kinds, one table, and five distinct statuses — one of which is an admission of ignorance.</figcaption>
+  </figure>
+  <ul class="notes">
+    <li class="note" data-state="unknown"><span><b><code>Unknown</code> is a required status, and it is not green.</b> The <code>log-shipper</code> controller has not written a status for the current generation, so it has told us nothing. Its ready count is <code>—</code> and its status is grey. Reporting that as Healthy would make a green row a lie.</span></li>
+    <li class="note" data-state="rule"><span><b><code>Suspended</code> is a settled state.</b> <code>nightly-report</code> is suspended on purpose, so it is not surfaced as a problem — but it is also not disguised as healthy.</span></li>
+    <li class="note" data-state="refuse"><span><b>Every status carries its reason.</b> "1 of 5 replicas not available" sits under the badge, so the table answers the follow-up question before it is asked.</span></li>
+    <li class="note" data-state="rule"><span><b>The toolbar is held to the same rule as the table.</b> Comfy/Compact, the Filter menu and Manage columns are rendered by <code>DataTable</code> itself, so they exist on every list page rather than on the ones somebody remembered. A filter that quietly removed two thirds of a listing would be the defect standard wearing a checkbox — so the chips name every active value, the count names the cost, and one link clears them.</span></li>
+  </ul>
+</article>
+
+<article class="stop" id="s4">
+  <div class="stop__head"><span class="stop__num">04</span><h3>Pods</h3></div>
+  <p class="chip"><b>Defect standard</b> Phase lies, so the console reads past it</p>
+  <p class="stop__lead">A <code>Running</code> pod whose container is in <code>CrashLoopBackOff</code>
+  is not running. The backend supplies <code>phase_detail</code> for exactly the cases where the
+  Kubernetes phase is the wrong answer, and this page renders the detail over the phase.</p>
+  <figure>
+    <div class="shot">
+      <div class="shot__bar"><span class="shot__dot"></span><span class="shot__dot"></span><span class="shot__dot"></span><span class="shot__path">/pods</span></div>
+      <img src="tour-shots/04-pods.png" alt="The Pods page listing nine pods. Two payments pods show a red CrashLoopBackOff status rather than Running; one of them shows an em dash in the Restarts column while the other shows 47. A log-shipper pod shows ImagePullBackOff and a web pod shows Terminating.">
+    </div>
+    <figcaption>Both <code>payments</code> pods report <code>phase: Running</code> from the API server. Neither is running.</figcaption>
+  </figure>
+  <ul class="notes">
+    <li class="note" data-state="refuse"><span><b>The filter matches the detail too.</b> Filtering to "Running" and being shown a crash-looping pod would reintroduce the lie one layer up.</span></li>
+    <li class="note" data-state="unknown"><span><b>One restart count is <code>—</code>, the other is 47.</b> A pod in CrashLoopBackOff showing "0 restarts" is a confident wrong answer; showing a dash is an honest one.</span></li>
+    <li class="note" data-state="rule"><span><b>Terminating is a phase_detail too.</b> A pod being deleted still reports <code>Running</code> right up until it is gone.</span></li>
+  </ul>
+</article>
+
+<article class="stop" id="s5">
+  <div class="stop__head"><span class="stop__num">05</span><h3>Namespaces</h3></div>
+  <p class="chip"><b>Rule 1</b> Empty is never blind</p>
+  <p class="stop__lead">The same rule, in the place where breaking it is most expensive. An operator
+  reading "this namespace has no pods" acts on it — during a cleanup, that means deleting the
+  namespace.</p>
+  <figure>
+    <div class="shot">
+      <div class="shot__bar"><span class="shot__dot"></span><span class="shot__dot"></span><span class="shot__dot"></span><span class="shot__path">/namespaces</span></div>
+      <img src="tour-shots/14-namespaces.png" alt="The Namespaces page listing seven namespaces with pod counts. The kube-system row shows an em dash instead of a pod count, and a banner above names core/pods in namespace kube-system as not permitted to read.">
+    </div>
+    <figcaption><code>kube-system</code>'s pod listing was denied. Its count is withheld rather than guessed.</figcaption>
+  </figure>
+  <ul class="notes">
+    <li class="note" data-state="unknown"><span><b>A dash in a "safe to delete?" column.</b> Nothing on this page can turn "we could not look" into a small number.</span></li>
+    <li class="note" data-state="rule"><span><b><code>Terminating</code> namespaces are shown as such.</b> <code>legacy-batch</code> is on its way out and says so, rather than appearing as an ordinary Active namespace.</span></li>
+  </ul>
+</article>
+
+<article class="stop" id="s6">
+  <div class="stop__head"><span class="stop__num">06</span><h3>Events</h3></div>
+  <p class="chip"><b>Rule 1</b> An empty table is "nothing recently", never "nothing ever"</p>
+  <p class="stop__lead">Type, namespace and involved object become a server-side
+  <code>fieldSelector</code>, so the newest matching events come back rather than the newest events
+  of which a handful match. Sorting is the backend's, and events with no derivable timestamp sort
+  to the bottom — an unknown age must not present as the most recent thing that happened.</p>
+  <figure>
+    <div class="shot">
+      <div class="shot__bar"><span class="shot__dot"></span><span class="shot__dot"></span><span class="shot__dot"></span><span class="shot__path">/events</span></div>
+      <img src="tour-shots/12-events.png" alt="The Events page showing eight cluster events with type, reason, involved object, message, count and last-seen columns. Warning events include BackOff on a payments pod repeated 128 times, Unhealthy readiness probes, FailedScheduling and an image pull failure.">
+    </div>
+    <figcaption>The incident, in the cluster's own words: 128 back-offs, a failed image pull, and a scheduler with nowhere to put a pod.</figcaption>
+  </figure>
+  <ul class="notes">
+    <li class="note" data-state="rule"><span><b>The window is the cluster's, not the console's.</b> The API server keeps events for about an hour by default, and the page says so rather than implying it has the full history.</span></li>
+  </ul>
+</article>
+
+<!-- ══ PART II ════════════════════════════════════════════════════════════ -->
+
+<section class="part" id="part-write">
+  <p class="part__label">Part two</p>
+  <h2 class="part__title">Changing a cluster</h2>
+  <p class="part__lead">Every write in this console — scale, restart, suspend, rollback, cordon,
+  drain, create, replace, delete — goes through one function, in one order. Not a convention that
+  twelve endpoints follow, because a convention followed by twelve endpoints is a convention nine
+  of them follow after the next refactor.</p>
+  <ol class="funnel">
+    <li><dt>1 · Gate</dt><dd>Is this deployment allowed to write at all?</dd></li>
+    <li><dt>2 · Preflight</dt><dd>A SelfSubjectAccessReview for this exact verb and object.</dd></li>
+    <li><dt>3 · Apply</dt><dd><code>dryRun=All</code> first — same URL, same body.</dd></li>
+    <li><dt>4 · Diff</dt><dd>The API server's own projection, as a unified diff.</dd></li>
+    <li><dt>5 · Audit</dt><dd>Every terminal state, including the refusals.</dd></li>
+  </ol>
+</section>
+
+<article class="stop" id="s7">
+  <div class="stop__head"><span class="stop__num">07</span><h3>The form</h3></div>
+  <p class="chip"><b>Rule 2</b> Every mutation is preflighted</p>
+  <p class="stop__lead">Before the dialog opens, the page has already asked the API server whether
+  you may do each of these things. An action you cannot perform is disabled <em>with the reason</em>
+  — not hidden, and not offered and then refused.</p>
+  <figure>
+    <div class="shot">
+      <div class="shot__bar"><span class="shot__dot"></span><span class="shot__dot"></span><span class="shot__dot"></span><span class="shot__path">/workloads/deployments/prod/checkout</span></div>
+      <img src="tour-shots/05-scale-form.png" alt="The checkout Deployment detail page with a Scale checkout modal open. The modal explains that scaling sets an absolute replica count, not a delta, and shows a Desired replicas number input set to 8 with the note 'Currently 5 replicas'. The footer offers Preview change and Cancel.">
+    </div>
+    <figcaption>Note the button: <em>Preview change</em>. There is no button on this page that writes.</figcaption>
+  </figure>
+  <ul class="notes">
+    <li class="note" data-state="rule"><span><b>"Scaling sets an absolute replica count, not a delta."</b> The one sentence that stops a 5 becoming a 13.</span></li>
+    <li class="note" data-state="unknown"><span><b>An unknown current count does not become a starting value.</b> When the controller has not reported <code>replicas.desired</code>, the field starts empty and Preview is disabled with the reason. Seeding it with <code>0</code> would put a working workload one unread click from nothing.</span></li>
+    <li class="note" data-state="affirm"><span><b>Suspend is greyed here.</b> A Deployment has nothing to suspend, and the tooltip says that rather than "you may not do this" — which would send you to grant a permission that would not help.</span></li>
+  </ul>
+</article>
+
+<article class="stop" id="s8">
+  <div class="stop__head"><span class="stop__num">08</span><h3>The diff</h3></div>
+  <p class="chip"><b>Rule 3</b> Every mutation can be dry-run, and the destructive ones must be</p>
+  <p class="stop__lead">This is the load-bearing surface of the whole console. <code>dryRun</code>
+  defaults to <strong>true</strong> on every write body; the console sends <code>dryRun=All</code> as
+  a query parameter on the same call the real write would use, and renders the API server's own
+  projected object as a unified diff. Whatever is on this screen is what you are consenting to.</p>
+  <figure>
+    <div class="shot">
+      <div class="shot__bar"><span class="shot__dot"></span><span class="shot__dot"></span><span class="shot__dot"></span><span class="shot__path">POST /api/workloads/deployments/prod/checkout/scale · dryRun: true</span></div>
+      <img src="tour-shots/06-scale-diff.png" alt="The Scale checkout modal showing a unified diff headed '--- live' and '+++ projected (dryRun=All)'. A red line reads minus replicas: 5 and a green line reads plus replicas: 8, with per-hunk line numbers down the left. Above the diff, text reads 'This is the difference the API server projected for this write. Nothing has been applied yet.' The footer offers Apply, Back to edit and Cancel.">
+    </div>
+    <figcaption>Two lines changed, out of a Deployment with two hundred. The rest is context, not noise.</figcaption>
+  </figure>
+  <ul class="notes">
+    <li class="note" data-state="affirm"><span><b>"Nothing has been applied yet."</b> Stated on screen, because a successful dry run returns a full object, a <code>resourceVersion</code> and a diff — everything that otherwise looks like success.</span></li>
+    <li class="note" data-state="rule"><span><b>The form is gone.</b> Once a diff is on screen the inputs no longer exist, so there is no state in which you can change the number and then confirm a diff projected for a different one. Editing means going back, which discards the diff and requires a fresh dry run.</span></li>
+    <li class="note" data-state="rule"><span><b>The <code>+</code> and <code>−</code> stay in the text.</b> Colour is reinforcement, never the only signal — for greyscale, for colour-blind readers, and for anything pasted into a ticket.</span></li>
+    <li class="note" data-state="unknown"><span><b>Line numbers come from the hunk headers.</b> A unified diff omits everything outside its context window, so counting from the top would print confident, wrong line numbers for every hunk after the first.</span></li>
+  </ul>
+</article>
+
+<article class="stop" id="s9">
+  <div class="stop__head"><span class="stop__num">09</span><h3>Applied</h3></div>
+  <p class="chip"><b>Rule 3</b> <code>applied</code> is true only when the write actually landed</p>
+  <p class="stop__lead">The confirming call is the same request with <code>dryRun: false</code>. Only
+  now does the response carry <code>applied: true</code>, and only now does the console report
+  success — from a phase that is reachable no other way.</p>
+  <figure>
+    <div class="shot">
+      <div class="shot__bar"><span class="shot__dot"></span><span class="shot__dot"></span><span class="shot__dot"></span><span class="shot__path">POST /api/workloads/deployments/prod/checkout/scale · dryRun: false</span></div>
+      <img src="tour-shots/07-scale-applied.png" alt="The Scale checkout modal after applying, showing a green success panel headed 'checkout is now set to 8 replicas'. The body explains the API server accepted the new desired count and that pods reach it asynchronously, and offers a link to the audit record.">
+    </div>
+    <figcaption>The success message says what was accepted, not what is true yet — pods reach the count asynchronously.</figcaption>
+  </figure>
+  <ul class="notes">
+    <li class="note" data-state="affirm"><span><b>It links to its own audit record.</b> The write and its trail entry are reachable from each other.</span></li>
+    <li class="note" data-state="refuse"><span><b>A no-op offers no confirm button at all.</b> If the API server compares your request to the live object and finds no difference, confirming would produce an audit row and a success toast for a write with no effect.</span></li>
+    <li class="note" data-state="unknown"><span><b>A 409 re-runs the dry run.</b> If the object changed while you were reading, nothing is written: the console adopts the server's <code>resourceVersion</code>, re-projects against the object as it now is, and puts the <em>new</em> diff in front of you. What you approved the first time is discarded, not resubmitted.</span></li>
+  </ul>
+</article>
+
+<article class="stop" id="s10">
+  <div class="stop__head"><span class="stop__num">10</span><h3>Drain</h3></div>
+  <p class="chip"><b>Defect standard</b> "Drained" over three stuck pods gets a machine terminated</p>
+  <p class="stop__lead">A diff of <code>unschedulable: false → true</code> is an accurate description
+  of the patch and tells you nothing about the twenty pods about to be evicted off the machine. So a
+  drain returns a <strong>plan</strong> alongside the diff: every pod classified
+  <code>evict</code>, <code>skip</code> or <code>blocked</code>, with a reason, whether or not
+  anything runs.</p>
+  <figure>
+    <div class="shot">
+      <div class="shot__bar"><span class="shot__dot"></span><span class="shot__dot"></span><span class="shot__dot"></span><span class="shot__path">POST /api/nodes/ip-10-0-2-11/drain · dryRun: true</span></div>
+      <img src="tour-shots/08-drain-plan.png" alt="The Drain ip-10-0-2-11 modal. A red panel says the cluster rejected the change as invalid because 2 pods cannot be drained without force, naming pg-primary-0 blocked by a PodDisruptionBudget and adhoc-query-shell as having no owning controller. Below are options for grace period, ignoring DaemonSet pods, deleting emptyDir data and Force, then a plan table headed 'What this drain will do — 3 to evict, 2 skipped, 2 blocked' listing each pod with its controller, planned action and reason.">
+    </div>
+    <figcaption>The drain stopped <em>before</em> the cordon. A refused drain leaves the node exactly as it found it.</figcaption>
+  </figure>
+  <ul class="notes">
+    <li class="note" data-state="refuse"><span><b>Blocked pods stop the drain.</b> <code>pg-primary-0</code> is held by a PodDisruptionBudget; <code>adhoc-query-shell</code> has no owning controller, so nothing would recreate it elsewhere. Both are named, with the reason, before anything happens.</span></li>
+    <li class="note" data-state="unknown"><span><b><code>force</code> means "I have read this plan and I accept it".</b> It does <em>not</em> defeat a PodDisruptionBudget — the API server enforces those on the eviction subresource — and the checkbox's own help text says so. Claiming otherwise would sell a bigger hammer than exists.</span></li>
+    <li class="note" data-state="rule"><span><b>Changing an option re-runs the dry run.</b> A plan projected without <em>Delete emptyDir data</em> is not the plan that would run with it.</span></li>
+    <li class="note" data-state="affirm"><span><b>Evictions are reported per pod.</b> A drain over three pods the API server refused comes back <code>applied: true</code> with <code>failed: 3</code> and <code>drained: false</code> — never a bare success.</span></li>
+  </ul>
+</article>
+
+<!-- ══ PART III ═══════════════════════════════════════════════════════════ -->
+
+<section class="part" id="part-tail">
+  <p class="part__label">Part three</p>
+  <h2 class="part__title">The long tail</h2>
+  <p class="part__lead">The parts of a cluster nobody wrote a page for, the manifest behind every
+  object, and the two records that answer "who tried".</p>
+</section>
+
+<article class="stop" id="s11">
+  <div class="stop__head"><span class="stop__num">11</span><h3>API explorer</h3></div>
+  <p class="chip"><b>Rule 1</b> A missing group must not look like a cluster with fewer resources</p>
+  <p class="stop__lead">This is why the console can administer a cluster it has never seen. Anything
+  the cluster serves is reachable through the dynamic client — a Certificate, a Kafka, an Argo CD
+  Application — with its YAML readable and editable through the same audited, dry-run-first path as
+  everything else.</p>
+  <figure>
+    <div class="shot">
+      <div class="shot__bar"><span class="shot__dot"></span><span class="shot__dot"></span><span class="shot__dot"></span><span class="shot__path">/explorer</span></div>
+      <img src="tour-shots/09-explorer.png" alt="The API explorer page showing a red banner reading 'Discovery was incomplete — some API groups could not be enumerated', naming metrics.k8s.io as unreachable. Below, group filter chips list twelve API groups including cert-manager.io, argoproj.io, kafka.strimzi.io and monitoring.coreos.com, over a table of kinds with their group, version, resource, scope, verbs and short names.">
+    </div>
+    <figcaption>Twelve groups enumerated, one that could not be. The distinction is the entire point of the banner.</figcaption>
+  </figure>
+  <ul class="notes">
+    <li class="note" data-state="unknown"><span><b>"Unreachable", not absent.</b> An operator who cannot find <code>certificates.cert-manager.io</code> in this list must be able to tell "this cluster has no cert-manager" from "cert-manager's APIService is down". Backwards, that sends someone to install what they already have.</span></li>
+    <li class="note" data-state="affirm"><span><b>Verbs are shown per resource.</b> What you can do to a kind is a property of the cluster, and it is on the row.</span></li>
+  </ul>
+</article>
+
+<article class="stop" id="s12">
+  <div class="stop__head"><span class="stop__num">12</span><h3>YAML</h3></div>
+  <p class="chip"><b>Rule 4</b> Optimistic concurrency is mandatory on update</p>
+  <p class="stop__lead">Every object's manifest, rendered the same way, wherever the object is. Each
+  panel says when it was read, re-reads on a timer, and has a Reload button for when a timer is not
+  fast enough.</p>
+  <figure>
+    <div class="shot">
+      <div class="shot__bar"><span class="shot__dot"></span><span class="shot__dot"></span><span class="shot__dot"></span><span class="shot__path">/workloads/deployments/prod/checkout · YAML</span></div>
+      <img src="tour-shots/13-yaml.png" alt="The YAML tab of the checkout Deployment, showing the manifest with numbered, syntax-coloured lines covering apiVersion, metadata with resourceVersion 884213, spec with replicas 5, the rolling update strategy and the container definition.">
+    </div>
+    <figcaption>Numbered and syntax-coloured, so the line a parse error names is the line you can see.</figcaption>
+  </figure>
+  <ul class="notes">
+    <li class="note" data-state="rule"><span><b><code>PUT</code> carries the <code>resourceVersion</code> you were looking at.</b> A mismatch is a <code>409</code> with a fresh diff against live, never a blind overwrite. Two operators on the same Deployment during an incident is the case this exists for.</span></li>
+    <li class="note" data-state="refuse"><span><b>A failed refresh keeps the manifest and says the refresh failed.</b> It does not present an older copy as current.</span></li>
+    <li class="note" data-state="unknown"><span><b>An object that changes while you are editing raises a warning.</b> It does not quietly rewrite your edit.</span></li>
+  </ul>
+</article>
+
+<article class="stop" id="s13">
+  <div class="stop__head"><span class="stop__num">13</span><h3>Audit</h3></div>
+  <p class="chip"><b>Rule 5</b> Every write is audited, including the ones that failed</p>
+  <p class="stop__lead">Actor, cluster, verb, target, dry-run flag, diff digest, outcome — on every
+  terminal state. A trail holding only the writes that worked answers "what changed" but not "who
+  tried", and after an incident the second question is the one being asked.</p>
+  <figure>
+    <div class="shot">
+      <div class="shot__bar"><span class="shot__dot"></span><span class="shot__dot"></span><span class="shot__dot"></span><span class="shot__path">/audit</span></div>
+      <img src="tour-shots/10-audit.png" alt="The Audit page with scope, kind, outcome and time filters, an amber integrity panel headed 'The audit trail verifies as far as it can be checked' reporting 8829 of 8841 records verified and 12 outside the chain and unverifiable, and a table of records whose outcomes include Applied, Dry run, Denied, Conflict and Failed across cluster writes and console sign-ins.">
+    </div>
+    <figcaption>Five outcomes in seven rows: applied, dry-run, denied, conflict, failed — plus two sign-ins.</figcaption>
+  </figure>
+  <ul class="notes">
+    <li class="note" data-state="unknown"><span><b>The verdict is <code>partial</code>, and it is not dressed up as a pass.</b> Twelve records predate the hash chain. They are never back-filled — hashing them now would attest whatever they say today, turning "we do not know" into "verified". The console counts them and withholds the verdict.</span></li>
+    <li class="note" data-state="refuse"><span><b>The denials are as visible as the applies.</b> <code>contractor.j</code> tried to delete <code>prod/payments</code> and was refused at preflight. That row exists precisely because nothing happened.</span></li>
+    <li class="note" data-state="rule"><span><b>Sign-ins share the trail.</b> They carry no cluster at all, which is why the scope filter has a third position — without it every authentication record would be invisible from a session with a cluster selected.</span></li>
+    <li class="note" data-state="affirm"><span><b>Hash-chained, and honest about what that buys.</b> Chaining prevents nothing; it makes a <code>psql</code>-level edit <em>detectable</em>. That is the strongest honest promise an application can make about storage it does not own.</span></li>
+  </ul>
+</article>
+
+<article class="stop" id="s14">
+  <div class="stop__head"><span class="stop__num">14</span><h3>Clusters</h3></div>
+  <p class="chip"><b>Rule 2</b> A clean denial and a failed review are different facts</p>
+  <p class="stop__lead">Registration, connection test, and the baseline permission matrix. The page
+  exists to answer one question at the moment it is cheapest to answer: <em>will this
+  ServiceAccount actually work?</em> "The token is valid" and "the token can do the job" are
+  different facts, and only the first one is easy.</p>
+  <figure>
+    <div class="shot">
+      <div class="shot__bar"><span class="shot__dot"></span><span class="shot__dot"></span><span class="shot__dot"></span><span class="shot__path">/clusters</span></div>
+      <img src="tour-shots/11-clusters.png" alt="The Clusters page listing prod-eu and staging-eu as connected and edge-us as unreachable, with API server URLs, authentication types and server versions.">
+    </div>
+    <figcaption>Three registered clusters. <code>edge-us</code> was never reached, so its version is withheld rather than remembered.</figcaption>
+  </figure>
+  <ul class="notes">
+    <li class="note" data-state="unknown"><span><b>An unreachable cluster reports <code>permissions: null</code>.</b> Not an empty list — that would claim the ServiceAccount holds none of the baseline permissions, which is a statement about RBAC the console never got close enough to make. It renders as "not checked", with the connection error stated.</span></li>
+    <li class="note" data-state="refuse"><span><b>A failed review is a third state.</b> <code>allowed: false</code> with a non-null <code>evaluationError</code> means the SelfSubjectAccessReview itself failed — grey "unknown", never a red "no". Conflating them tells an operator they lack a permission they may well hold.</span></li>
+    <li class="note" data-state="affirm"><span><b>Tokens are encrypted at rest,</b> and nothing about a permission is ever cached: a cached <code>allowed</code> outlives the RBAC change that revoked it.</span></li>
+  </ul>
+</article>
+
+<!-- ══ PART IV ════════════════════════════════════════════════════════════ -->
+
+<section class="part" id="part-console">
+  <p class="part__label">Part four</p>
+  <h2 class="part__title">The console itself</h2>
+  <p class="part__lead">Three things that are true of every page above, whichever one you are on.</p>
+</section>
+
+<div class="trio">
+  <article class="stop" id="s15">
+    <div class="stop__head"><span class="stop__num">15</span><h3>Read-only</h3></div>
+    <p class="stop__lead">The default posture. A banner, a masthead badge, and every write control
+    disabled — never <code>rbac_denied</code>, because the operator's permissions are irrelevant and
+    saying otherwise sends them to fix the wrong system. Dry runs still work.</p>
+    <figure>
+      <div class="shot">
+        <div class="shot__bar"><span class="shot__dot"></span><span class="shot__dot"></span><span class="shot__dot"></span><span class="shot__path">ADMIN_ALLOW_MUTATIONS=false</span></div>
+        <img src="tour-shots/17-read-only.png" alt="The checkout Deployment page in read-only mode. A Read-only badge sits in the masthead and a banner reads 'This console is running read-only — this deployment runs read-only (ADMIN_ALLOW_MUTATIONS is off). Dry runs are still allowed.' Every action button is greyed out.">
+      </div>
+      <figcaption>Both signals are persistent. A toast would expire while you were still wondering why Delete is grey.</figcaption>
+    </figure>
+  </article>
+
+  <article class="stop" id="s16">
+    <div class="stop__head"><span class="stop__num">16</span><h3>Sign-in</h3></div>
+    <p class="stop__lead">Optional local, LDAP or OpenID Connect authentication, with sign-in
+    throttling; legacy proxy mode remains available when it is disabled. Sign-ins and sign-outs are
+    recorded in the same trail as cluster writes.</p>
+    <figure>
+      <div class="shot">
+        <div class="shot__bar"><span class="shot__dot"></span><span class="shot__dot"></span><span class="shot__dot"></span><span class="shot__path">/login</span></div>
+        <img src="tour-shots/16-login.png" alt="The k8boss-admin sign-in screen with a username field, a password field, an Account source selector, a Sign in button and a Continue with Okta single sign-on button.">
+      </div>
+      <figcaption>Account source is explicit, so a local account and a directory account never race.</figcaption>
+    </figure>
+  </article>
+
+  <article class="stop" id="s17">
+    <div class="stop__head"><span class="stop__num">17</span><h3>Dark mode</h3></div>
+    <p class="stop__lead">The whole console, including the diff tints and every status badge, has a
+    second palette. The <code>+</code>/<code>−</code> markers survive it, because colour was never
+    carrying the meaning on its own.</p>
+    <figure>
+      <div class="shot">
+        <div class="shot__bar"><span class="shot__dot"></span><span class="shot__dot"></span><span class="shot__dot"></span><span class="shot__path">/ · dark</span></div>
+        <img src="tour-shots/15-overview-dark.png" alt="The prod-eu overview page in dark mode, with the same incomplete-view banner, cluster tiles and dashed capacity tiles rendered on a dark ground.">
+      </div>
+      <figcaption>Same page, same withheld numbers, same banner.</figcaption>
+    </figure>
+  </article>
+</div>
+
+<!-- ══ REFERENCE ══════════════════════════════════════════════════════════ -->
+
+<section class="part" id="codes">
+  <p class="part__label">Reference</p>
+  <h2 class="part__title">The error vocabulary</h2>
+  <p class="part__lead">One exception class per stable code, because the frontend branches on the
+  code rather than on words in a sentence. It disables a button on <code>rbac_denied</code>, offers
+  refresh-and-retry on <code>conflict</code>, renders "not present on this cluster" on
+  <code>unsupported</code>, and shows a global banner on <code>mutations_disabled</code>.</p>
+  <div class="tablewrap">
+    <table>
+      <thead>
+        <tr><th scope="col">Code</th><th scope="col">HTTP</th><th scope="col">What it means, and what it does not</th></tr>
+      </thead>
+      <tbody>
+        <tr><td class="mono"><b>no_cluster_selected</b></td><td class="mono">409</td><td>No cluster id, and nothing registered.</td></tr>
+        <tr><td class="mono"><b>cluster_unreachable</b></td><td class="mono">502</td><td>DNS, TCP, TLS or deadline. We never got an answer, so nothing about the cluster's contents can be inferred.</td></tr>
+        <tr><td class="mono"><b>rbac_denied</b></td><td class="mono">403</td><td>Preflight said no, or the API server did. Names the missing permission.</td></tr>
+        <tr><td class="mono"><b>not_found</b></td><td class="mono">404</td><td>The object or the API resource does not exist.</td></tr>
+        <tr><td class="mono"><b>conflict</b></td><td class="mono">409</td><td><code>resourceVersion</code> mismatch. Comes back with a fresh diff, not a retry.</td></tr>
+        <tr><td class="mono"><b>invalid</b></td><td class="mono">422</td><td>Schema, admission or request validation refused it. Nothing was written.</td></tr>
+        <tr><td class="mono"><b>mutations_disabled</b></td><td class="mono">403</td><td>The <em>deployment</em> is read-only. Deliberately not <code>rbac_denied</code> — your permissions are irrelevant here.</td></tr>
+        <tr><td class="mono"><b>unsupported</b></td><td class="mono">501</td><td>The cluster does not serve that API. Not an error in the UI: no Ingress CRDs and no metrics API are ordinary facts.</td></tr>
+        <tr><td class="mono"><b>upstream_error</b></td><td class="mono">502</td><td>Anything else, including 401 — the cluster answered, and it refused us.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="prose">Codes map by HTTP status, not by <code>Status.reason</code>: the reason string is
+  not stable across API server versions or admission webhooks, and the status code is part of the
+  Kubernetes API contract.</p>
+</section>
+
+<footer class="colophon prose" id="colophon">
+  <h2>How these screenshots were made</h2>
+  <p>Every image on this page is a real screenshot of the k8boss-admin frontend, captured from a
+  production <code>vite build</code> served by <code>vite preview</code> — not the dev server, and
+  not a mockup. The console is driven by Playwright with every <code>/api/**</code> call
+  intercepted, so no backend and no cluster are involved.</p>
+  <p>The capture script and its fixture cluster live in the repository at
+  <code>frontend/tools/tour-shots.mjs</code> and <code>frontend/tools/tour-fixtures.mjs</code>. Run
+  <code>node tools/tour-shots.mjs</code> against a running preview server to regenerate the set.
+  That is the point of shooting it this way: when the console changes, the tour can be re-shot
+  rather than re-drawn.</p>
+  <p>The fixtures deliberately carry failed reads — a denied node listing, a down APIService, a
+  controller that has not reported. Each <code>null</code> in them is annotated with the rule it
+  exercises, so a fixture that quietly became a <code>0</code> would be a visible change in review.</p>
+  <h2 style="margin-top:1.6rem">Where the rest of the truth lives</h2>
+  <p><code>docs/api-contract.md</code> is normative — paths, field names, error codes, envelopes.
+  <code>docs/safety-model.md</code> is the document this product is judged on: preflight, dry-run,
+  diff, optimistic concurrency, drain, audit and read-only, each with the failure it prevents.
+  <code>docs/rbac.md</code> lists every permission by feature, with the degradation from
+  withholding it.</p>
+</footer>
+
+</main>
+</div>

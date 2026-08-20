@@ -67,4 +67,18 @@ export default [
       globals: { ...globals.node },
     },
   },
+  {
+    // The tour tooling in `tools/` is Node, and `.mjs` matches neither block
+    // above — so without this it lints with no globals at all and reports
+    // `console` as undefined. Both global sets, not just Node: these scripts
+    // drive a browser, and the callbacks they hand to `page.addInitScript` and
+    // `page.evaluate` are executed in the page, where `localStorage` and `URL`
+    // are exactly the right things to reach for.
+    files: ['tools/**/*.mjs'],
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: 'module',
+      globals: { ...globals.browser, ...globals.node },
+    },
+  },
 ];
