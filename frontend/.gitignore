@@ -6,3 +6,12 @@ test-results
 # Local editor / tooling noise
 .vite
 *.local
+
+# Tour screenshots and the inlined page built from them.
+#
+# Both are generated: `tools/tour-shots.mjs` re-shoots the images from the
+# fixtures beside it, and `tools/build-tour.mjs` inlines them. Committing 4 MB
+# of PNG into a 1 MB source repo would also commit the exact thing
+# `.gitattributes` exists to prevent — a diff nobody can read.
+tools/tour-shots/
+tools/tour.build.html
