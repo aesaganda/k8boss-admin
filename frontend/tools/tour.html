@@ -652,6 +652,7 @@ strong { font-weight: 600; }
     <li class="note" data-state="unknown"><span><b><code>Unknown</code> is a required status, and it is not green.</b> The <code>log-shipper</code> controller has not written a status for the current generation, so it has told us nothing. Its ready count is <code>—</code> and its status is grey. Reporting that as Healthy would make a green row a lie.</span></li>
     <li class="note" data-state="rule"><span><b><code>Suspended</code> is a settled state.</b> <code>nightly-report</code> is suspended on purpose, so it is not surfaced as a problem — but it is also not disguised as healthy.</span></li>
     <li class="note" data-state="refuse"><span><b>Every status carries its reason.</b> "1 of 5 replicas not available" sits under the badge, so the table answers the follow-up question before it is asked.</span></li>
+    <li class="note" data-state="rule"><span><b>The toolbar is held to the same rule as the table.</b> Comfy/Compact, the Filter menu and Manage columns are rendered by <code>DataTable</code> itself, so they exist on every list page rather than on the ones somebody remembered. A filter that quietly removed two thirds of a listing would be the defect standard wearing a checkbox — so the chips name every active value, the count names the cost, and one link clears them.</span></li>
   </ul>
 </article>
 
