@@ -616,6 +616,29 @@ export const pods = {
   /** WebSocket URL for an exec session (§7). `command` may repeat. */
   execUrl: (namespace, name, params) =>
     wsUrl(`/ws/pods/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/exec`, params),
+
+  /**
+   * Every debug (ephemeral) container already in this pod (§7.4).
+   *
+   * The envelope carries `supported`, which is **three-valued**: `true`,
+   * `false`, and `null` when the cluster's discovery document could not be
+   * read. A caller that treats `null` as `false` tells an operator their
+   * cluster lacks a feature it may well have, and sends them to plan an
+   * upgrade instead of to look at their API server.
+   */
+  debugContainers: (namespace, name) =>
+    api.get(`/pods/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/debug`),
+
+  /**
+   * Attach a debug container (§7.4). body:
+   * `{ image, container, targetContainer, command, tty, dryRun }`.
+   *
+   * A §1.5 mutation, so it goes through `MutationDialog` like every other
+   * write. The response adds `container` — the name that was generated — so the
+   * caller can open a terminal on it without parsing the diff.
+   */
+  attachDebugContainer: (namespace, name, body) =>
+    api.post(`/pods/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/debug`, body),
 };
 
 export default api;

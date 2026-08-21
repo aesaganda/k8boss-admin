@@ -404,7 +404,66 @@ Per-permission degradation is catalogued in [`rbac.md`](rbac.md).
 
 ---
 
-## 9. The Secret reveal
+## 9. The debug container
+
+`kubectl debug`, for the pod an operator most needs to get inside and the one
+`exec` is useless against: an image built from `scratch` or `distroless`, with no
+shell to exec. Kubernetes' answer is an **ephemeral container** scheduled into
+the running pod, and the console attaches one through the same funnel as every
+other write — gate, preflight on `patch pods/ephemeralcontainers`, `dryRun=All`,
+the API server's own projected diff, confirmation, audit.
+
+Nothing about it is special-cased, and three details are load-bearing.
+
+**The refusal for an old cluster is `unsupported`, and it comes from
+discovery.** The API server answers a request for a subresource it does not
+serve with **404**, which `from_api_exception` maps — correctly, for every other
+caller — to `not_found`. An operator told "not found" about a pod they are
+looking at goes hunting for a deletion that never happened. So the question is
+asked of the core group's discovery document, where the answer is about the
+cluster rather than about the object, and §1.3 makes `unsupported` an ordinary
+fact in the UI rather than a red banner.
+
+**Discovery that could not be read is `null`, never `false`.** "This cluster
+cannot do this" and "we could not find out whether it can" send an operator to
+two different places, and only one of them is a cluster upgrade. Unknown lets the
+request proceed and the API server answer — the same posture `resolve_container`
+takes when it cannot read the pod it wanted to validate against. It is §0.1's
+rule applied to a boolean.
+
+**The patch is a strategic merge, and that is what makes it an append.**
+`spec.ephemeralContainers` has `name` as its merge key. An RFC 7386 merge patch
+replaces a list wholesale, so attaching a second debug container would delete the
+first from the manifest — an operation the API server then refuses, because an
+ephemeral container cannot be removed, with an error about the field rather than
+about the console's choice of patch type.
+
+*What §0.4 does not have to do here.* There is no `resourceVersion` on this
+write and none is needed. The merge key means two operators attaching at the same
+moment produce two containers rather than one silently overwriting the other, so
+there is no lost update for optimistic concurrency to detect. This is the one
+write in the tree where that is true, and it is a property of the merge key, not
+an exemption.
+
+*The fact that goes above the form, not in the diff.* **An ephemeral container
+cannot be removed.** The Kubernetes API has no verb for deleting one; it lives
+until the pod does, and restarting the workload is what removes it. That, rather
+than five added lines of YAML, is what the operator is consenting to — so the
+console says it in the dialog before the preview, and offers no detach button
+anywhere. A control the API server will always refuse is this document's defect
+standard applied to a button.
+
+*The blast radius, stated plainly.* The operator chooses the image, and the
+container it becomes shares the pod's network namespace, its volumes and — on
+request — the process namespace of an application container. It runs as the
+pod's own ServiceAccount. This is close to `pods/exec` in what it grants, which
+is why `pods/ephemeralcontainers` is a separate rule in `deploy/rbac.yaml` and
+why the audit sentence names the image: the question after an incident is not
+that somebody debugged a pod but *what they put inside it*.
+
+---
+
+## 10. The Secret reveal
 
 A Secret's values are returned by exactly one code path, and only when **all** of
 the following hold:
@@ -428,7 +487,7 @@ the page believes they read a secret.
 
 ---
 
-## 10. What this model does not claim
+## 11. What this model does not claim
 
 Being honest about the edges is part of the model:
 

@@ -25,5 +25,6 @@ export { DescriptionList, InfoGrid } from './DescriptionList';
 export { SearchInput, FilterBar, Toolbar } from './inputs';
 export { CodeBlock } from './CodeBlock';
 export { ConfirmDialog } from './ConfirmDialog';
+export { ActionButton, menuAction } from './gated';
 export { PartialBanner } from './PartialBanner';
 export { NullableCell, AgeCell, ResourceLink } from './cells';

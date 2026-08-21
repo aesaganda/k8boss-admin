@@ -301,7 +301,15 @@ version being that there is no undo for a deleted StatefulSet.
 * **Logs and exec** — pod logs over HTTP or a WebSocket that always terminates
   with exactly one `end` or `error` frame, so you can tell "the pod stopped
   logging" from "we lost the connection"; and a terminal, gated on both write
-  gates and audited on open and close.
+  gates and audited on open and close. Neither picks a container for you on a
+  multi-container pod: the logs of the wrong container look exactly like the
+  logs of the right one.
+* **Debug containers** — `kubectl debug` for the pod whose image has no shell.
+  Attaches an ephemeral container carrying the tools, then opens a terminal in
+  it. A write like any other: previewed as a diff, confirmed, audited with the
+  image named. A cluster that does not serve `pods/ephemeralcontainers` is told
+  so as an ordinary fact, and a cluster whose discovery could not be read is
+  reported as *unknown* rather than as unsupported.
 
 **Write** (all dry-run-first, all audited)
 
@@ -431,6 +439,7 @@ means read-only.
 |---|---|---|
 | `ADMIN_ALLOW_MUTATIONS` | `false` | **The write gate.** False makes every write return `403 mutations_disabled` before the cluster is touched, and `/api/health` report `mutations: disabled` so the UI disables the buttons. Dry-run stays available: previewing is a read |
 | `SECRET_REVEAL_ENABLED` | `false` | Lets the single-object Secret read return values when asked with `?reveal=true`. Separate gate, separate blast radius; every reveal is audited either way |
+| `ADMIN_DEBUG_IMAGE` | `busybox:1.36` | The image a debug container is attached with when the operator names none. Not a gate — attaching one needs `ADMIN_ALLOW_MUTATIONS` and `patch pods/ephemeralcontainers` — but worth setting for an air-gapped cluster, which cannot pull from Docker Hub and answers the attempt with an `ImagePullBackOff` on a pod somebody is already debugging |
 | `AUTH_ENABLED` | `false` | Requires a managed local, LDAP or single sign-on session for every API and WebSocket request except health, login and the two OIDC handshake routes |
 | `AUTH_SESSION_TTL_HOURS` | `12` | Lifetime of the revocable HttpOnly session cookie, from 1 to 168 hours |
 | `AUTH_COOKIE_NAME` | `k8boss_admin_session` | Session cookie name |
@@ -506,8 +515,9 @@ an install and not a configuration:
   creates nothing — it is how preflight asks).
 * **`k8boss-admin-writer`** — defined, **binding commented out**. Adds the write
   verbs: `*/scale`, `patch` on workload kinds, `patch nodes`, `create
-  pods/eviction`, `delete pods`, `create pods/exec`, and create/update/delete on
-  the config, storage and networking resources.
+  pods/eviction`, `delete pods`, `create pods/exec`, `get,patch
+  pods/ephemeralcontainers`, and create/update/delete on the config, storage and
+  networking resources.
 
 Two rules are worth knowing before you apply anything:
 
@@ -517,6 +527,12 @@ Two rules are worth knowing before you apply anything:
 * **`create pods/exec` bypasses every other control here.** A shell in a pod can
   do whatever that pod's own ServiceAccount can, and there is no diff for a
   keystroke. Withholding it is the only real control over it.
+* **`patch pods/ephemeralcontainers` is close behind it.** The operator picks the
+  image, and the container it becomes shares the pod's network namespace, its
+  volumes and — on request — the process namespace of an application container.
+  It is a separate rule from `pods/exec` so an install can withhold either one,
+  and there is no delete verb to grant: the API has none, so an attached debug
+  container lives until the pod does.
 
 Every permission, grouped by feature, with the exact degradation you get from
 withholding it, is in [`docs/rbac.md`](docs/rbac.md).

@@ -166,6 +166,7 @@ reason.
 | `admin/scale.py` | Scale (via `/scale`), restart (template annotation), suspend |
 | `admin/rollout.py` | Revision history — ReplicaSets for Deployments, ControllerRevisions for the rest — and rollback |
 | `admin/nodes.py` | Cordon, and the drain planner: classify every pod, then execute per-pod |
+| `admin/debug.py` | §7.4 debug containers: attach an ephemeral container to a running pod, and decide from discovery — three-valued — whether the cluster serves them at all |
 | `audit/recorder.py` | `record()` from the funnel and from the two privileged reads; `record_console_event()` for sign-ins and user changes; `query()`, `stream()` and `verify_chain()` for §10 |
 | `audit/integrity.py` | The hash chain. A flush listener that links every new record, and `verify()` — which reports `intact`, `broken` or `partial`, and never claims the third is the first |
 | `audit/export.py` | §10.4 serialisers. NDJSON is byte-faithful; CSV is flattened and defangs cells a spreadsheet would execute as a formula |
@@ -186,8 +187,9 @@ reason.
 | `components/ui/` | The toolbox: `DataTable`, `PageHeader`, `StatusBadge`, `MetricCard`, `PartialBanner`, `ConfirmDialog`, `CodeBlock`, `DescriptionList`, `DensityToggle`, cells, inputs, states. `columnWidths.js` sits behind `DataTable` and owns the resizable columns: the per-table widths, their persistence, and the drag and keyboard lifecycle. `DataTable`'s `density` prop is the other half of that: Compact clamps every row to one line, and does it without changing a single column width. `tableFilters.js` (pure) and `columnVisibility.js` (persisted) sit behind the Filter menu and Manage columns in `TableControls.jsx` — the facet counting rules, and why a column choice is remembered where a filter is not, are documented in those two files |
 | `components/MutationDialog.jsx` | The dry-run → diff → confirm spine every write dialog is built on |
 | `components/DiffView.jsx`, `YamlEditor.jsx` | Rendering the unified diff; editing a manifest |
-| `components/{Scale,Restart,Suspend,Rollback,Delete,Cordon,Drain}Dialog.jsx` | The seven actions, all over `MutationDialog` |
-| `components/LogViewer.jsx`, `PodTerminal.jsx` | The two WebSocket surfaces |
+| `components/{Scale,Restart,Suspend,Rollback,Delete,Cordon,Drain,Debug}Dialog.jsx` | The eight actions, all over `MutationDialog` |
+| `components/LogViewer.jsx`, `PodTerminal.jsx` | The two WebSocket surfaces. Neither defaults a container on a multi-container pod |
+| `components/DebugPanel.jsx` | The Debug tab: what is already attached, the attach action, and a terminal bound to the container it created |
 | `pages/` | One per route; `_data.js` and `_parts.jsx` hold the shared fetch and row helpers |
 
 ---

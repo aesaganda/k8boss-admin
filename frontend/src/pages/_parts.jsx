@@ -63,6 +63,7 @@ import {
   Skeleton,
   Toolbar,
 } from '../components/ui';
+import DebugPanel from '../components/DebugPanel';
 import LogViewer from '../components/LogViewer';
 import MutationDialog from '../components/MutationDialog';
 import PodTerminal from '../components/PodTerminal';
@@ -102,70 +103,15 @@ function ClusterSettingsLink(props) {
 
 /* ── Rule 11.4 controls ─────────────────────────────────────────────────── */
 
-/**
- * A button that states why it cannot be pressed.
- *
- *   <ActionButton gate={gate('scale')} onClick={...}>Scale</ActionButton>
- *
- * `gate` is `{ allowed, reason }` from `useGates`. When it is not allowed the
- * button stays visible and focusable (`isAriaDisabled`) with the reason in a
- * tooltip, which is the whole of rule 11.4: an operator must be able to see that
- * the action exists and why it is unavailable.
- */
-export function ActionButton({
-  gate,
-  onClick,
-  children,
-  variant = 'secondary',
-  icon,
-  isDanger = false,
-  isLoading = false,
-  size,
-  ariaLabel,
-}) {
-  const allowed = gate ? gate.allowed : true;
-  const button = (
-    <Button
-      variant={isDanger ? 'danger' : variant}
-      icon={icon}
-      size={size}
-      isLoading={isLoading}
-      isAriaDisabled={!allowed || isLoading}
-      aria-label={ariaLabel}
-      onClick={allowed && !isLoading ? onClick : undefined}
-      data-testid="action-button"
-      data-allowed={allowed ? 'true' : 'false'}
-    >
-      {children}
-    </Button>
-  );
-  if (allowed) return button;
-  // The span guarantees Tooltip a DOM node to attach its ref to, and keeps the
-  // explanation reachable when the button itself is aria-disabled.
-  return (
-    <Tooltip content={gate.reason}>
-      <span className="admin-gated-action">{button}</span>
-    </Tooltip>
-  );
-}
-
-/**
- * One entry for `DataTable`'s `actions` kebab, gated the same way.
- *
- * Not a component — `ActionsColumn` takes plain objects — so it renders the
- * reason with a `title` attribute on the label rather than a `Tooltip`. That is
- * deliberate: PatternFly's menu closes the item's tooltip along with the menu on
- * some interactions, and a reason the operator cannot read is not a reason.
- */
-export function menuAction(label, gate, onClick, { isDanger = false } = {}) {
-  const allowed = gate ? gate.allowed : true;
-  return {
-    title: allowed ? label : <span title={gate.reason}>{label}</span>,
-    isDisabled: !allowed,
-    isDanger,
-    onClick: allowed ? onClick : undefined,
-  };
-}
+// `ActionButton` and `menuAction` moved to `components/ui/gated.jsx` — they are
+// rule-11.4 enforcement in the same sense `PartialBanner` and `NullableCell` are
+// rule-11.1 and 11.2 enforcement, and that is where the design system lives.
+// Re-exported here because every page in this lane imports them from `./_parts`,
+// and because `components/DebugPanel` needs them too: importing them from here
+// would make this module and that one import each other, and a cycle across a
+// lazy chunk boundary is the class of mistake this repo builds for production
+// before it tests.
+export { ActionButton, menuAction } from '../components/ui';
 
 /* ── Small cells ────────────────────────────────────────────────────────── */
 
@@ -615,14 +561,29 @@ export function EditYamlDialog({ isOpen, group, version, plural, name, namespace
  * of a misbehaving pod are what it logged, what it is, and what it looks like
  * from inside; they belong behind one set of tabs.
  *
- * The exec tab is *rendered* even when the caller may not use it, with the
- * reason in place of the terminal (rule 11.4). Hiding the tab would leave an
- * operator wondering whether this console can exec at all.
+ * **Debug is the fourth tab, and it is the one for a pod with no shell.** §7.4:
+ * an image built from `scratch` or `distroless` is the one an operator most
+ * needs to get inside and the one the Terminal tab is useless against, because
+ * there is nothing to exec. That tab attaches an ephemeral container carrying
+ * the tools and then opens a shell in *it*.
+ *
+ * The exec and debug tabs are *rendered* even when the caller may not use them,
+ * with the reason in place of the content (rule 11.4). Hiding a tab would leave
+ * an operator wondering whether this console can exec or debug at all.
  */
-export function PodConsoleModal({ pod, initialTab = 'logs', execGate, onClose }) {
+export function PodConsoleModal({ pod, initialTab = 'logs', execGate, debugGate, onClose }) {
   const [tab, setTab] = useState(initialTab);
   if (!pod) return null;
   const execAllowed = !execGate || execGate.allowed;
+  // Containers by kind. The Debug tab needs the pod's *own* containers for the
+  // process-namespace target picker and for the name-collision check, and an
+  // ephemeral container is neither a valid target nor a name it should suggest
+  // — §6's `kind` is what tells them apart.
+  const entries = Array.isArray(pod.containers) ? pod.containers : [];
+  const ownContainers = entries
+    .filter((entry) => (entry?.kind ?? 'container') === 'container')
+    .map((entry) => entry?.name)
+    .filter(Boolean);
   return (
     <Modal isOpen variant="large" onClose={onClose} aria-label={`Pod ${pod.name}`} data-testid="pod-console">
       <ModalHeader title={`${pod.namespace}/${pod.name}`} />
@@ -631,11 +592,20 @@ export function PodConsoleModal({ pod, initialTab = 'logs', execGate, onClose })
           <Tab eventKey="logs" title={<TabTitleText>Logs</TabTitleText>} aria-label="Logs" />
           <Tab eventKey="yaml" title={<TabTitleText>YAML</TabTitleText>} aria-label="YAML" />
           <Tab eventKey="exec" title={<TabTitleText>Terminal</TabTitleText>} aria-label="Terminal" />
+          <Tab eventKey="debug" title={<TabTitleText>Debug</TabTitleText>} aria-label="Debug" />
         </Tabs>
         {tab === 'logs' ? (
           <LogViewer namespace={pod.namespace} name={pod.name} containers={pod.containers} />
         ) : tab === 'yaml' ? (
           <YamlPanel group="core" version="v1" plural="pods" name={pod.name} namespace={pod.namespace} height={520} />
+        ) : tab === 'debug' ? (
+          <DebugPanel
+            namespace={pod.namespace}
+            name={pod.name}
+            gate={debugGate}
+            execGate={execGate}
+            containers={ownContainers}
+          />
         ) : execAllowed ? (
           <PodTerminal namespace={pod.namespace} name={pod.name} containers={pod.containers} />
         ) : (

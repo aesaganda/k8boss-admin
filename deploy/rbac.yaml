@@ -345,6 +345,30 @@ rules:
     resources: ["pods/exec"]
     verbs: ["create"]
 
+  # §7.4 debug containers — `kubectl debug`'s ephemeral container, for the pod
+  # whose image is a distroless binary with no shell to exec into. A separate
+  # RBAC resource from `pods` and a separate grant from `pods/exec`: attaching a
+  # container and typing in one are different acts, and an install may
+  # reasonably want the second without the first.
+  #
+  # Close to `pods/exec` in blast radius, and for a reason worth stating: the
+  # operator chooses the image, and the container it becomes shares the pod's
+  # network namespace, its volumes, and — on request — the process namespace of
+  # an application container. `get` as well as `patch` because the console reads
+  # the subresource to build the diff it shows before writing; without it every
+  # attach fails at the preview step naming `get pods/ephemeralcontainers`,
+  # which is at least an accurate error.
+  #
+  # Note there is no delete verb to grant. The Kubernetes API has none for an
+  # ephemeral container: once attached it lives as long as the pod does, and
+  # restarting the workload is what removes it. Remove this rule for a console
+  # that can exec into what is already there but cannot add to it; the Attach
+  # button then disables itself with the reason, and the listing of what is
+  # already attached keeps working, because that reads the pod.
+  - apiGroups: [""]
+    resources: ["pods/ephemeralcontainers"]
+    verbs: ["get", "patch"]
+
   # §4/§8 config, storage and networking writes — the YAML editor and the delete
   # button on those pages. `secrets` is included because the editor offers the
   # same operations on every §8 row; drop it to keep Secret writing out of the
