@@ -608,6 +608,60 @@ it asks for them, produced by the shaping layer.
 - **Roles / ClusterRoles** — `{name, namespace, rule_count, rules:[{apiGroups,resources,verbs,resourceNames}], age_seconds}`.
 - **RoleBindings / ClusterRoleBindings** — `{name, namespace, role:{kind,name}, subjects:[{kind,name,namespace}], age_seconds}`.
 
+### 8.1 Browsable, untyped — Storage, Network, Configuration, Gateway (beta)
+
+The Storage, Network and Configuration pages also carry tabs for resources with
+no typed row above: the generic §4 endpoint returns the trimmed manifest
+(`shape=raw`), and the frontend renders Name/Namespace/Age plus a YAML detail
+panel, nothing shape-specific. This is a UI/nav decision, not a new contract —
+each is reachable exactly as any resource is through §4, just given a tab in
+the console's own navigation rather than only through §4's catalog/explorer:
+
+- **Storage**: Volume Attributes Classes (`storage.k8s.io`, cluster-scoped).
+- **Network**: Endpoint Slices (`discovery.k8s.io`, namespaced), Ingress
+  Classes (`networking.k8s.io`, cluster-scoped), Network Policies
+  (`networking.k8s.io`, namespaced).
+- **Configuration**: HorizontalPodAutoscalers (`autoscaling`),
+  VerticalPodAutoscalers (`autoscaling.k8s.io`), PodDisruptionBudgets
+  (`policy`), ResourceQuotas / LimitRanges (core), PriorityClasses
+  (`scheduling.k8s.io`, cluster-scoped), RuntimeClasses (`node.k8s.io`,
+  cluster-scoped), Leases (`coordination.k8s.io`), Mutating/ValidatingWebhook
+  Configurations (`admissionregistration.k8s.io`, cluster-scoped).
+- **Gateway (beta)**: Gateways, Gateway Classes, HTTP Routes, GRPC Routes,
+  Reference Grants, Backend TLS Policies — all `gateway.networking.k8s.io`.
+  `BackendTrafficPolicy` is intentionally not included: it is not part of the
+  upstream Gateway API and its real group varies by implementation (e.g. Envoy
+  Gateway's is `gateway.envoyproxy.io`) — adding it requires confirming which
+  implementation the target cluster runs, not a guess.
+
+**VerticalPodAutoscalers, VolumeAttributesClasses and the whole Gateway (beta)
+category are CRD-backed and commonly absent.** Per §1.2 and rule 7 above, a
+cluster without the relevant CRDs installed answers `unsupported` on these
+tabs' primary list call, and the frontend renders that as an ordinary "not
+present on this cluster" state — ranked with the `metrics.k8s.io` example
+already in §1.2, not as a defect.
+
+**Gateway API's served version is resolved from the live catalog, not
+hardcoded.** Its kinds move between release channels on real clusters
+(`ReferenceGrant` commonly at `v1beta1`, `BackendTLSPolicy` at
+`v1alpha2`/`v1alpha3` depending on the installed CRD bundle) and §4's resolver
+matches a version exactly, so a tab that pinned one the way every other typed
+tab does would `unsupported` on any cluster running a different channel. The
+Gateway (beta) tabs instead look their plural up in `GET /api/resources/catalog`
+and use whichever version the cluster actually reports, falling back to a
+guessed version only until the catalog answers.
+
+### 8.2 Custom Resources
+
+A curated view over the same catalog §4's explorer already exposes (`GET
+/api/resources/catalog`), grouped by API group and filtered down to groups that
+are not one of Kubernetes' own built-in APIs — everything left is a CRD's
+instances, by elimination. There is no `isCRD` field in a catalog item; the
+frontend holds a static allowlist of built-in group names rather than the
+backend adding one, unless that heuristic is shown to misbehave on a real
+cluster. This is a second navigation surface over §4's existing data, not a new
+endpoint or row shape.
+
 ---
 
 ## 9. Access preflight
@@ -843,6 +897,13 @@ trace.
    blanks, and it never advances the timestamp on an attempt that did not
    return: an unlabelled view is indistinguishable from a live one, and a stale
    object presented as current is the defect standard applied to time.
+7. A **primary** list call answering `unsupported` (§1.2) renders the same calm
+   "not present on this cluster" empty state as any other ordinary absence —
+   never `ErrorState`'s red panel. This applies to a whole tab/page's own
+   listing, not only to a secondary read folded into `unavailable[]`: a tab for
+   a CRD-backed resource (Gateway API, VerticalPodAutoscaler,
+   VolumeAttributesClass) is routine on a cluster that doesn't have the CRD
+   installed, and rendering that red trains operators to stop trusting red.
 
 ---
 

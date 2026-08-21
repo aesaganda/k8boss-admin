@@ -51,6 +51,7 @@ import {
 } from '@patternfly/react-core';
 import SyncAltIcon from '@patternfly/react-icons/dist/esm/icons/sync-alt-icon';
 import {
+  AgeCell,
   CodeBlock,
   DataTable,
   EmptyState,
@@ -67,9 +68,9 @@ import LogViewer from '../components/LogViewer';
 import MutationDialog from '../components/MutationDialog';
 import PodTerminal from '../components/PodTerminal';
 import YamlEditor from '../components/YamlEditor';
-import { resources } from '../api/client';
+import { realGroup, resources } from '../api/client';
 import { useNamespace } from '../contexts/NamespaceContext';
-import { useLiveYaml, useResourceList, entriesOf } from './_data';
+import { useAsync, useLiveYaml, useResourceList, entriesOf, objectAgeSeconds, objectName, objectNamespace } from './_data';
 
 /* ── Cluster scope ──────────────────────────────────────────────────────── */
 
@@ -655,13 +656,42 @@ export function ResourceTabsPage({ title, subtitle, actions, tabs, initialTab })
   );
 }
 
+/**
+ * The version a `resolveVersion` tab actually reads. Gateway API's kinds
+ * still move between release channels on a live cluster (`ReferenceGrant` at
+ * `v1beta1`, `BackendTLSPolicy` at `v1alpha2`/`v1alpha3` depending on which CRD
+ * bundle is installed) — `resolve()` on the backend matches a version exactly,
+ * so a tab that pinned one the way every other tab in this console does would
+ * 501 on any cluster running a different channel than the one this code was
+ * written against. Looked up from the same catalog the API explorer already
+ * fetches (`GET /resources/catalog`), preferring the version the cluster marks
+ * `preferred`. Until the catalog answers — or if this group/plural isn't in it
+ * at all — this falls back to the tab's own hardcoded guess, so the first
+ * request Phase 0 already renders calmly as "not present" if that guess is
+ * wrong, rather than waiting on a second round trip before showing anything.
+ */
+function useResolvedVersion(tab) {
+  const enabled = Boolean(tab.resolveVersion);
+  const catalog = useAsync(() => resources.catalog(), { key: 'catalog', enabled });
+  const entry = useMemo(() => {
+    if (!enabled || !catalog.data?.items) return null;
+    const real = realGroup(tab.group);
+    const matches = catalog.data.items.filter(
+      (item) => realGroup(item.group) === real && item.resource === tab.plural,
+    );
+    return matches.find((item) => item.preferred) ?? matches[0] ?? null;
+  }, [enabled, catalog.data, tab.group, tab.plural]);
+  return entry?.version || tab.version;
+}
+
 function ResourceTabBody({ tab }) {
   const { selected } = useNamespace();
   const namespace = tab.namespaced ? selected : null;
   const [search, setSearch] = useState('');
   const [detailRow, setDetailRow] = useState(null);
 
-  const listing = useResourceList(tab.group, tab.version, tab.plural, {
+  const version = useResolvedVersion(tab);
+  const listing = useResourceList(tab.group, version, tab.plural, {
     namespace,
     shape: tab.shape,
     limit: tab.limit,
@@ -734,7 +764,9 @@ function ResourceTabBody({ tab }) {
           <DrawerCloseButton onClick={close} />
         </DrawerActions>
       </DrawerHead>
-      <DrawerPanelBody>{detailRow && tab.detail(detailRow, { close, namespace, reload: listing.reload })}</DrawerPanelBody>
+      <DrawerPanelBody>
+        {detailRow && tab.detail(detailRow, { close, namespace, reload: listing.reload, version })}
+      </DrawerPanelBody>
     </DrawerPanelContent>
   );
 
@@ -745,4 +777,75 @@ function ResourceTabBody({ tab }) {
       </DrawerContent>
     </Drawer>
   );
+}
+
+/* ── Generic tabs ───────────────────────────────────────────────────────── */
+
+/**
+ * A tab spec for a resource with no typed row (§8 defines none) and nothing
+ * page-specific to say about it: Name (+ Namespace, if namespaced) + Age, and
+ * a YAML detail panel. This is most of what Configuration's and Gateway's new
+ * tabs are — the cluster serves the object, nobody has written it a shaper,
+ * and there is nothing beyond "here it is, here is its YAML". Written once so
+ * a dozen near-identical column arrays don't drift from each other one typo at
+ * a time; a tab with a real typed row or resource-specific columns (Services,
+ * Ingresses, StorageClasses, …) is still hand-written, as those already are.
+ *
+ * `shape: 'raw'` is explicit rather than left to `shape=auto`'s fallback,
+ * matching `Network.jsx`'s Endpoints tab: saying "no shaper" out loud here
+ * costs nothing and reads better next to a tab that has one.
+ *
+ * `resolveVersion: true` is for a group whose served version is not stable
+ * across clusters (Gateway API's release channels) — see `useResolvedVersion`
+ * above. Every other caller pins a version, same as every hand-written tab in
+ * this console.
+ */
+export function genericTab({
+  key,
+  title,
+  group,
+  version,
+  plural,
+  namespaced,
+  resolveVersion = false,
+  emptyDescription = `The listing succeeded and returned no ${title} in this scope.`,
+}) {
+  return {
+    key,
+    title,
+    group,
+    version,
+    plural,
+    namespaced,
+    resolveVersion,
+    shape: 'raw',
+    rowKey: namespaced
+      ? (row) => `${objectNamespace(row)}/${objectName(row)}`
+      : (row) => objectName(row),
+    emptyDescription,
+    detailTitle: (row) => `${title.replace(/s$/, '')} ${namespaced ? `${objectNamespace(row)}/` : ''}${objectName(row)}`,
+    columns: [
+      { key: 'name', title: 'Name', sortable: true, value: (row) => objectName(row) },
+      ...(namespaced
+        ? [{ key: 'namespace', title: 'Namespace', sortable: true, value: (row) => objectNamespace(row) }]
+        : []),
+      {
+        key: 'age_seconds',
+        title: 'Age',
+        sortable: true,
+        value: (row) => objectAgeSeconds(row),
+        cell: (row) => <AgeCell seconds={objectAgeSeconds(row)} timestamp={row?.metadata?.creationTimestamp} />,
+      },
+    ],
+    detail: (row, ctx) => (
+      <YamlPanel
+        group={group}
+        version={ctx?.version ?? version}
+        plural={plural}
+        name={objectName(row)}
+        namespace={namespaced ? objectNamespace(row) : undefined}
+        height={420}
+      />
+    ),
+  };
 }

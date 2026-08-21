@@ -94,17 +94,28 @@ export default function AppNav() {
           <RouterNavItem to="/pods">Pods</RouterNavItem>
         </NavSection>
 
-        <NavSection id="platform" title="Platform" routes={['/network', '/config', '/storage']}>
-          <RouterNavItem to="/network">Networking</RouterNavItem>
-          <RouterNavItem to="/config">Configuration</RouterNavItem>
-          <RouterNavItem to="/storage">Storage</RouterNavItem>
-        </NavSection>
+        {/* Storage, Network, Gateway and Configuration are each one page whose
+            resource types are tabs inside it (`ResourceTabsPage`), not one
+            route apiece — so each gets a single top-level link, the way "API
+            explorer" always has, rather than an expandable section holding
+            only itself. */}
+        <RouterNavItem to="/storage">Storage</RouterNavItem>
+        <RouterNavItem to="/network">Network</RouterNavItem>
+        {/* Gateway API resources are CRD-backed and often absent — "(beta)"
+            in the label is the same signal §1.2 gives every unsupported entry:
+            a cluster with none of this installed is a normal cluster, not a
+            broken console. */}
+        <RouterNavItem to="/gateway">Gateway (beta)</RouterNavItem>
+        <RouterNavItem to="/config">Configuration</RouterNavItem>
 
         <NavSection id="access" title="Access control" routes={['/access']}>
           <RouterNavItem to="/access">Roles and bindings</RouterNavItem>
         </NavSection>
 
-        <RouterNavItem to="/explorer">API explorer</RouterNavItem>
+        <NavSection id="explorer" title="Custom Resources" routes={['/explorer', '/custom-resources']}>
+          <RouterNavItem to="/custom-resources">Instances</RouterNavItem>
+          <RouterNavItem to="/explorer">API explorer</RouterNavItem>
+        </NavSection>
 
         <NavSection id="administration" title="Administration" routes={administrationRoutes}>
           <RouterNavItem to="/clusters">Clusters</RouterNavItem>

@@ -199,7 +199,7 @@ function Catalog({ catalog, onOpen }) {
 
 /* ── One resource's objects ─────────────────────────────────────────────── */
 
-function Listing({ group, version, plural, catalog, initialName, initialNamespace }) {
+export function Listing({ group, version, plural, catalog, initialName, initialNamespace }) {
   const { selected: scope } = useNamespace();
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState(
