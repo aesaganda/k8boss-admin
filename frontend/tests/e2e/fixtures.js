@@ -365,7 +365,12 @@ export const FIXTURES = {
         restarts: 0,
         node: 'ip-10-0-1-4',
         qos_class: 'Burstable',
-        containers: [{ name: 'app', image: 'registry.example:5000/checkout:1.4.2', ready: true, restart_count: 0 }],
+        // `kind` per §6: the Debug tab uses it to tell an application
+        // container from an attached debug one, and it must not offer a
+        // debug container as a process-namespace target.
+        containers: [
+          { name: 'app', image: 'registry.example:5000/checkout:1.4.2', ready: true, restart_count: 0, kind: 'container' },
+        ],
         age_seconds: 86400,
         creationTimestamp: '2026-08-18T09:00:00Z',
       },
@@ -381,7 +386,9 @@ export const FIXTURES = {
         restarts: null,
         node: 'ip-10-0-1-5',
         qos_class: 'Burstable',
-        containers: [{ name: 'app', image: 'registry.example:5000/payments:2.0.1', ready: false, restart_count: null }],
+        containers: [
+          { name: 'app', image: 'registry.example:5000/payments:2.0.1', ready: false, restart_count: null, kind: 'container' },
+        ],
         age_seconds: 3600,
         creationTimestamp: '2026-08-19T08:00:00Z',
       },
@@ -392,13 +399,88 @@ export const FIXTURES = {
     unavailable: [],
   },
 
+  // §7.4. Three fixtures for the three values of `supported`, because all
+  // three render differently and collapsing any two is the bug: `false` says
+  // this cluster cannot do it, `null` says we could not find out, and only one
+  // of those is answered by upgrading a cluster.
+  debugSupported: {
+    items: [
+      {
+        name: 'debugger-x4k2p',
+        image: 'busybox:1.36',
+        targetContainer: 'app',
+        command: null,
+        tty: true,
+        state: 'Running',
+        reason: null,
+        started_at: '2026-08-21T09:14:00Z',
+      },
+      {
+        name: 'debugger-m7q3v',
+        image: 'nicolaka/netshoot:v0.13',
+        targetContainer: null,
+        command: ['sleep', '3600'],
+        tty: false,
+        // Attached moments ago; the kubelet is still pulling. Not attachable,
+        // and the panel must say why rather than offering a shell that fails.
+        state: 'Waiting',
+        reason: 'ContainerCreating',
+        started_at: null,
+      },
+    ],
+    continue: null,
+    remaining: null,
+    partial: false,
+    unavailable: [],
+    supported: true,
+    supportDetail: 'The API server serves pods/ephemeralcontainers with verbs: get, patch, update.',
+  },
+
+  debugUnsupported: {
+    items: [],
+    continue: null,
+    remaining: null,
+    partial: false,
+    unavailable: [],
+    supported: false,
+    supportDetail:
+      "This cluster's core API group does not serve pods/ephemeralcontainers. Ephemeral containers need " +
+      'Kubernetes 1.16 or later, and the EphemeralContainers feature gate enabled before 1.23.',
+  },
+
+  debugSupportUnknown: {
+    items: [],
+    continue: null,
+    remaining: null,
+    partial: false,
+    unavailable: [],
+    // Not `false`. Discovery could not be read, so whether this cluster serves
+    // ephemeral containers is unknown — and the panel must not render that as
+    // "your cluster is too old".
+    supported: null,
+    supportDetail:
+      "The core API group's discovery document could not be read (rbac_denied), so whether this cluster " +
+      'serves ephemeral containers is unknown.',
+  },
+
   emptyList: { items: [], continue: null, remaining: null, partial: false, unavailable: [] },
 };
 
 /** Answer every /api call from the fixtures above. */
 export async function mockApi(
   page,
-  { health = FIXTURES.health, auth = null, audit = null, chain = null, yaml = null, workloads = null, pods = null } = {},
+  {
+    health = FIXTURES.health,
+    auth = null,
+    audit = null,
+    chain = null,
+    yaml = null,
+    workloads = null,
+    pods = null,
+    debug = null,
+    debugAttach = null,
+    preflight = null,
+  } = {},
 ) {
   // Counted so a spec can hand back a different manifest on the second read —
   // which is how "the panel notices the object changed" is testable at all.
@@ -473,6 +555,54 @@ export async function mockApi(
           : yaml ?? objectYaml({ name: decodeURIComponent(path.split('/').at(-2) ?? 'object') });
       return route.fulfill({ status: 200, contentType: 'text/plain; charset=utf-8', body });
     }
+    // §7.4. POST attaches, GET lists. Ordered before the generic listing
+    // branch because both live under /pods/…, and a router that matched the
+    // listing first would answer an attach with a pod table.
+    if (/^\/pods\/[^/]+\/[^/]+\/debug$/.test(path)) {
+      if (route.request().method() === 'POST') {
+        const body = JSON.parse(route.request().postData() || '{}');
+        return json(
+          debugAttach
+            ? typeof debugAttach === 'function'
+              ? debugAttach(body)
+              : debugAttach
+            : {
+                dryRun: body.dryRun !== false,
+                // Derived, never echoed from the request: §1.5 makes `applied`
+                // the only evidence a cluster changed, and a mock that reported
+                // a dry run as applied would let a UI bug through that the real
+                // backend structurally cannot have.
+                applied: body.dryRun === false,
+                verb: 'patch',
+                target: {
+                  group: '',
+                  version: 'v1',
+                  resource: 'pods',
+                  namespace: 'prod',
+                  name: 'checkout-7d9f8b6c4-hk2xv',
+                  subresource: 'ephemeralcontainers',
+                },
+                diff: {
+                  before: 'spec: {}\n',
+                  after: `spec:\n  ephemeralContainers:\n    - name: debugger-x4k2p\n      image: ${body.image || 'busybox:1.36'}\n`,
+                  unified:
+                    '--- live\n+++ projected\n@@ -1,1 +1,4 @@\n spec: {}\n' +
+                    `+  ephemeralContainers:\n+    - name: debugger-x4k2p\n+      image: ${body.image || 'busybox:1.36'}\n`,
+                  changed: true,
+                },
+                resourceVersion: '884214',
+                warnings: [],
+                auditId: 4021,
+                container: body.container || 'debugger-x4k2p',
+                image: body.image || 'busybox:1.36',
+                targetContainer: body.targetContainer ?? null,
+                command: body.command ?? null,
+                tty: body.tty !== false,
+              },
+        );
+      }
+      return json(debug ?? FIXTURES.debugSupported);
+    }
     if (path === '/resources/core/v1/pods') return json(pods ?? FIXTURES.pods);
     if (path === '/namespaces') return json(FIXTURES.namespaces);
     if (path === '/nodes') return json(FIXTURES.nodes);
@@ -480,7 +610,14 @@ export async function mockApi(
     if (path === '/access/preflight') {
       return json(
         route.request().method() === 'POST'
-          ? { results: [] }
+          ? // `preflight` is a `(checks) => results` function so a spec can answer
+            // per check. §9 pairs results to checks strictly by index, and so
+            // does this.
+            {
+              results: preflight
+                ? preflight(JSON.parse(route.request().postData() || '{}').checks ?? [])
+                : [],
+            }
           : { verb: 'list', group: 'apps', resource: 'deployments', namespace: null, allowed: true, reason: '', evaluationError: null, hint: null },
       );
     }

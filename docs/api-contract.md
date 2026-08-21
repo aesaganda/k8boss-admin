@@ -414,9 +414,16 @@ Row:
 PodRow:
 ```json
 { "name", "namespace", "node", "phase", "ready": "2/2", "restarts": 3,
-  "age_seconds", "ip", "qos_class", "containers": [{"name","image","ready","restarts","state","reason"}],
+  "age_seconds", "ip", "qos_class",
+  "containers": [{"name","image","ready","restarts","state","reason","kind"}],
   "owner": {"kind":"ReplicaSet","name":"checkout-7d9"} }
 ```
+
+`containers[].kind` is `container` for the pod's own and `ephemeral` for a §7.4
+debug container somebody attached. **Neither `ready` nor `restarts` counts an
+ephemeral entry**, because the kubelet does not either: an ephemeral container
+has no readiness and is never restarted, and letting one turn `2/2` into `2/3`
+would report a healthy pod as degraded for the duration of somebody's shell.
 
 `phase` is the raw Kubernetes phase. The UI derives display state, but the
 backend additionally supplies `phase_detail` for the cases where phase lies —
@@ -453,7 +460,7 @@ template vs. the historical one.
 
 ---
 
-## 7. Pod logs and exec
+## 7. Pod logs, exec and debug containers
 
 ### `GET /api/pods/{namespace}/{name}/logs`
 Query `container`, `tailLines` (default 500, max 10000), `previous`,
@@ -482,6 +489,83 @@ Requires `ADMIN_ALLOW_MUTATIONS` **and** a preflight on
 Server→client: `{"type":"stdout","data":"..."}`, `{"type":"stderr","data":"..."}`,
 `{"type":"error","reason":"...","detail":"..."}`, `{"type":"end","code":0}`.
 Exec sessions are audited on open and on close.
+
+`container` may name an **ephemeral** container (§7.4) as well as a regular or
+init one. A missing `container` on a pod with more than one entry in
+`spec.containers` is refused; ephemeral containers never enter that count,
+because the API server's own defaulting rule does not count them either — so
+attaching a debug container to a single-container pod must not start refusing
+container-less requests that worked before.
+
+### 7.4 Debug containers
+
+`kubectl debug`, for the pod whose image has no shell. An **ephemeral
+container** is scheduled into the *running* pod, sharing its network namespace
+and volumes and — if asked — the process namespace of one of its containers.
+
+#### `GET /api/pods/{namespace}/{name}/debug`
+A §1.2 envelope of the pod's ephemeral containers, plus two additive keys:
+```json
+{ "items": [ {"name","image","targetContainer","command","tty",
+              "state","reason","started_at"} ],
+  "continue": null, "remaining": null, "partial": false, "unavailable": [],
+  "supported": true,
+  "supportDetail": "The API server serves pods/ephemeralcontainers with verbs: get, patch, update." }
+```
+- `state` uses the same vocabulary as a PodRow container: `Running` |
+  `Waiting` | `Terminated`, or **`null` when the kubelet has not reported on the
+  container at all**, which is a different fact from `Waiting`.
+- `command: null` means the image's own entrypoint runs. It is a real answer,
+  not an unread value, and a client must not render it as §11.2's em dash.
+- `started_at` is `null` for a container that has not started.
+- **`supported` is three-valued.** `true`/`false` come from the core group's
+  discovery document; **`null` means it could not be read**, so whether the
+  cluster serves ephemeral containers is unknown. A client that renders `null`
+  as `false` tells an operator their cluster lacks a feature it may well have,
+  and sends them to plan an upgrade instead of to look at their API server.
+- `items: []` is a real zero: the pod was read. A pod that could **not** be read
+  is an error, never an empty list (§0.1).
+
+#### `POST /api/pods/{namespace}/{name}/debug`
+```json
+{ "image": "busybox:1.36", "container": null, "targetContainer": "app",
+  "command": ["sleep","3600"], "tty": true, "dryRun": true }
+```
+→ the §1.5 mutation response, plus `container`, `image`, `targetContainer`,
+`command` and `tty`. `container` is the name that was generated
+(`debugger-xxxxx`), so a client can open a terminal on what it created without
+parsing the diff.
+
+Every field is optional. `image` omitted uses the console's configured default
+(`ADMIN_DEBUG_IMAGE`); `container` omitted is generated; `command` omitted runs
+the image's entrypoint.
+
+- **It is a write and it goes through the funnel** (§0.2–§0.5): a
+  `SelfSubjectAccessReview` on **`patch` `pods/ephemeralcontainers`** — RBAC
+  names the subresource separately from `pods` — then `dryRun=All` on the same
+  call, the API server's projected diff, and an audit row naming the image.
+- The patch is a **strategic merge** on `spec.ephemeralContainers`, whose merge
+  key is `name`, so a second debug container appends. RFC 7386 would replace the
+  list and delete the first one — which the API server then refuses, because an
+  ephemeral container cannot be removed.
+- A cluster that does not serve the subresource is **`501 unsupported`**,
+  decided from discovery. Not `404 not_found`: the API server answers 404 for an
+  unserved subresource, and "not found" about a pod the operator is looking at
+  sends them hunting for a deletion that never happened. Per §1.3 a client
+  renders this as an ordinary fact, not as an error.
+- A container name already used by *any* container of the pod — regular, init or
+  ephemeral — is `422 invalid` listing them. So is a `targetContainer` that is
+  not one of `spec.containers`, and a pod whose phase is `Succeeded` or
+  `Failed`, where the kubelet would never start the container.
+- **§0.4 does not apply.** There is no `resourceVersion` on this write and none
+  is needed: the merge key makes two concurrent attaches produce two containers
+  rather than one overwriting the other, so there is no lost update to detect.
+
+> **An ephemeral container cannot be removed.** The Kubernetes API has no verb
+> for deleting one; it lives until the pod does. There is no `DELETE` here, and
+> a client must not offer one — a control the API server will always refuse is
+> the defect standard applied to a button. Restarting the workload is what
+> removes it.
 
 ---
 

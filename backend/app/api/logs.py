@@ -301,21 +301,49 @@ def bool_param(params: QueryParams, key: str, *, default: bool) -> bool:
 # Container selection
 # --------------------------------------------------------------------------- #
 
-def _pod_containers(pod: Any) -> tuple[list[str], list[str], str | None]:
-    """``(containers, initContainers, declared default)`` for one pod object."""
-    containers = [
-        str(get_field(c, "name"))
-        for c in (get_field(pod, "spec", "containers", default=[]) or [])
-        if get_field(c, "name")
-    ]
-    init_containers = [
-        str(get_field(c, "name"))
-        for c in (get_field(pod, "spec", "initContainers", default=[]) or [])
-        if get_field(c, "name")
-    ]
+def _pod_containers(pod: Any) -> tuple[list[str], list[str], list[str], str | None]:
+    """``(containers, initContainers, ephemeralContainers, declared default)``.
+
+    Ephemeral containers are read here because a debug container attached
+    through §7.4 is a container an operator wants the logs of and a shell in —
+    it is, in the case this console attaches one for, the *only* container in
+    the pod with a shell. They are kept in their own list rather than folded in
+    with the rest because the two lists mean different things to the code below:
+    a named ephemeral container is valid, but the number of them never makes a
+    pod's default container ambiguous.
+    """
+
+    def names_of(*path: str) -> list[str]:
+        return [
+            str(get_field(entry, "name"))
+            for entry in (get_field(pod, *path, default=[]) or [])
+            if get_field(entry, "name")
+        ]
+
     annotations = get_field(pod, "metadata", "annotations", default={}) or {}
-    default_container = annotations.get(_DEFAULT_CONTAINER_ANNOTATION)
-    return containers, init_containers, default_container
+    return (
+        names_of("spec", "containers"),
+        names_of("spec", "initContainers"),
+        names_of("spec", "ephemeralContainers"),
+        annotations.get(_DEFAULT_CONTAINER_ANNOTATION),
+    )
+
+
+def _container_hint(
+    containers: list[str], init_containers: list[str], ephemeral: list[str],
+) -> str:
+    """The sentence listing what this pod actually has, for a 422.
+
+    Each list is named separately. "Containers: app, sidecar. Debug containers:
+    debugger-x4k2p." tells an operator both that they mistyped and that somebody
+    else is already in this pod — a flat list of five names tells them neither.
+    """
+    parts = ["Containers: " + (", ".join(containers) or "none")]
+    if init_containers:
+        parts.append("Init containers: " + ", ".join(init_containers))
+    if ephemeral:
+        parts.append("Debug containers: " + ", ".join(ephemeral))
+    return ". ".join(parts) + "."
 
 
 def resolve_container(namespace: str, name: str, container: str | None) -> str | None:
@@ -370,23 +398,26 @@ def resolve_container(namespace: str, name: str, container: str | None) -> str |
             return container
         raise
 
-    containers, init_containers, default_container = _pod_containers(pod)
-    known = containers + init_containers
+    containers, init_containers, ephemeral, default_container = _pod_containers(pod)
+    known = containers + init_containers + ephemeral
 
     if container:
         if known and container not in known:
             raise Invalid(
                 f'Pod "{name}" has no container named "{container}".',
-                hint=(
-                    "Containers: " + (", ".join(containers) or "none")
-                    + (f". Init containers: {', '.join(init_containers)}."
-                       if init_containers else ".")
-                ),
+                hint=_container_hint(containers, init_containers, ephemeral),
                 context={**context, "container": container,
-                         "containers": containers, "initContainers": init_containers},
+                         "containers": containers, "initContainers": init_containers,
+                         "ephemeralContainers": ephemeral},
             )
         return container
 
+    # Keyed on the *regular* containers alone, which is exactly what the API
+    # server does: it defaults the container only when `spec.containers` holds
+    # one, and ephemeral containers never enter that count. Including them here
+    # would make attaching a debug container turn every subsequent
+    # container-less log request on a single-container pod into a 422 — a
+    # console that broke its own log viewer as a side effect of opening a shell.
     if len(containers) == 1:
         # Unambiguous, so naming it adds nothing. Returned as None so the API
         # server applies its own default — one fewer place for this console to
@@ -402,7 +433,8 @@ def resolve_container(namespace: str, name: str, container: str | None) -> str |
             detail="The pod object listed no containers.",
             hint="Name one explicitly with ?container=.",
             context={**context, "containers": containers,
-                     "initContainers": init_containers},
+                     "initContainers": init_containers,
+                     "ephemeralContainers": ephemeral},
         )
 
     # The ambiguous case, and the reason this function exists.
@@ -416,9 +448,7 @@ def resolve_container(namespace: str, name: str, container: str | None) -> str |
     # from a choice made for them and never mentioned.
     raise Invalid(
         f'Pod "{name}" has {len(containers)} containers; say which one.',
-        detail="Containers: " + ", ".join(containers) + (
-            f". Init containers: {', '.join(init_containers)}." if init_containers else "."
-        ),
+        detail=_container_hint(containers, init_containers, ephemeral),
         hint=(
             "Add ?container=<name>. It is not defaulted: reading the wrong "
             "container's logs looks exactly like reading the right one."
@@ -427,6 +457,7 @@ def resolve_container(namespace: str, name: str, container: str | None) -> str |
             **context,
             "containers": containers,
             "initContainers": init_containers,
+            "ephemeralContainers": ephemeral,
             "defaultContainer": default_container,
         },
     )

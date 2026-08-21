@@ -20,7 +20,7 @@ of [K8Boss](https://github.com/aesaganda/k8boss) and shares no code with it —
 | `backend/app/k8s/` | Per-request cluster context, auth strategy, client manager | `docs/architecture.md` §2 |
 | `backend/app/resources/` | Catalog (discovery), reader (generic list/get/YAML), shaping (rows), envelope | `docs/api-contract.md` §1.2, §4, §8 |
 | `backend/app/services/` | Typed read models: the unified workload row, node rows | `docs/api-contract.md` §5, §6 |
-| `backend/app/admin/` | **Every write.** The funnel, preflight, diff, apply, scale, rollout, node drain | `docs/safety-model.md` |
+| `backend/app/admin/` | **Every write.** The funnel, preflight, diff, apply, scale, rollout, node drain, debug containers | `docs/safety-model.md` |
 | `backend/app/audit/` | Append-only, hash-chained trail: `record()`, `query()`, `verify()`, export | `docs/api-contract.md` §10 |
 | `backend/app/identity/` | Local password hashing, opaque sessions, LDAP search-and-bind, OIDC single sign-on, sign-in throttling | `docs/api-contract.md` §12 |
 | `backend/tests/` | pytest on SQLite. The fake Kubernetes client **raises** on an unstubbed call | — |

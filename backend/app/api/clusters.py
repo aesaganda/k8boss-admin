@@ -70,6 +70,11 @@ BASELINE_PREFLIGHT_CHECKS: tuple[dict, ...] = (
     {"verb": "list", "group": "rbac.authorization.k8s.io", "resource": "roles"},
     {"verb": "patch", "group": "apps", "resource": "deployments"},
     {"verb": "create", "group": "core", "resource": "pods", "subresource": "exec"},
+    # §7.4. Checked here rather than discovered on the Debug tab: this is a
+    # grant an operator is likely to have missed, because it is newer than the
+    # rest of this file and because "we can exec" reads like "we can debug".
+    {"verb": "patch", "group": "core", "resource": "pods",
+     "subresource": "ephemeralcontainers"},
     {"verb": "delete", "group": "core", "resource": "pods"},
     {"verb": "get", "group": "core", "resource": "secrets"},
 )

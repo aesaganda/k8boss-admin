@@ -39,6 +39,7 @@ from app.middleware.auth import AuthenticationMiddleware
 from app.api.access import router as access_router
 from app.api.audit import router as audit_router
 from app.api.clusters import router as clusters_router
+from app.api.debug import router as debug_router
 from app.api.events import router as events_router
 from app.api.exec_ws import router as exec_ws_router
 from app.api.health import router as health_router
@@ -132,6 +133,7 @@ app.include_router(nodes_router)
 app.include_router(access_router)
 app.include_router(audit_router)
 app.include_router(logs_router)
+app.include_router(debug_router)
 app.include_router(exec_ws_router)
 
 

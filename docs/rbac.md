@@ -136,6 +136,7 @@ these grants.
 | `create ""/pods/eviction` | §5 drain, pod half | The drain refuses at its own preflight, from inside the apply step — because permission to cordon a node is not permission to evict what runs on it, and finding that out three pods into a drain is not a discovery anyone wants. The console never falls back to deleting pods: delete ignores PodDisruptionBudgets |
 | `delete ""/pods` | The resource browser's pod delete | That one button is disabled. Distinct from eviction: a different action with a different confirm dialog |
 | `create ""/pods/exec` | §7 terminal | The terminal button is disabled with the reason. **This is the most dangerous grant in the file after a wildcard**: a shell in a pod can do whatever that pod's own ServiceAccount can, no diff is possible for a keystroke, and it bypasses every other control here. Withholding it is the only real control over it. The console additionally requires `ADMIN_ALLOW_MUTATIONS` for exec and audits the session on open and close |
+| `get,patch ""/pods/ephemeralcontainers` | §7.4 debug containers — `kubectl debug`'s ephemeral container | The Attach button is disabled with the reason; existing debug containers are still *listed*, because that listing reads the pod and needs only `get pods`. **A separate RBAC resource from `pods`**, and a separate grant from `pods/exec`: attaching a container and typing in one are different acts. It is nonetheless close to `pods/exec` in blast radius — the operator chooses the image, and a debug container shares the pod's network namespace, its volumes and (on request) the process namespace of an application container. `get` is needed as well as `patch` because the console reads the subresource to build the diff it shows before writing. Withhold it for a console that can exec into what is there but cannot add to it |
 
 ### The generic write is deliberately not granted
 
@@ -168,6 +169,7 @@ list   core/pods            core/services      core/namespaces
        rbac.authorization.k8s.io/roles
 patch  apps/deployments
 create core/pods/exec
+patch core/pods/ephemeralcontainers
 delete core/pods
 get    core/secrets
 ```

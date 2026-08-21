@@ -94,6 +94,20 @@ class Settings(BaseSettings):
             "other. Every reveal is audited regardless."
         ),
     )
+    debug_image: str = Field(
+        default="busybox:1.36",
+        validation_alias=AliasChoices("ADMIN_DEBUG_IMAGE", "debug_image"),
+        min_length=1,
+        max_length=512,
+        description=(
+            "The image a debug (ephemeral) container is attached with when the "
+            "operator does not name one. Not a gate — attaching one at all needs "
+            "admin_allow_mutations and patch pods/ephemeralcontainers — but a "
+            "default worth setting: an air-gapped cluster cannot pull "
+            "busybox:1.36 from Docker Hub, and the failure it produces is an "
+            "ImagePullBackOff on a pod somebody is already debugging."
+        ),
+    )
 
     # -- console authentication ------------------------------------------
     auth_enabled: bool = Field(
