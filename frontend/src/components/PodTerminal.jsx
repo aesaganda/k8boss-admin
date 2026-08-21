@@ -119,20 +119,32 @@ export function PodTerminal({
     [containers],
   );
 
+  // The pod's own containers, excluding §7.4 debug containers. This — not
+  // `entries` — is what decides ambiguity, because it is what the API server
+  // counts: it defaults the container only when `spec.containers` holds one,
+  // and ephemeral containers never enter that count. Keying off `entries`
+  // instead would mean attaching a debug container to a single-container pod
+  // made this terminal start demanding a choice it had not needed before, which
+  // is this console becoming stricter than the API it is a client of.
+  const own = useMemo(
+    () => entries?.filter((entry) => (entry.kind ?? 'container') !== 'ephemeral') ?? null,
+    [entries],
+  );
+
   const [chosen, setChosen] = useState(
     // A single-container pod is unambiguous, so it is selected. Anything else
     // waits for the operator: §7 refuses to default a container, and the reason
     // it gives applies just as hard to a shell as to a log — a root shell in
     // the wrong container of a payments pod looks exactly like a root shell in
     // the right one.
-    () => (entries && entries.length === 1 ? entries[0].name : null),
+    () => (own && own.length === 1 ? own[0].name : null),
   );
 
   // The prop wins when the caller fixed one. `null` from both is only safe when
   // the pod has exactly one container, which is the case the API server itself
   // defaults — see `resolve_container` in app/api/logs.py.
   const activeContainer = container ?? chosen;
-  const mustChoose = !container && entries != null && entries.length > 1 && !chosen;
+  const mustChoose = !container && own != null && own.length > 1 && !chosen;
 
   const [commandText, setCommandText] = useState(command);
   // Not connected until the operator asks. A terminal that opens a session the
@@ -399,7 +411,7 @@ export function PodTerminal({
         // right one* — and typing into the wrong container is worse, because it
         // also changes something.
         <Alert isInline variant="info" title="Choose a container" data-testid="pod-terminal-choose">
-          This pod has {entries.length} containers. The console will not pick one for you: a shell in the
+          This pod has {own.length} containers. The console will not pick one for you: a shell in the
           wrong container of this pod looks exactly like a shell in the right one, and this one can change
           things.
         </Alert>

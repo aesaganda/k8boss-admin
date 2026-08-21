@@ -111,9 +111,20 @@ export function DebugPanel({
   const supported = listing.data?.supported;
   const supportDetail = listing.data?.supportDetail;
 
+  // §7.4 returns the pod's own container names alongside the debug ones. They
+  // come from the same read, so they are current — and they include the *init*
+  // containers, which the §6 pod row deliberately does not carry. Without them
+  // the collision check below could not see a clash with an init container and
+  // would let the operator spend a request and an audit row to be told.
+  //
+  // The props remain the fallback for the first render, before the listing has
+  // answered.
+  const podContainers = listing.data?.podContainers ?? containers;
+  const podInitContainers = listing.data?.initContainers ?? initContainers;
+
   const taken = useMemo(
-    () => [...containers, ...initContainers, ...rows.map((row) => row.name)],
-    [containers, initContainers, rows],
+    () => [...podContainers, ...podInitContainers, ...rows.map((row) => row.name)],
+    [podContainers, podInitContainers, rows],
   );
 
   const onApplied = useCallback(() => {
@@ -367,7 +378,7 @@ export function DebugPanel({
         isOpen={dialogOpen}
         namespace={namespace}
         name={name}
-        containers={containers}
+        containers={podContainers}
         taken={taken}
         onClose={() => setDialogOpen(false)}
         onApplied={onApplied}

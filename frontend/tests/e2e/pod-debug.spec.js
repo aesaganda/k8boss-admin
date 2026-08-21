@@ -139,8 +139,12 @@ test.describe('the Debug tab', () => {
     await expect(page.getByTestId('error-state')).toHaveCount(0);
     await expect(page.locator('.pf-m-danger')).toHaveCount(0);
     // And the action is not offered, because there is nothing to offer it
-    // against.
-    await expect(page.getByTestId('debug-attach')).toHaveCount(0);
+    // against. Asserted through the accessible name rather than a test id:
+    // `ActionButton` sets its own `data-testid`, so a `debug-attach` locator
+    // would match nothing whether the button were rendered or not — an
+    // assertion that cannot fail is worse than no assertion.
+    await expect(page.getByRole('button', { name: 'Attach a debug container' })).toHaveCount(0);
+    await expect(page.getByTestId('debug-refresh')).toHaveCount(0);
   });
 
   test('a cluster whose support could not be determined is “unknown”, and the action stays available', async ({
@@ -233,6 +237,134 @@ test.describe('the Debug tab', () => {
     expect(posts).toHaveLength(2);
     expect(posts[1].dryRun).toBe(false);
     await expect(page.getByText('debugger-x4k2p is attached')).toBeVisible();
+  });
+
+  test('a terminated debug container reports when it started, not "Not started"', async ({ page }) => {
+    await mockApi(page, { preflight: ALLOW_ALL });
+    await openDebugTab(page);
+
+    // The row that says Terminated must not also say the container never
+    // started. `startedAt` lives on the terminated state too, and the two facts
+    // the contradiction conflates — ran and exited, versus never started — send
+    // an operator in opposite directions.
+    const row = page.getByRole('row', { name: /debugger-r8t5w/ });
+    // The pill shows the *reason* over the bare state, the same way a pod's
+    // `phase_detail` overrides its phase — "Error" is more use than
+    // "Terminated".
+    await expect(row).toContainText('Error');
+    // The Started column carries an age, because the container has one.
+    await expect(row).not.toContainText('Not started');
+    await expect(row).toContainText(/\d+[dhm]/);
+  });
+
+  test('clicking a suggested image fills the field', async ({ page }) => {
+    await mockApi(page, { preflight: ALLOW_ALL });
+    await openDebugTab(page);
+    await page.getByRole('button', { name: 'Attach a debug container' }).click();
+
+    // The chips carried an `href` and PatternFly's Label drops `onClick` on
+    // that branch, so they rendered as clickable, styled as clickable, and did
+    // nothing.
+    await page.getByTestId('debug-image-suggestion-nicolaka/netshoot:v0.13').click();
+    await expect(page.getByTestId('debug-image')).toHaveValue('nicolaka/netshoot:v0.13');
+  });
+
+  test('the container name the diff showed is the one that gets written', async ({ page }) => {
+    const posts = [];
+    await mockApi(page, {
+      preflight: ALLOW_ALL,
+      // Models the backend faithfully: with no name in the request it generates
+      // a *fresh* one per call, which is exactly what makes the carry
+      // necessary.
+      debugAttach: (body) => {
+        posts.push(body);
+        const generated = body.container || `debugger-gen${posts.length}`;
+        return {
+          dryRun: body.dryRun !== false,
+          applied: body.dryRun === false,
+          verb: 'patch',
+          target: { group: '', version: 'v1', resource: 'pods', namespace: 'prod',
+                    name: 'checkout-7d9f8b6c4-hk2xv', subresource: 'ephemeralcontainers' },
+          diff: {
+            before: 'spec: {}\n',
+            after: `spec:\n  ephemeralContainers:\n    - name: ${generated}\n`,
+            unified: `--- live\n+++ projected\n@@ -1,1 +1,3 @@\n spec: {}\n+  ephemeralContainers:\n+    - name: ${generated}\n`,
+            changed: true,
+          },
+          resourceVersion: '884214',
+          warnings: [],
+          auditId: 4021,
+          container: generated,
+          image: body.image || 'busybox:1.36',
+          targetContainer: null,
+          command: null,
+          tty: true,
+        };
+      },
+    });
+    await openDebugTab(page);
+
+    await page.getByRole('button', { name: 'Attach a debug container' }).click();
+    await page.getByRole('button', { name: 'Preview the change' }).click();
+    await expect(page.getByTestId('diff-view')).toBeVisible();
+
+    // The name in the diff the operator is looking at.
+    const previewed = posts[0].container ?? 'debugger-gen1';
+    await expect(page.getByTestId('diff-view')).toContainText(previewed);
+
+    await page.getByRole('button', { name: 'Attach', exact: true }).click();
+
+    // The confirming call must carry it. Without the carry the backend would
+    // generate a second name, and the container that appeared in the pod would
+    // not be the one whose diff was approved — rule 11.3 satisfied on screen
+    // and broken in the cluster.
+    expect(posts).toHaveLength(2);
+    expect(posts[1].container).toBe(previewed);
+    await expect(page.getByText(`${previewed} is attached`)).toBeVisible();
+  });
+
+  test('attaching a debug container does not make a single-container pod ambiguous', async ({
+    page,
+  }) => {
+    await mockApi(page, {
+      preflight: ALLOW_ALL,
+      // One application container plus one attached debug container — the §6
+      // row now carries both, tagged by `kind`.
+      pods: {
+        ...FIXTURES.pods,
+        items: [
+          {
+            ...FIXTURES.pods.items[0],
+            containers: [
+              { name: 'app', image: 'registry.example:5000/checkout:1.4.2', ready: true, restart_count: 0, kind: 'container' },
+              { name: 'debugger-x4k2p', image: 'busybox:1.36', ready: false, restart_count: 0, kind: 'ephemeral' },
+            ],
+          },
+          FIXTURES.pods.items[1],
+        ],
+      },
+    });
+    await page.goto('/pods');
+    await expectPageRendered(page, 'Pods');
+    await page.getByRole('gridcell', { name: 'Burstable', exact: true }).first().click();
+    await expect(page.getByTestId('pod-console')).toBeVisible();
+
+    // Logs: the API server still defaults the container, because it counts
+    // `spec.containers` only. A viewer that started refusing here would have
+    // become stricter than the API it is a client of — and would have broken
+    // its own log viewer as a side effect of somebody opening a shell.
+    // Asserted on the output pane rather than on the words "Choose a
+    // container": the picker's own placeholder option carries that text, so a
+    // text locator matches it whether the viewer is waiting or not.
+    await expect(page.getByTestId('log-output')).toBeVisible();
+    // The debug container is still selectable, and labelled as one.
+    const options = await page.getByTestId('log-container').locator('option').allTextContents();
+    expect(options).toContain('debugger-x4k2p (debug)');
+
+    // Terminal: same rule.
+    await page.getByRole('tab', { name: 'Terminal', exact: true }).click();
+    await expect(page.getByTestId('pod-terminal-choose')).toHaveCount(0);
+    await expect(page.getByTestId('pod-terminal-connect')).toBeEnabled();
   });
 
   test('the command box shows the argv it will send, so quoting decides nothing', async ({ page }) => {

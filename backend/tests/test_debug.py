@@ -536,6 +536,54 @@ def test_the_listing_joins_the_spec_to_the_status(db_engine, server):
     assert result["supported"] is True
 
 
+def test_a_container_that_ran_and_exited_reports_when_it_started(db_engine, server):
+    """`startedAt` lives on the terminated state too, and reading only the
+    running one would report `null` for a container the kubelet demonstrably
+    started — which §7.4 fixes as "has not started" and the UI renders as those
+    words, in the row whose State column says Terminated. The two cases that
+    null would conflate are diagnosed in opposite directions: a debug image
+    whose entrypoint ran and exited, versus one the node never started."""
+    server.pod = live_pod(
+        ephemeral=[{"name": "debugger-x4k2p", "image": "busybox:1.36"}],
+        statuses=[{"name": "debugger-x4k2p", "state": {"terminated": {
+            "exitCode": 0,
+            "startedAt": "2026-08-21T09:14:00Z",
+            "finishedAt": "2026-08-21T09:20:00Z",
+        }}}],
+    )
+
+    (row,) = debug_service.list_debug_containers(NAMESPACE, POD)["items"]
+
+    assert row["state"] == "Terminated"
+    assert row["reason"] == "Completed"
+    assert row["started_at"] == "2026-08-21T09:14:00Z"
+
+
+def test_a_waiting_container_really_has_no_start_time(db_engine, server):
+    """The one case where `null` is the truth. `state.waiting` carries no
+    `startedAt`, so the fallback above must not invent one."""
+    server.pod = live_pod(
+        ephemeral=[{"name": "debugger-x4k2p", "image": "busybox:1.36"}],
+        statuses=[{"name": "debugger-x4k2p",
+                   "state": {"waiting": {"reason": "ImagePullBackOff"}}}],
+    )
+
+    (row,) = debug_service.list_debug_containers(NAMESPACE, POD)["items"]
+
+    assert row["state"] == "Waiting"
+    assert row["started_at"] is None
+
+
+def test_the_listing_reports_the_pods_own_container_names(db_engine, server):
+    """So a client can refuse a name that is already taken without spending a
+    request and an audit row to be told. The init containers are the reason this
+    is here and not on the §6 pod row, which deliberately does not carry them."""
+    result = debug_service.list_debug_containers(NAMESPACE, POD)
+
+    assert result["podContainers"] == ["app", "envoy"]
+    assert result["initContainers"] == ["migrate"]
+
+
 def test_a_debug_container_the_kubelet_has_not_reported_on_has_no_state(db_engine, server):
     """`None` and not `Waiting`: the difference is whether the operator should
     keep waiting or go and look at the node."""

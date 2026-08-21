@@ -509,6 +509,7 @@ A §1.2 envelope of the pod's ephemeral containers, plus two additive keys:
 { "items": [ {"name","image","targetContainer","command","tty",
               "state","reason","started_at"} ],
   "continue": null, "remaining": null, "partial": false, "unavailable": [],
+  "podContainers": ["app", "envoy"], "initContainers": ["migrate"],
   "supported": true,
   "supportDetail": "The API server serves pods/ephemeralcontainers with verbs: get, patch, update." }
 ```
@@ -517,7 +518,16 @@ A §1.2 envelope of the pod's ephemeral containers, plus two additive keys:
   container at all**, which is a different fact from `Waiting`.
 - `command: null` means the image's own entrypoint runs. It is a real answer,
   not an unread value, and a client must not render it as §11.2's em dash.
-- `started_at` is `null` for a container that has not started.
+- `started_at` is the container's start time from whichever state carries it —
+  the API sets it on both `running` and `terminated`. It is `null` only for a
+  container that genuinely has not started (`waiting`, or no status yet).
+  Reporting a container that ran and exited as never started conflates two
+  faults with opposite fixes: a debug image whose entrypoint returned, and one
+  the node could not pull.
+- `podContainers` and `initContainers` are the pod's own container names, from
+  the same read. They are here so a client can offer the `targetContainer`
+  choices and refuse an already-taken name **before** spending a request and an
+  audit row — the §6 PodRow deliberately carries no init containers.
 - **`supported` is three-valued.** `true`/`false` come from the core group's
   discovery document; **`null` means it could not be read**, so whether the
   cluster serves ephemeral containers is unknown. A client that renders `null`
@@ -539,6 +549,14 @@ parsing the diff.
 Every field is optional. `image` omitted uses the console's configured default
 (`ADMIN_DEBUG_IMAGE`); `container` omitted is generated; `command` omitted runs
 the image's entrypoint.
+
+**A client that previews must replay the `container` it was given.** A generated
+name is fresh per request, so a confirming call that omits `container` again
+gets a *different* one — and the container that appears in the pod is then not
+the one whose diff the operator approved. The response returns `container` for
+exactly this reason; carry it into the confirming call the same way `dryRun`'s
+echoed `resourceVersion` is carried (§0.4). A client that never previews may
+omit it.
 
 - **It is a write and it goes through the funnel** (§0.2–§0.5): a
   `SelfSubjectAccessReview` on **`patch` `pods/ephemeralcontainers`** — RBAC

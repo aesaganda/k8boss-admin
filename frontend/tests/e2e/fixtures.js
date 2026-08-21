@@ -427,11 +427,31 @@ export const FIXTURES = {
         reason: 'ContainerCreating',
         started_at: null,
       },
+      {
+        name: 'debugger-r8t5w',
+        // A distinct image, so each row in this fixture is addressable on its
+        // own — two rows sharing one image makes every `getByText` on it a
+        // strict-mode violation waiting to happen.
+        image: 'ghcr.io/acme/probe:2.1',
+        targetContainer: null,
+        command: ['sh', '-c', 'exit 1'],
+        tty: false,
+        // Ran and exited. `started_at` is populated: `startedAt` lives on the
+        // terminated state too, and a row that said "Terminated" beside "Not
+        // started" would be the console contradicting itself about one
+        // container — and would send the operator looking for an image-pull
+        // failure that did not happen.
+        state: 'Terminated',
+        reason: 'Error',
+        started_at: '2026-08-21T09:10:00Z',
+      },
     ],
     continue: null,
     remaining: null,
     partial: false,
     unavailable: [],
+    podContainers: ['app'],
+    initContainers: [],
     supported: true,
     supportDetail: 'The API server serves pods/ephemeralcontainers with verbs: get, patch, update.',
   },
@@ -442,6 +462,8 @@ export const FIXTURES = {
     remaining: null,
     partial: false,
     unavailable: [],
+    podContainers: ['app'],
+    initContainers: [],
     supported: false,
     supportDetail:
       "This cluster's core API group does not serve pods/ephemeralcontainers. Ephemeral containers need " +
@@ -454,6 +476,8 @@ export const FIXTURES = {
     remaining: null,
     partial: false,
     unavailable: [],
+    podContainers: ['app'],
+    initContainers: [],
     // Not `false`. Discovery could not be read, so whether this cluster serves
     // ephemeral containers is unknown — and the panel must not render that as
     // "your cluster is too old".

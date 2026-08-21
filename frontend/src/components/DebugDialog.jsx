@@ -30,7 +30,7 @@
  * and render a value that may be wrong, the field is optional and the *diff*
  * shows which image the API server was actually asked for — before the write.
  */
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   Checkbox,
@@ -89,6 +89,9 @@ export function DebugDialog({
   const [target, setTarget] = useState('');
   const [commandText, setCommandText] = useState('');
   const [tty, setTty] = useState(true);
+  // Not state: changing it must not re-render, and it is read only inside
+  // `request`. See the comment there for what it is for.
+  const previewedName = useRef(null);
 
   // Reset on every opening: a dialog reopened for a different pod that kept the
   // previous pod's target container would preflight one thing and patch
@@ -100,6 +103,10 @@ export function DebugDialog({
     setTarget('');
     setCommandText('');
     setTty(true);
+    // Cleared with the form: a name projected for the previous pod, replayed
+    // into this one, would be the console choosing a container name from a
+    // dialog the operator has already closed.
+    previewedName.current = null;
   }, [isOpen, namespace, name]);
 
   const argv = useMemo(() => toArgv(commandText), [commandText]);
@@ -132,16 +139,31 @@ export function DebugDialog({
       confirmLabel="Attach"
       canPreview={!nameError}
       previewDisabledReason={nameError}
-      request={(dryRun) =>
-        podsApi.attachDebugContainer(namespace, name, {
+      request={async (dryRun) => {
+        // The name the dry run projected, replayed on the confirming call.
+        //
+        // This is the difference between previewing the write and previewing
+        // *a* write. When the operator leaves the name blank the backend
+        // generates one, and it generates a fresh one per request — so without
+        // this the diff on screen would say `debugger-x4k2p` and the container
+        // that appeared in the pod would be `debugger-m7q3v`. The operator
+        // approved a specific object; they must get that object.
+        //
+        // Carried by the client because the backend is stateless between the
+        // two calls, which is the same reason `MutationDialog` carries
+        // `resourceVersion` across them. A name the operator typed always wins.
+        const chosen = container.trim() || (dryRun ? null : previewedName.current);
+        const result = await podsApi.attachDebugContainer(namespace, name, {
           image: image.trim() || null,
-          container: container.trim() || null,
+          container: chosen,
           targetContainer: target || null,
           command: argv.length ? argv : null,
           tty,
           dryRun,
-        })
-      }
+        });
+        if (dryRun) previewedName.current = result?.container ?? null;
+        return result;
+      }}
       onClose={onClose}
       onApplied={onApplied}
       summarize={(result) =>
@@ -202,7 +224,12 @@ export function DebugDialog({
                 color={image.trim() === suggestion.image ? 'blue' : 'grey'}
                 isCompact
                 onClick={() => setImage(suggestion.image)}
-                href="#"
+                // No `href`. PatternFly's Label renders its child as an anchor
+                // when one is given and drops `onClick` on that branch, so the
+                // chips looked clickable, showed the hover styling, and did
+                // nothing. Without it the child is a real <button> and the
+                // handler is wired — and `pf-m-clickable` is still applied,
+                // because `onClick` alone satisfies Label's isClickable test.
                 data-testid={`debug-image-suggestion-${suggestion.image}`}
                 title={suggestion.why}
               >

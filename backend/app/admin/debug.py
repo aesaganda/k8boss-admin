@@ -298,6 +298,23 @@ def _row(spec: Any, status: Any) -> dict[str, Any]:
     is whether the operator should keep waiting or go and look at the node.
     """
     state, reason = container_state(status)
+    # Read from whichever half of the state carries it. The API sets `startedAt`
+    # on *both* `running` and `terminated`, and only `waiting` genuinely lacks
+    # one — so reading the running path alone reports `null` for a container the
+    # kubelet demonstrably started and then watched exit.
+    #
+    # That null is not harmless: §7.4 fixes it as "has not started", and the
+    # Debug tab renders it as the words "Not started" in the row whose State
+    # column says "Terminated". The console would be contradicting itself about
+    # one container. Worse, the two cases it conflates are diagnosed in opposite
+    # directions — a debug image whose entrypoint ran and exited (a bad command,
+    # a non-shell image) versus one the node never started (ImagePullBackOff) —
+    # and the operator who reads the second story about the first attaches
+    # another debug container, which is an irreversible change to a live pod.
+    started_at = (
+        get_field(status, "state", "running", "startedAt")
+        or get_field(status, "state", "terminated", "startedAt")
+    )
     return {
         "name": get_field(spec, "name"),
         "image": get_field(spec, "image"),
@@ -306,7 +323,7 @@ def _row(spec: Any, status: Any) -> dict[str, Any]:
         "tty": bool(get_field(spec, "tty", default=False)),
         "state": state,
         "reason": reason,
-        "started_at": get_field(status, "state", "running", "startedAt"),
+        "started_at": started_at,
         # `restarts` is absent rather than 0: an ephemeral container is never
         # restarted by the kubelet, so a restart count would be a field that is
         # always zero and reads as though it could be otherwise.
@@ -324,6 +341,7 @@ def list_debug_containers(namespace: str, name: str) -> dict[str, Any]:
     we never saw.
     """
     pod = _read_pod(namespace, name)
+    containers, init_containers, _ephemeral = _names(pod)
     statuses = _status_index(pod)
     items = [
         _row(spec, statuses.get(str(get_field(spec, "name"))))
@@ -338,6 +356,18 @@ def list_debug_containers(namespace: str, name: str) -> dict[str, Any]:
     # feature it may well have.
     result["supported"] = state["supported"]
     result["supportDetail"] = state["detail"]
+    # The other two lists of names in this pod, which the caller needs for two
+    # things it otherwise cannot do: offer the process-namespace targets, and
+    # refuse a container name that is already taken *before* spending a request
+    # and an audit row to be told so.
+    #
+    # They are here rather than on the §6 PodRow because that row deliberately
+    # carries no init containers, and adding them would change what the Logs and
+    # Terminal pickers offer. They are real values from a pod that was read —
+    # this endpoint raises rather than answering with an empty envelope when it
+    # could not read the pod — so an empty list here is a genuine zero.
+    result["podContainers"] = containers
+    result["initContainers"] = init_containers
     return result
 
 
