@@ -84,11 +84,22 @@ identity do X" and returns an answer.
 | `get,list,watch ""/serviceaccounts` | §8 ServiceAccounts | That tab shows `forbidden` |
 | `get,list,watch ""/persistentvolumeclaims,persistentvolumes` | §8 storage | Those tabs show `forbidden` |
 | `get,list,watch storage.k8s.io/storageclasses` | §8 StorageClasses, including `is_default` | That tab shows `forbidden`; PVC rows still render, with `storage_class` as the name only |
+| `get,list,watch storage.k8s.io/volumeattributesclasses` | §8.1 Storage's Volume Attributes Classes tab | That tab shows `forbidden`. On a cluster old enough not to serve the API at all, this permission is moot — the tab shows `unsupported`, an ordinary state, regardless of the grant |
 | `get,list,watch rbac.authorization.k8s.io/roles,rolebindings,clusterroles,clusterrolebindings` | §8 Access page | Access page shows `forbidden`. Reading RBAC is not the same privilege as holding it, but it is a map of the cluster's permissions — a reasonable thing to withhold |
 | `get,list,watch networking.k8s.io/ingresses` | §8 Ingresses | Ingresses tab shows `forbidden` |
-| `get,list,watch networking.k8s.io/ingressclasses` | The `class` column for an Ingress whose spec names none | The column is blank rather than wrong |
-| `get,list,watch discovery.k8s.io/endpointslices` | §8 Services' `endpoint_count` | The column is **`null`**, with an `unavailable` entry — not `0`, which would claim the Service backs nothing. A Service that genuinely has no EndpointSlice still reports `0`, which is a real zero |
+| `get,list,watch networking.k8s.io/ingressclasses` | The `class` column for an Ingress whose spec names none, and §8.1 Network's own Ingress Classes tab | The Ingress column is blank rather than wrong; the Ingress Classes tab shows `forbidden` |
+| `get,list,watch networking.k8s.io/networkpolicies` | §8.1 Network's Network Policies tab | That tab shows `forbidden` |
+| `get,list,watch discovery.k8s.io/endpointslices` | §8 Services' `endpoint_count`, and §8.1 Network's own Endpoint Slices tab | The `endpoint_count` column is **`null`**, with an `unavailable` entry — not `0`, which would claim the Service backs nothing. A Service that genuinely has no EndpointSlice still reports `0`, which is a real zero. The Endpoint Slices tab shows `forbidden` |
 | `get,list,watch ""/endpoints` | The Network page's endpoint listing | That table shows `forbidden` |
+| `get,list,watch autoscaling/horizontalpodautoscalers` | §8.1 Configuration's HPAs tab | That tab shows `forbidden` |
+| `get,list,watch autoscaling.k8s.io/verticalpodautoscalers` | §8.1 Configuration's VPAs tab | That tab shows `forbidden`. VerticalPodAutoscaler is a CRD, not a built-in API — on the large majority of clusters without it installed, the tab shows `unsupported` regardless of this grant |
+| `get,list,watch policy/poddisruptionbudgets` | §8.1 Configuration's Pod Disruption Budgets tab, alongside its existing drain-planning use below | That tab shows `forbidden` |
+| `get,list,watch ""/resourcequotas,limitranges` | §8.1 Configuration's Resource Quotas and Limit Ranges tabs | Those tabs show `forbidden` |
+| `get,list,watch scheduling.k8s.io/priorityclasses` | §8.1 Configuration's Priority Classes tab | That tab shows `forbidden` |
+| `get,list,watch node.k8s.io/runtimeclasses` | §8.1 Configuration's Runtime Classes tab | That tab shows `forbidden` |
+| `get,list,watch coordination.k8s.io/leases` | §8.1 Configuration's Leases tab | That tab shows `forbidden` |
+| `get,list,watch admissionregistration.k8s.io/mutatingwebhookconfigurations,validatingwebhookconfigurations` | §8.1 Configuration's two webhook-configuration tabs | Those tabs show `forbidden` |
+| `get,list,watch gateway.networking.k8s.io/gateways,gatewayclasses,httproutes,grpcroutes,referencegrants,backendtlspolicies` | §8.1 the whole Gateway (beta) page | Each tab shows `forbidden`. On a cluster without Gateway API installed at all, every tab shows `unsupported` instead, regardless of this grant — an ordinary state, not a permissions problem |
 
 > ### The Secret rule is the most privileged line in the shipped role
 >
@@ -113,6 +124,12 @@ lists what discovery reports, and browsing a resource the role does not cover
 returns `403 rbac_denied` naming it. A cluster's CRDs are not enumerable in
 advance, so the shipped reader role does not try to; grant what you want
 browsable.
+
+§8.2's Custom Resources page reads the same catalog and is governed by the same
+two rows above — it introduces no permission of its own. Grouping the catalog
+by API group does not change what an operator can see; a CRD this role does
+not name still lists in Custom Resources (from `customresourcedefinitions`
+alone) and still returns `forbidden` the moment its instances are browsed.
 
 ---
 

@@ -175,9 +175,12 @@ rules:
     verbs: ["get", "list", "watch"]
 
   # §8 storage classes — `is_default` is read from the annotation on the class,
-  # so the Storage page cannot mark a default without this.
+  # so the Storage page cannot mark a default without this. `volumeattributesclasses`
+  # is a newer, still-graduating API (VolumeAttributesClass); a cluster old
+  # enough not to serve it renders the tab's `unsupported` — not this rule's
+  # absence — so there is nothing to degrade to if it is ever dropped.
   - apiGroups: ["storage.k8s.io"]
-    resources: ["storageclasses", "volumeattachments", "csidrivers"]
+    resources: ["storageclasses", "volumeattachments", "csidrivers", "volumeattributesclasses"]
     verbs: ["get", "list", "watch"]
 
   # §8 access rows. Reading RBAC is not the same privilege as holding it, but it
@@ -195,6 +198,52 @@ rules:
   # preview a drain plan on a read-only install.
   - apiGroups: ["policy"]
     resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list", "watch"]
+
+  # §8 Configuration page — autoscaling and disruption controls. HPAs are a
+  # built-in API and will list on any cluster; VerticalPodAutoscaler is a CRD
+  # (the `autoscaling.k8s.io` VPA project, not shipped with Kubernetes), so
+  # `verticalpodautoscalers` degrades to the tab's `unsupported` state on the
+  # large majority of clusters that do not have it installed — expected, not a
+  # sign this rule is wrong.
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["autoscaling.k8s.io"]
+    resources: ["verticalpodautoscalers"]
+    verbs: ["get", "list", "watch"]
+
+  # §8 Configuration page — scheduling and workload-identity objects that carry
+  # no secret material, read purely for the browser: what priority a pod can
+  # claim, what runtime a sandboxed pod asks for, who currently holds a lease.
+  - apiGroups: ["scheduling.k8s.io"]
+    resources: ["priorityclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["node.k8s.io"]
+    resources: ["runtimeclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch"]
+
+  # §8 Configuration page — admission webhook configurations. These describe
+  # what the cluster's admission chain does to every write; reading them is a
+  # browse, not a change to what they enforce.
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["mutatingwebhookconfigurations", "validatingwebhookconfigurations"]
+    verbs: ["get", "list", "watch"]
+
+  # Gateway (beta) page. Gateway API is CRD-backed and frequently absent — on a
+  # cluster without it installed, every resource below degrades to the same
+  # `unsupported` "not present on this cluster" state §1.2 already defines for
+  # a missing Ingress controller or missing metrics.k8s.io, not an error.
+  # `backendtrafficpolicies` is deliberately not granted here: that kind's real
+  # API group depends on which Gateway API implementation a cluster runs (e.g.
+  # Envoy Gateway ships it under `gateway.envoyproxy.io`, not
+  # `gateway.networking.k8s.io`), and granting the wrong group would be a rule
+  # that looks like coverage and grants nothing.
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["gateways", "gatewayclasses", "httproutes", "grpcroutes", "referencegrants", "backendtlspolicies"]
     verbs: ["get", "list", "watch"]
 
   # §4 generic browse. The resource browser reaches anything the cluster serves,

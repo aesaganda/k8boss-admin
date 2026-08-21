@@ -356,7 +356,26 @@ export function DataTable({
   );
 
   let body;
-  if (error) {
+  if (error?.code === 'unsupported') {
+    // §1.2: `unsupported` is not an error — it is "this cluster does not serve
+    // that API" (no Ingress CRDs, no metrics.k8s.io, and now no Gateway API /
+    // VPA / VolumeAttributesClasses on plenty of real clusters). Until this
+    // branch existed, a primary list call answering 501 fell into the `error`
+    // case below and rendered the same red "Could not load these resources"
+    // panel as an RBAC denial or a network failure — training operators to
+    // ignore red on the one page in the console where red is supposed to mean
+    // something. `error.hint` carries whatever `resolve()` could say about it
+    // (e.g. "That group serves v1beta1 on this cluster"), which is worth
+    // showing; there is nothing to retry, so no retry action is offered.
+    body = fullWidthCell(
+      <EmptyState
+        title="Not present on this cluster"
+        description={
+          error.hint || 'This cluster does not serve that API. Nothing is wrong — there is simply nothing to show.'
+        }
+      />,
+    );
+  } else if (error) {
     // The table keeps its header so the page does not visibly collapse, and the
     // failure is stated in place of the rows rather than as an empty grid.
     body = fullWidthCell(<ErrorState title="Could not load these resources" error={error} onRetry={onRetry} />);

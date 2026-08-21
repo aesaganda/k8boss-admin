@@ -43,6 +43,7 @@ import { useGates } from './_data';
 import {
   ActionButton,
   ChipList,
+  genericTab,
   Muted,
   NoClusterState,
   ResourceTabsPage,
@@ -292,6 +293,55 @@ export default function Config() {
         ],
         detail: (row) => <SecretDetail row={row} gate={gate} />,
       },
+
+      genericTab({ key: 'hpas', title: 'HPAs', group: 'autoscaling', version: 'v2', plural: 'horizontalpodautoscalers', namespaced: true }),
+      // VerticalPodAutoscaler is a CRD, not a built-in API — this tab shows
+      // "Not present on this cluster" (§ unsupported) on most clusters, which
+      // is expected and not an error.
+      genericTab({ key: 'vpas', title: 'VPAs', group: 'autoscaling.k8s.io', version: 'v1', plural: 'verticalpodautoscalers', namespaced: true }),
+      genericTab({
+        key: 'poddisruptionbudgets',
+        title: 'Pod Disruption Budgets',
+        group: 'policy',
+        version: 'v1',
+        plural: 'poddisruptionbudgets',
+        namespaced: true,
+      }),
+      genericTab({ key: 'resourcequotas', title: 'Resource Quotas', group: 'core', version: 'v1', plural: 'resourcequotas', namespaced: true }),
+      genericTab({ key: 'limitranges', title: 'Limit Ranges', group: 'core', version: 'v1', plural: 'limitranges', namespaced: true }),
+      genericTab({
+        key: 'priorityclasses',
+        title: 'Priority Classes',
+        group: 'scheduling.k8s.io',
+        version: 'v1',
+        plural: 'priorityclasses',
+        namespaced: false,
+      }),
+      genericTab({
+        key: 'runtimeclasses',
+        title: 'Runtime Classes',
+        group: 'node.k8s.io',
+        version: 'v1',
+        plural: 'runtimeclasses',
+        namespaced: false,
+      }),
+      genericTab({ key: 'leases', title: 'Leases', group: 'coordination.k8s.io', version: 'v1', plural: 'leases', namespaced: true }),
+      genericTab({
+        key: 'mutatingwebhookconfigurations',
+        title: 'Mutating Webhook Configurations',
+        group: 'admissionregistration.k8s.io',
+        version: 'v1',
+        plural: 'mutatingwebhookconfigurations',
+        namespaced: false,
+      }),
+      genericTab({
+        key: 'validatingwebhookconfigurations',
+        title: 'Validating Webhook Configurations',
+        group: 'admissionregistration.k8s.io',
+        version: 'v1',
+        plural: 'validatingwebhookconfigurations',
+        namespaced: false,
+      }),
     ],
     [gate],
   );

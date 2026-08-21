@@ -24,7 +24,7 @@ import {
 } from '../components/ui';
 import { useCluster } from '../contexts/ClusterContext';
 import { objectAgeSeconds, objectName, objectNamespace } from './_data';
-import { ChipList, Muted, NoClusterState, ResourceTabsPage, YamlPanel } from './_parts';
+import { ChipList, genericTab, Muted, NoClusterState, ResourceTabsPage, YamlPanel } from './_parts';
 
 /** Ready / not-ready address tallies from a core/v1 Endpoints object. */
 function endpointTallies(row) {
@@ -337,6 +337,31 @@ export default function Network() {
           />
         ),
       },
+
+      genericTab({
+        key: 'endpointslices',
+        title: 'Endpoint Slices',
+        group: 'discovery.k8s.io',
+        version: 'v1',
+        plural: 'endpointslices',
+        namespaced: true,
+      }),
+      genericTab({
+        key: 'ingressclasses',
+        title: 'Ingress Classes',
+        group: 'networking.k8s.io',
+        version: 'v1',
+        plural: 'ingressclasses',
+        namespaced: false,
+      }),
+      genericTab({
+        key: 'networkpolicies',
+        title: 'Network Policies',
+        group: 'networking.k8s.io',
+        version: 'v1',
+        plural: 'networkpolicies',
+        namespaced: true,
+      }),
     ],
     [],
   );
@@ -347,7 +372,7 @@ export default function Network() {
 
   return (
     <ResourceTabsPage
-      title="Networking"
+      title="Network"
       subtitle="Services, Ingresses and the addresses behind them. This console reads no service mesh — what is here is what the API server serves."
       tabs={tabs}
     />
