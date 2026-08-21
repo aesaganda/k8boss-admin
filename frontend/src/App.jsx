@@ -67,9 +67,11 @@ const Pods = lazyPage('Pods', () => import('./pages/Pods'));
 const Network = lazyPage('Network', () => import('./pages/Network'));
 const Config = lazyPage('Config', () => import('./pages/Config'));
 const Storage = lazyPage('Storage', () => import('./pages/Storage'));
+const Gateway = lazyPage('Gateway', () => import('./pages/Gateway'));
 const Access = lazyPage('Access', () => import('./pages/Access'));
 const Events = lazyPage('Events', () => import('./pages/Events'));
 const Explorer = lazyPage('Explorer', () => import('./pages/Explorer'));
+const CustomResources = lazyPage('CustomResources', () => import('./pages/CustomResources'));
 const Clusters = lazyPage('Clusters', () => import('./pages/Clusters'));
 const Audit = lazyPage('Audit', () => import('./pages/Audit'));
 const Users = lazyPage('Users', () => import('./pages/Users'));
@@ -107,6 +109,7 @@ function ConsoleRoutes() {
               <Route path="network" element={<Network />} />
               <Route path="config" element={<Config />} />
               <Route path="storage" element={<Storage />} />
+              <Route path="gateway" element={<Gateway />} />
               <Route path="access" element={<Access />} />
               <Route path="events" element={<Events />} />
 
@@ -114,6 +117,13 @@ function ConsoleRoutes() {
                   the catalog, and the same page renders a selected listing. */}
               <Route path="explorer" element={<Explorer />} />
               <Route path="explorer/:group/:version/:plural" element={<Explorer />} />
+
+              {/* Custom Resources: the same discovery catalog as the explorer,
+                  grouped by API group and filtered down to the ones that are
+                  not built into Kubernetes — a curated view for "what CRDs are
+                  installed", where the explorer stays the raw, everything
+                  browser. */}
+              <Route path="custom-resources" element={<CustomResources />} />
 
               <Route path="clusters" element={<Clusters />} />
               <Route path="audit" element={<Audit />} />
