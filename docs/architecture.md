@@ -166,6 +166,7 @@ reason.
 | `admin/scale.py` | Scale (via `/scale`), restart (template annotation), suspend |
 | `admin/rollout.py` | Revision history — ReplicaSets for Deployments, ControllerRevisions for the rest — and rollback |
 | `admin/nodes.py` | Cordon, and the drain planner: classify every pod, then execute per-pod |
+| `admin/node_debug.py` | §5.5 node debug pods: build the host-mounted pod, the second gate, find them again by label, remove them. The largest grant in the product |
 | `admin/debug.py` | §7.4 debug containers: attach an ephemeral container to a running pod, and decide from discovery — three-valued — whether the cluster serves them at all |
 | `audit/recorder.py` | `record()` from the funnel and from the two privileged reads; `record_console_event()` for sign-ins and user changes; `query()`, `stream()` and `verify_chain()` for §10 |
 | `audit/integrity.py` | The hash chain. A flush listener that links every new record, and `verify()` — which reports `intact`, `broken` or `partial`, and never claims the third is the first |
@@ -189,6 +190,7 @@ reason.
 | `components/DiffView.jsx`, `YamlEditor.jsx` | Rendering the unified diff; editing a manifest |
 | `components/{Scale,Restart,Suspend,Rollback,Delete,Cordon,Drain,Debug}Dialog.jsx` | The eight actions, all over `MutationDialog` |
 | `components/LogViewer.jsx`, `PodTerminal.jsx` | The two WebSocket surfaces. Neither defaults a container on a multi-container pod |
+| `components/NodeDebug{Panel,Dialog}.jsx` | §5.5's node Debug section. Deliberately not shared with `DebugPanel`: one of these can be removed and the other cannot |
 | `components/DebugPanel.jsx` | The Debug tab: what is already attached, the attach action, and a terminal bound to the container it created |
 | `pages/` | One per route; `_data.js` and `_parts.jsx` hold the shared fetch and row helpers |
 

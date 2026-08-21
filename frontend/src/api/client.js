@@ -516,6 +516,41 @@ export const nodes = {
   cordon: (name, body) => api.post(`/nodes/${encodeURIComponent(name)}/cordon`, body),
   /** body: { dryRun, gracePeriodSeconds, ignoreDaemonSets, deleteEmptyDirData, force } */
   drain: (name, body) => api.post(`/nodes/${encodeURIComponent(name)}/drain`, body),
+
+  /**
+   * Debug pods this console created for one node (§5.5).
+   *
+   * The envelope carries `enabled` — this deployment's two gates answered
+   * together — `enabledDetail`, and `namespace`, which is where a new pod would
+   * appear. The namespace is not cosmetic: an operator is about to be asked to
+   * confirm a privileged pod, and "where" is part of what they are confirming.
+   */
+  debugPods: (name) => api.get(`/nodes/${encodeURIComponent(name)}/debug`),
+
+  /**
+   * Create a debug pod on this node (§5.5).
+   * body: `{ image, writableHostFilesystem, dryRun }`.
+   *
+   * The most privileged object this console creates: pinned to the node,
+   * tolerating every taint, sharing the host PID and network namespaces, with
+   * the node's root filesystem at /host. The whole manifest comes back in the
+   * diff, which is how all of that gets disclosed before the confirming call.
+   */
+  createDebugPod: (name, body) => api.post(`/nodes/${encodeURIComponent(name)}/debug`, body),
+
+  /**
+   * Remove one (§5.5). `dryRun` is a query parameter, not a body: DELETE bodies
+   * are handled inconsistently by proxies and HTTP clients, and a `dryRun` that
+   * went missing in transit would turn a projection into a deletion.
+   *
+   * Only removes pods this console created — anything else is `404 not_found`
+   * from this route rather than a delete.
+   */
+  deleteDebugPod: (name, pod, params) =>
+    api.del(
+      `/nodes/${encodeURIComponent(name)}/debug/${encodeURIComponent(pod)}`,
+      params,
+    ),
 };
 
 export const namespaces = {

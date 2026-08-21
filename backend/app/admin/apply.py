@@ -249,6 +249,48 @@ def patch_fn(
     return apply_fn
 
 
+def create_fn(
+    group: str,
+    version: str,
+    plural: str,
+    body: Any,
+    *,
+    namespace: str | None = None,
+    name: str | None = None,
+):
+    """Build the ``apply_fn`` the funnel calls for a create: one POST.
+
+    The counterpart of :func:`patch_fn`, and here for the same reason that one
+    is: so that every create in this codebase is the *same request*, differing
+    only in the body. :func:`create_from_yaml` builds its object by parsing an
+    operator's document; :mod:`app.admin.node_debug` builds one in Python. Two
+    hand-rolled POSTs would be two places for ``dryRun`` to be spelled, and the
+    one that got it wrong would preview a write it was not about to make.
+
+    ``name`` is for the error context only — it is not put in the path, because
+    a create posts to the *collection*. It may be ``None`` for an object using
+    ``generateName``, where the name is not known until the API server answers.
+    """
+    path = reader.resource_path(group, version, plural, namespace=namespace)
+    context = {
+        "verb": "create", "group": group, "version": version, "resource": plural,
+        "namespace": namespace, "name": name,
+    }
+
+    def apply_fn(is_dry_run: bool) -> tuple[dict[str, Any] | None, list[str]]:
+        try:
+            created, warnings = request_json(
+                "POST", path,
+                query=[("dryRun", DRY_RUN_ALL if is_dry_run else None)],
+                body=body,
+            )
+        except ApiException as e:
+            raise from_api_exception(e, context=context) from e
+        return created, warnings
+
+    return apply_fn
+
+
 # --------------------------------------------------------------------------- #
 # Documents
 # --------------------------------------------------------------------------- #
@@ -464,21 +506,6 @@ def create_from_yaml(
         # a different namespace be created somewhere the operator did not read.
         body.setdefault("metadata", {})["namespace"] = target_namespace
 
-    path = reader.resource_path(normalized, version, plural, namespace=target_namespace)
-
-    def apply_fn(is_dry_run: bool) -> tuple[dict[str, Any] | None, list[str]]:
-        try:
-            created, warnings = request_json(
-                "POST", path,
-                query=[("dryRun", DRY_RUN_ALL if is_dry_run else None)],
-                body=body,
-            )
-        except ApiException as e:
-            raise from_api_exception(
-                e, context={**context, "namespace": target_namespace, "name": name},
-            ) from e
-        return created, warnings
-
     return mutate(
         verb="create",
         group=normalized,
@@ -487,7 +514,10 @@ def create_from_yaml(
         namespace=target_namespace,
         name=name,
         dry_run=dry_run,
-        apply_fn=apply_fn,
+        apply_fn=create_fn(
+            normalized, version, plural, body,
+            namespace=target_namespace, name=name,
+        ),
         before=None,
         detail=f"create {info['kind'] or plural} {name or '(generated name)'}",
     )
@@ -693,6 +723,7 @@ __all__ = [
     "MERGE_PATCH",
     "PROPAGATION_POLICIES",
     "STRATEGIC_MERGE_PATCH",
+    "create_fn",
     "create_from_yaml",
     "delete_resource",
     "parse_document",

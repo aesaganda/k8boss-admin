@@ -108,6 +108,53 @@ class Settings(BaseSettings):
             "ImagePullBackOff on a pod somebody is already debugging."
         ),
     )
+    node_debug_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("ADMIN_NODE_DEBUG_ENABLED", "node_debug_enabled"),
+        description=(
+            "Allows a node debug pod: a pod pinned to one node with the host "
+            "filesystem mounted and the host PID namespace shared. Its own gate, "
+            "on top of admin_allow_mutations, for the same reason "
+            "secret_reveal_enabled has one — this is a larger blast radius than "
+            "the rest of the write surface put together, and an operator may "
+            "reasonably want every other write without it. A shell in such a pod "
+            "is root on the machine: it can read every Secret the kubelet has "
+            "written to disk, edit static pod manifests, and see every process on "
+            "the node. Leaving it off is not a restriction on what an operator "
+            "may do, it is a decision about what this console can be used to do."
+        ),
+    )
+    node_debug_namespace: str = Field(
+        default="default",
+        validation_alias=AliasChoices("ADMIN_NODE_DEBUG_NAMESPACE", "node_debug_namespace"),
+        min_length=1,
+        max_length=253,
+        description=(
+            "Namespace the node debug pod is created in. Configurable because the "
+            "namespace decides which PodSecurity level admits it: a cluster that "
+            "enforces `restricted` everywhere needs one namespace labelled "
+            "`privileged` for this to be possible at all, and pinning the console "
+            "to that namespace keeps the exception in one auditable place rather "
+            "than wherever the operator's namespace selector happened to be."
+        ),
+    )
+
+    node_debug_max_seconds: int = Field(
+        default=3600,
+        validation_alias=AliasChoices("ADMIN_NODE_DEBUG_MAX_SECONDS", "node_debug_max_seconds"),
+        ge=0,
+        le=86400,
+        description=(
+            "Wall-clock limit on a node debug pod's container, as "
+            "spec.activeDeadlineSeconds. 0 means unbounded. This is the one "
+            "mitigation available for the hazard this feature cannot otherwise "
+            "close: nothing deletes the pod when the operator walks away, so an "
+            "unattended shell with the node's filesystem attached would otherwise "
+            "run until somebody noticed. Be clear about what it does — the "
+            "kubelet stops the *container* at the deadline and marks the pod "
+            "Failed; the pod object stays and still has to be removed."
+        ),
+    )
 
     # -- console authentication ------------------------------------------
     auth_enabled: bool = Field(

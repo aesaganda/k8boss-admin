@@ -154,6 +154,7 @@ these grants.
 | `delete ""/pods` | The resource browser's pod delete | That one button is disabled. Distinct from eviction: a different action with a different confirm dialog |
 | `create ""/pods/exec` | §7 terminal | The terminal button is disabled with the reason. **This is the most dangerous grant in the file after a wildcard**: a shell in a pod can do whatever that pod's own ServiceAccount can, no diff is possible for a keystroke, and it bypasses every other control here. Withholding it is the only real control over it. The console additionally requires `ADMIN_ALLOW_MUTATIONS` for exec and audits the session on open and close |
 | `get,patch ""/pods/ephemeralcontainers` | §7.4 debug containers — `kubectl debug`'s ephemeral container | The Attach button is disabled with the reason; existing debug containers are still *listed*, because that listing reads the pod and needs only `get pods`. **A separate RBAC resource from `pods`**, and a separate grant from `pods/exec`: attaching a container and typing in one are different acts. It is nonetheless close to `pods/exec` in blast radius — the operator chooses the image, and a debug container shares the pod's network namespace, its volumes and (on request) the process namespace of an application container. `get` is needed as well as `patch` because the console reads the subresource to build the diff it shows before writing. Withhold it for a console that can exec into what is there but cannot add to it |
+| `create ""/pods` | §5.5 node debug pods, and §4's create from the YAML editor | Both, together — RBAC cannot separate them. **This is the grant to think hardest about, and the one RBAC is worst at describing.** A `SelfSubjectAccessReview` has no field-level granularity: there is no verb for `hostPath`, `hostPID` or `privileged`, so `create pods` for an nginx pod is the same permission as `create pods` for one that mounts the node's root filesystem. PodSecurityPolicy used to gate that and was removed in 1.25; its replacement, Pod Security admission, is namespace-label-based. The controls that really apply are `ADMIN_NODE_DEBUG_ENABLED` (off by default) and the `pod-security.kubernetes.io/enforce` label on `ADMIN_NODE_DEBUG_NAMESPACE`. Withholding this rule disables node debug pods *and* object creation from the editor |
 
 ### The generic write is deliberately not granted
 
@@ -187,6 +188,7 @@ list   core/pods            core/services      core/namespaces
 patch  apps/deployments
 create core/pods/exec
 patch core/pods/ephemeralcontainers
+create core/pods
 delete core/pods
 get    core/secrets
 ```

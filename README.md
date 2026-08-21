@@ -304,6 +304,12 @@ version being that there is no undo for a deleted StatefulSet.
   gates and audited on open and close. Neither picks a container for you on a
   multi-container pod: the logs of the wrong container look exactly like the
   logs of the right one.
+* **Node debug pods** — `kubectl debug node/…` from a node's page, for when the
+  machine is what needs looking at and there is no SSH to it. Off by default
+  behind its own gate; the host filesystem mounts **read-only** unless you ask
+  otherwise (unlike `kubectl`); the whole manifest is the diff you confirm; and
+  because nothing removes it afterwards — `kubectl debug` has no `--rm` either —
+  the console labels what it creates, lists it per node, and offers a Remove.
 * **Debug containers** — `kubectl debug` for the pod whose image has no shell.
   Attaches an ephemeral container carrying the tools, then opens a terminal in
   it. A write like any other: previewed as a diff, confirmed, audited with the
@@ -440,6 +446,8 @@ means read-only.
 | `ADMIN_ALLOW_MUTATIONS` | `false` | **The write gate.** False makes every write return `403 mutations_disabled` before the cluster is touched, and `/api/health` report `mutations: disabled` so the UI disables the buttons. Dry-run stays available: previewing is a read |
 | `SECRET_REVEAL_ENABLED` | `false` | Lets the single-object Secret read return values when asked with `?reveal=true`. Separate gate, separate blast radius; every reveal is audited either way |
 | `ADMIN_DEBUG_IMAGE` | `busybox:1.36` | The image a debug container is attached with when the operator names none. Not a gate — attaching one needs `ADMIN_ALLOW_MUTATIONS` and `patch pods/ephemeralcontainers` — but worth setting for an air-gapped cluster, which cannot pull from Docker Hub and answers the attempt with an `ImagePullBackOff` on a pod somebody is already debugging |
+| `ADMIN_NODE_DEBUG_ENABLED` | `false` | **A third gate, and the one to read about before flipping.** Allows a node debug pod: a pod pinned to one node with the host filesystem mounted and the host PID namespace shared. A shell in one is effectively root on that machine — it reaches every pod's ServiceAccount token and mounted Secrets on that node. Separate from `ADMIN_ALLOW_MUTATIONS` because RBAC cannot express the difference between this pod and any other, so this switch is the only control the console itself has. With it off, the create *and its dry run* are refused, and the refusal is audited |
+| `ADMIN_NODE_DEBUG_NAMESPACE` | `default` | Namespace node debug pods are created in. The namespace decides which Pod Security level admits them: a cluster enforcing `restricted` everywhere needs one namespace labelled to permit host namespaces and hostPath, and pinning the console to it keeps that exception in one auditable place |
 | `AUTH_ENABLED` | `false` | Requires a managed local, LDAP or single sign-on session for every API and WebSocket request except health, login and the two OIDC handshake routes |
 | `AUTH_SESSION_TTL_HOURS` | `12` | Lifetime of the revocable HttpOnly session cookie, from 1 to 168 hours |
 | `AUTH_COOKIE_NAME` | `k8boss_admin_session` | Session cookie name |

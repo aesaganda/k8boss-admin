@@ -31,9 +31,10 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Path
+from fastapi import APIRouter, Path, Query
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.admin import node_debug
 from app.admin.nodes import cordon_node, drain_node
 from app.services.nodes import get_node, list_nodes
 
@@ -114,6 +115,37 @@ class DrainRequest(_MutationBody):
     )
 
 
+class NodeDebugRequest(_MutationBody):
+    """``POST /api/nodes/{name}/debug`` body (§5.5).
+
+    Two fields, deliberately. Everything else about the pod is fixed by
+    :func:`app.admin.node_debug.build_pod` and shown in full in the diff before
+    it is created — a knob per privileged field would be a way to assemble a pod
+    nobody reviewed, and §4's YAML editor already exists for anything this shape
+    does not cover.
+    """
+
+    image: str | None = Field(
+        None,
+        max_length=512,
+        description=(
+            "The debug image. Omit for the console's configured default "
+            "(ADMIN_DEBUG_IMAGE)."
+        ),
+    )
+    writable_host_filesystem: bool = Field(
+        False,
+        alias="writableHostFilesystem",
+        description=(
+            "Mount the node's root filesystem read-write instead of read-only. "
+            "False is the default and is a deliberate departure from `kubectl "
+            "debug`, which always mounts it writable: most node debugging reads, "
+            "and a read-only /host cannot rewrite a static pod manifest or leave "
+            "a binary behind that runs as root at next boot."
+        ),
+    )
+
+
 @router.get("/nodes")
 def get_nodes() -> dict[str, Any]:
     """Every node with its capacity, allocatable and actual requests (§5).
@@ -172,3 +204,62 @@ def drain(name: str, body: DrainRequest) -> dict[str, Any]:
         delete_emptydir_data=body.delete_emptydir_data,
         force=body.force,
     )
+
+
+@router.get("/nodes/{name}/debug")
+def get_node_debug_pods(name: str) -> dict[str, Any]:
+    """Debug pods this console created for this node (§5.5).
+
+    A §1.2 envelope plus ``enabled``, ``enabledDetail`` and ``namespace``.
+    ``enabled`` is the deployment's two gates answered together, so the UI can
+    disable the action with the reason rather than offering it and producing a
+    403; ``namespace`` is where a new pod would appear, which an operator should
+    not have to guess about a privileged pod.
+
+    ``items: []`` is a real zero — the namespace was listed. A listing that could
+    not happen raises (§0.1).
+    """
+    return node_debug.list_node_debug_pods(name)
+
+
+@router.post("/nodes/{name}/debug")
+def create_node_debug_pod(name: str, body: NodeDebugRequest) -> dict[str, Any]:
+    """Create a debug pod on this node (§5.5). §1.5 response plus the pod.
+
+    **The most privileged object this console creates.** The pod is pinned to
+    this node, tolerates every taint, shares the host PID and network namespaces
+    and mounts the node's root filesystem at /host. A shell in it is effectively
+    root on the machine.
+
+    It is gated twice — ``ADMIN_ALLOW_MUTATIONS`` *and* ``ADMIN_NODE_DEBUG_ENABLED``
+    — and the whole manifest is the diff, so every one of those properties is on
+    screen before the operator confirms. Unlike §7.4's ephemeral containers, the
+    pod it creates can and should be removed afterwards; see the DELETE below.
+    """
+    return node_debug.create_node_debug_pod(
+        name,
+        image=body.image,
+        writable_host=body.writable_host_filesystem,
+        dry_run=body.dry_run,
+    )
+
+
+@router.delete("/nodes/{name}/debug/{pod}")
+def delete_node_debug_pod(
+    name: str,
+    pod: str,
+    dryRun: bool = Query(  # noqa: N803 - §1.5 wire spelling
+        True, description="Project the delete and return the diff without performing it.",
+    ),
+) -> dict[str, Any]:
+    """Remove a debug pod this console created (§5.5). §1.5 mutation response.
+
+    Only pods carrying this console's label *and* pinned to this node — anything
+    else is ``404 not_found`` for this route rather than a delete, because
+    otherwise this would be a general pod-delete with a node in its path.
+
+    A query parameter rather than a body: DELETE bodies are inconsistently
+    handled by proxies and HTTP clients, and a ``dryRun`` that silently went
+    missing would turn a projection into a deletion.
+    """
+    return node_debug.remove_node_debug_pod(name, pod, dry_run=dryRun)

@@ -463,6 +463,108 @@ that somebody debugged a pod but *what they put inside it*.
 
 ---
 
+## 9.1 The node debug pod
+
+The largest grant in this product, and the one whose safety argument cannot be
+made with RBAC.
+
+`kubectl debug node/<name>` creates a pod pinned to one machine with its root
+filesystem mounted. What that reaches is worse than the manifest makes it sound.
+Under `/host/var/lib/kubelet/pods` sit the projected ServiceAccount token and
+every mounted Secret of **every pod on that node** — each one a live bearer
+credential; `/host/var/lib/kubelet/pki` holds the node's own client certificate,
+an identity in `system:nodes`. `hostPID` adds every process's `environ` and
+`cmdline`, and `/proc/<pid>/root` reaches into other containers' mount namespaces
+— including tmpfs Secret mounts that never touch the host disk. A shell in this
+pod is, for practical purposes, root on the machine.
+
+**RBAC cannot express the difference between this pod and any other.**
+`SelfSubjectAccessReview` answers on verb, group, resource, namespace, name and
+subresource. It has no field-level granularity whatsoever: `create pods` that
+succeeds for an nginx pod succeeds identically for this one. There is no verb for
+`hostPath`, none for `hostPID`, none for `privileged`. The layer that once gated
+this — PodSecurityPolicy's `use` on a `podsecuritypolicies` resource — was
+removed in Kubernetes 1.25, and its replacement, Pod Security admission, is
+namespace-label-based rather than RBAC-based.
+
+Three consequences follow, and the design is all three:
+
+**The deployment gate is the real control, so there is one.**
+`ADMIN_NODE_DEBUG_ENABLED`, on top of `ADMIN_ALLOW_MUTATIONS`. §8 is about
+orthogonality rather than a count of switches, and this is orthogonal in exactly
+the way that section means: a deployment can want every other write and not this.
+Preflight still runs — the operator may lack `create pods` — but nobody should
+mistake it for the boundary. Withholding `create pods` from the console's
+ServiceAccount is the only RBAC answer, and it also removes the YAML editor's
+ability to create anything at all.
+
+**The dry run is refused too, uniquely.** Everywhere else in this document a
+projection is a read and is permitted in read-only mode. Here the projection is a
+working manifest for a privileged pod, complete with the namespace that admits
+it. A deployment that has switched this off has not consented to handing one out.
+
+**The gate refusal is audited.** The funnel audits its own gate; this refusal
+never reaches the funnel, so it records itself. "Who tried to put a host-mounted
+pod on a node while that was switched off" is precisely the question §7 exists
+to answer.
+
+### What the cluster still decides
+
+Pod Security admission is the control the *cluster* holds, and it is a real one.
+A namespace enforcing `baseline` or `restricted` rejects this pod outright — host
+namespaces and hostPath volumes both fail those profiles. That is why the
+namespace is configurable (`ADMIN_NODE_DEBUG_NAMESPACE`): a cluster that enforces
+`restricted` everywhere needs one deliberately labelled namespace for this to be
+possible at all, and pinning the console to it keeps the exception in one
+auditable place rather than wherever an operator's namespace selector happened to
+be. Admission runs on `dryRun=All`, so the refusal arrives at the *preview* step,
+before anything exists.
+
+### Least privilege, where it does not cost the feature
+
+Each of these is a deliberate reduction from what `kubectl debug` produces:
+
+| | `kubectl debug node/` | here |
+|---|---|---|
+| `/host` mount | read-write | **read-only** unless explicitly asked |
+| `automountServiceAccountToken` | unset (token mounted) | **false** |
+| `hostIPC` | true | **unset** |
+| `securityContext` | none (so not privileged) | none |
+| hostPath `type` | unset | `Directory` |
+
+The read-only default is the important one. Almost all node debugging reads, and
+a read-only `/host` cannot rewrite a static pod manifest or leave a binary that
+runs as root at next boot. Asking for write access flips the confirm button to
+danger and requires the node's name to be typed.
+
+*What is deliberately not reduced.* `hostPID` and `hostNetwork` stay on: they are
+most of why the feature exists, and an operator who needed them and found them
+off would turn them on without reading. They are disclosed instead — the create
+is a `create`, so `before` is null and the **entire manifest is the diff**, on
+screen before the confirming call.
+
+### The pod outlives the session, and no console can fix that
+
+`kubectl debug` has no `--rm`: it issues no delete on detach, on exit or on
+Ctrl-C, and leaked node debug pods are common. A console cannot do better
+*automatically* — a closed tab is not a signal a server can act on, and a
+restarted console pod drops whatever would have issued the DELETE. Promising
+cleanup would be a promise that fails exactly when it matters.
+
+So the console does the honest thing instead: it labels the pods it creates,
+lists them per node, states for each whether the host filesystem is writable, and
+offers a removal that goes through the funnel like any other delete. Removal
+stays available even when creating is gated off — a pod left behind after the
+switch was thrown is the one that most needs removing, and deleting it takes
+privilege away rather than granting it.
+
+This is the exact opposite of §7.4's ephemeral container, which **cannot** be
+removed because the API has no verb for it. Two features that look alike and
+differ in the one respect an operator most needs to know; the UI renders them
+differently for that reason.
+
+---
+
 ## 10. The Secret reveal
 
 A Secret's values are returned by exactly one code path, and only when **all** of

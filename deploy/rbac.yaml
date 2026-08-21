@@ -334,6 +334,27 @@ rules:
     resources: ["pods"]
     verbs: ["delete"]
 
+  # §5.5 node debug pods, and §4's "create anything" from the YAML editor. One
+  # rule, because RBAC cannot tell them apart.
+  #
+  # Read that again before granting it. A SelfSubjectAccessReview answers on
+  # verb/group/resource/namespace/name/subresource and has no field-level
+  # granularity at all: there is no verb for `hostPath`, none for `hostPID`,
+  # none for `privileged`. `create pods` that succeeds for an nginx pod succeeds
+  # identically for a pod that mounts the node's root filesystem. The layer that
+  # once gated this — PodSecurityPolicy's `use` on a podsecuritypolicies
+  # resource — was removed in Kubernetes 1.25, and its replacement, Pod Security
+  # admission, is namespace-label-based rather than RBAC-based.
+  #
+  # So the controls that actually apply to a node debug pod are not here. They
+  # are ADMIN_NODE_DEBUG_ENABLED in the deployment (off by default, and the only
+  # switch this console owns) and the `pod-security.kubernetes.io/enforce` label
+  # on the namespace it creates into. Removing this rule withholds node debug
+  # pods, and withholds the YAML editor's ability to create anything, together.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create"]
+
   # §7 exec — a shell inside a running container. The most dangerous grant in
   # this file after the wildcard below: it bypasses every other control here,
   # because a shell in a pod can do whatever that pod's own ServiceAccount can.
