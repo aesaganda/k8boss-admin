@@ -43,6 +43,19 @@ services:
       # whichever way this is set.
       - SECRET_REVEAL_ENABLED=${SECRET_REVEAL_ENABLED:-false}
 
+      # The two features with their own gate on top of ADMIN_ALLOW_MUTATIONS.
+      # They must be listed HERE, not only in .env: compose interpolates .env
+      # into this file, it does not pass it into the container. A var set in
+      # .env and missing from this block reaches the backend as its default —
+      # the symptom is a feature that stays refused after the operator turned
+      # it on and restarted the stack, with nothing to show them why.
+      - ADMIN_ROUTER_MANAGE_ENABLED=${ADMIN_ROUTER_MANAGE_ENABLED:-false}
+      - ADMIN_ROUTER_NAMESPACE=${ADMIN_ROUTER_NAMESPACE:-k8boss-router}
+      - ADMIN_NODE_DEBUG_ENABLED=${ADMIN_NODE_DEBUG_ENABLED:-false}
+      - ADMIN_NODE_DEBUG_NAMESPACE=${ADMIN_NODE_DEBUG_NAMESPACE:-default}
+      - ADMIN_NODE_DEBUG_MAX_SECONDS=${ADMIN_NODE_DEBUG_MAX_SECONDS:-3600}
+      - ADMIN_DEBUG_IMAGE=${ADMIN_DEBUG_IMAGE:-busybox:1.36}
+
       # ── Console identity ────────────────────────────────────────────────
       # Opt-in for compatibility. When enabled, every API and WebSocket request
       # except health/login requires an HttpOnly session cookie. The bootstrap

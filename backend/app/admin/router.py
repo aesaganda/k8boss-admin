@@ -279,7 +279,16 @@ def _check_ownership(
 #: is used **only** to replace the ``hint``, never the code, never the status,
 #: and a miss degrades to the ordinary rbac_denied hint rather than to a wrong
 #: one.
-_ESCALATION_MARKER = "attempt to grant extra privileges"
+#:
+#: Copied verbatim (lowercased) from a live API server, not paraphrased. The
+#: first version of this constant read "attempt to grant extra privileges",
+#: which no Kubernetes since 1.9 emits — so the marker never matched, the hint
+#: never fired, and the operator was sent to grant `create clusterroles`, the
+#: one verb the preflight had just confirmed they hold. The test that was
+#: supposed to catch that asserted against the same invented string, so it
+#: passed. Check any change to this line against `kubectl create --as=<sa>
+#: --dry-run=server` output rather than against memory.
+_ESCALATION_MARKER = "attempting to grant rbac permissions not currently held"
 
 
 def _escalation_hint(item: BundleObject, error: AdminError) -> AdminError:
@@ -312,6 +321,41 @@ def _escalation_hint(item: BundleObject, error: AdminError) -> AdminError:
         "unless it either holds that itself or is granted `escalate` on "
         "rbac.authorization.k8s.io/clusterroles (and `bind` for the "
         "ClusterRoleBinding). deploy/rbac.yaml grants both."
+    )
+    return error
+
+
+def _dependency_hint(item: BundleObject, error: AdminError, *, failed_kinds: set[str]) -> AdminError:
+    """Say the ClusterRoleBinding was not created because its ClusterRole was not.
+
+    The API server answers a ClusterRoleBinding create whose ``roleRef`` names a
+    missing ClusterRole with a **404 that names the binding** —
+    ``clusterrolebindings.rbac.authorization.k8s.io "x" not found`` — whenever
+    the caller does not hold ``bind``. That is the API server's own wording and
+    ``from_api_exception`` maps it correctly by status; relayed unchanged it
+    still reads as "the binding you asked about does not exist", which is wrong
+    twice over: nothing was asked to exist, this was a create, and the object
+    that is actually missing is the ClusterRole one line above in the same
+    report. An operator who believes it goes to inspect a binding that is fine.
+
+    Only the message and hint are rewritten. The code stays ``not_found`` —
+    that is what the cluster answered, and inventing a different one here would
+    be this module deciding it knows better than the API server about a call it
+    did not make.
+    """
+    if item.kind != "ClusterRoleBinding" or "ClusterRole" not in failed_kinds:
+        return error
+
+    error.message = (
+        f"Not created: the ClusterRole {item.name} failed earlier in this same "
+        f"install, and a ClusterRoleBinding cannot reference a role that does "
+        f"not exist."
+    )
+    error.hint = (
+        "This object has no problem of its own — fix the ClusterRole failure "
+        "reported above and install again. The 404 names this binding because "
+        "that is how the API server words a missing roleRef, not because the "
+        "console found this binding missing."
     )
     return error
 
@@ -413,6 +457,10 @@ def install(payload: dict[str, Any], *, dry_run: bool = True) -> dict[str, Any]:
 
     results: list[dict[str, Any]] = []
     failed = 0
+    # Which kinds have already failed in THIS install, so a later object whose
+    # failure is only a consequence of an earlier one can say so instead of
+    # reporting a cause it does not have.
+    failed_kinds: set[str] = set()
     for item, prior in zip(objects, existing):
         verb = "update" if prior["exists"] else "create"
         try:
@@ -423,9 +471,10 @@ def install(payload: dict[str, Any], *, dry_run: bool = True) -> dict[str, Any]:
             failed += 1
             # Preflight cannot see escalation prevention coming; this is where
             # the hint stops sending the operator to grant a verb they hold.
-            results.append(
-                _outcome(item, verb=verb, result=None, error=_escalation_hint(item, e))
-            )
+            error = _escalation_hint(item, e)
+            error = _dependency_hint(item, error, failed_kinds=failed_kinds)
+            failed_kinds.add(item.kind)
+            results.append(_outcome(item, verb=verb, result=None, error=error))
             # Keep going. Stopping at the first failure would leave the operator
             # with one error and no idea whether the other seven would also
             # fail — which is the difference between "grant this one verb" and
