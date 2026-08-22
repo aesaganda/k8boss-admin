@@ -487,6 +487,73 @@ export const FIXTURES = {
       'serves ephemeral containers is unknown.',
   },
 
+  // §5 node detail: the row plus its pods. `pods: []` here is a real zero — the
+  // node was read and nothing is scheduled on it — which keeps the page's
+  // "could not list" branch (a `null`) available for its own test.
+  nodeDetail: {
+    name: 'ip-10-0-1-4',
+    ready: true,
+    unschedulable: false,
+    roles: ['worker'],
+    kubelet_version: 'v1.31.4',
+    os_image: 'Amazon Linux 2',
+    container_runtime: 'containerd://1.7.13',
+    internal_ip: '10.0.1.4',
+    age_seconds: 8123456,
+    capacity: { cpu_cores: 16, memory_bytes: 68719476736, pods: 110 },
+    allocatable: { cpu_cores: 15.8, memory_bytes: 66571993088, pods: 110 },
+    requested: null,
+    pod_count: null,
+    conditions: [{ type: 'MemoryPressure', status: 'False', reason: 'KubeletHasSufficientMemory' }],
+    taints: [],
+    pods: [],
+    unavailable: [],
+  },
+
+  // §5.5. Both gates on, one pod already there.
+  nodeDebugEnabled: {
+    items: [
+      {
+        name: 'node-debugger-ip-10-0-1-4-x4k2p',
+        namespace: 'default',
+        node: 'ip-10-0-1-4',
+        image: 'busybox:1.36',
+        phase: 'Running',
+        state: 'Running',
+        reason: null,
+        started_at: '2026-08-21T09:00:05Z',
+        created_at: '2026-08-21T09:00:00Z',
+        // Read-only, which is this console's default and a departure from
+        // kubectl. The writable case is its own fixture below, because the two
+        // must not render the same.
+        hostFilesystemReadOnly: true,
+      },
+    ],
+    continue: null,
+    remaining: null,
+    partial: false,
+    unavailable: [],
+    enabled: true,
+    enabledDetail: 'Node debug pods are enabled on this deployment.',
+    namespace: 'default',
+  },
+
+  // The feature gate off while writes are on — the case the second switch
+  // exists for, and the one the UI must explain rather than merely disable.
+  nodeDebugDisabled: {
+    items: [],
+    continue: null,
+    remaining: null,
+    partial: false,
+    unavailable: [],
+    enabled: false,
+    enabledDetail:
+      'Node debug pods are disabled on this deployment (ADMIN_NODE_DEBUG_ENABLED is off). ' +
+      'This is a separate gate from ADMIN_ALLOW_MUTATIONS because a pod with the node\'s ' +
+      'filesystem mounted is a larger grant than the rest of the write surface.',
+    namespace: 'default',
+  },
+
   emptyList: { items: [], continue: null, remaining: null, partial: false, unavailable: [] },
 };
 
@@ -504,6 +571,10 @@ export async function mockApi(
     debug = null,
     debugAttach = null,
     preflight = null,
+    nodeDetail = null,
+    nodeDebug = null,
+    nodeDebugCreate = null,
+    nodeDebugDeletes = [],
   } = {},
 ) {
   // Counted so a spec can hand back a different manifest on the second read —
@@ -630,6 +701,61 @@ export async function mockApi(
     if (path === '/resources/core/v1/pods') return json(pods ?? FIXTURES.pods);
     if (path === '/namespaces') return json(FIXTURES.namespaces);
     if (path === '/nodes') return json(FIXTURES.nodes);
+    // §5.5. Ordered before the node detail branch: both live under /nodes/…, and
+    // a router matching the detail first would answer a debug listing with a node.
+    if (/^\/nodes\/[^/]+\/debug$/.test(path)) {
+      if (route.request().method() === 'POST') {
+        const body = JSON.parse(route.request().postData() || '{}');
+        return json(
+          nodeDebugCreate
+            ? nodeDebugCreate(body)
+            : {
+                dryRun: body.dryRun !== false,
+                // Derived, never echoed: §1.5 makes `applied` the only evidence
+                // a cluster changed.
+                applied: body.dryRun === false,
+                verb: 'create',
+                target: { group: '', version: 'v1', resource: 'pods',
+                          namespace: 'default', name: 'node-debugger-ip-10-0-1-4-x4k2p' },
+                diff: {
+                  before: '',
+                  after: 'apiVersion: v1\nkind: Pod\n',
+                  unified:
+                    '--- live\n+++ projected\n@@ -0,0 +1,8 @@\n+apiVersion: v1\n+kind: Pod\n' +
+                    '+spec:\n+  nodeName: ip-10-0-1-4\n+  hostPID: true\n+  hostNetwork: true\n' +
+                    '+  volumes:\n+    - hostPath:\n+        path: /\n',
+                  changed: true,
+                },
+                resourceVersion: '9002',
+                warnings: [],
+                auditId: 5150,
+                pod: 'node-debugger-ip-10-0-1-4-x4k2p',
+                namespace: 'default',
+                node: 'ip-10-0-1-4',
+                image: body.image || 'busybox:1.36',
+                writableHostFilesystem: body.writableHostFilesystem === true,
+              },
+        );
+      }
+      return json(nodeDebug ?? FIXTURES.nodeDebugEnabled);
+    }
+    if (/^\/nodes\/[^/]+\/debug\/[^/]+$/.test(path) && route.request().method() === 'DELETE') {
+      const url = new URL(route.request().url());
+      const isDryRun = url.searchParams.get('dryRun') !== 'false';
+      nodeDebugDeletes.push({ path, dryRun: isDryRun });
+      return json({
+        dryRun: isDryRun,
+        applied: !isDryRun,
+        verb: 'delete',
+        target: { group: '', version: 'v1', resource: 'pods', namespace: 'default' },
+        // §4: a delete diffs live against nothing.
+        diff: { before: 'kind: Pod\n', after: '', unified: '--- live\n+++ projected\n@@ -1,1 +0,0 @@\n-kind: Pod\n', changed: true },
+        resourceVersion: null,
+        warnings: [],
+        auditId: 5151,
+      });
+    }
+    if (/^\/nodes\/[^/]+$/.test(path)) return json(nodeDetail ?? FIXTURES.nodeDetail);
     if (path === '/workloads') return json(workloads ?? FIXTURES.workloads);
     if (path === '/access/preflight') {
       return json(

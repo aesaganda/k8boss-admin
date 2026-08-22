@@ -36,6 +36,7 @@ import DrainDialog from '../components/DrainDialog';
 import { nodes as nodesApi } from '../api/client';
 import { useCluster } from '../contexts/ClusterContext';
 import { formatBytes, formatCpu } from '../utils/format';
+import NodeDebugPanel from '../components/NodeDebugPanel';
 import { useAsync, useGates } from './_data';
 import { ActionButton, ChipList, Muted, NoClusterState, PodConsoleModal, menuAction } from './_parts';
 
@@ -50,6 +51,11 @@ const CHECKS = [
   // `patch pods` and not this. Appended rather than spliced in, because
   // `usePreflight` pairs results to checks strictly by index (§9).
   { id: 'debug', verb: 'patch', group: 'core', resource: 'pods', subresource: 'ephemeralcontainers' },
+  // §5.5 node debug pods. Plain `create pods` — the privilege in this action is
+  // in the pod's *shape*, not in a subresource, which is exactly why RBAC alone
+  // cannot express it and the deployment gate exists. Appended, not spliced:
+  // `usePreflight` pairs results to checks by index (§9).
+  { id: 'nodeDebug', verb: 'create', group: 'core', resource: 'pods' },
 ];
 
 /** `9.2 cores` or the word for "we do not know", never a fabricated zero. */
@@ -296,6 +302,16 @@ export default function NodeDetail() {
           emptyDescription="The pod listing succeeded and returned nothing, so this node really is empty."
         />
       )}
+
+      <SectionHeader
+        title="Debug"
+        description={
+          'A pod on this machine with its filesystem mounted, for when the node itself is what needs ' +
+          'looking at. The most privileged thing this console creates — and the one it will not ' +
+          'clean up for you.'
+        }
+      />
+      <NodeDebugPanel node={name} gate={gate('nodeDebug')} execGate={gate('exec')} />
 
       {cordonOpen && (
         <CordonDialog

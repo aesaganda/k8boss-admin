@@ -359,6 +359,82 @@ returns `207`-style detail: `applied: true` with per-pod `result` fields, becaus
 "drain succeeded" when three pods failed to evict is exactly the confident wrong
 answer this project exists to avoid.
 
+### 5.5 Node debug pods
+
+`kubectl debug node/<name>`: a pod pinned to one machine with its filesystem
+mounted, for when the node itself is what needs looking at and there is no way
+to SSH to it. **The most privileged object this API creates.**
+
+#### `GET /api/nodes/{name}/debug`
+A §1.2 envelope of the debug pods this console created *for this node*, plus:
+```json
+{ "items": [ {"name","namespace","node","image","phase","state","reason",
+              "started_at","created_at","hostFilesystemReadOnly"} ],
+  "continue": null, "remaining": null, "partial": false, "unavailable": [],
+  "enabled": true,
+  "enabledDetail": "Node debug pods are enabled on this deployment.",
+  "namespace": "default" }
+```
+- `enabled` is this deployment's **two** gates answered together, so a client can
+  disable the action with the reason rather than offering it and taking a 403.
+- `namespace` is where a new pod would be created (`ADMIN_NODE_DEBUG_NAMESPACE`).
+  A client must not guess it: it is part of what the operator is confirming.
+- `hostFilesystemReadOnly` is `null` for a pod carrying this console's label but
+  no host mount it recognises — not `true`, which would be a safety claim about
+  an object we do not understand.
+- The listing is a **read** and answers even when creating is gated off. That is
+  what makes rule 11.4 possible here, and a pod left behind after the gate was
+  switched off is the one that most needs finding.
+
+#### `POST /api/nodes/{name}/debug`
+`{"image": null, "writableHostFilesystem": false, "dryRun": true}` → the §1.5
+mutation response plus `pod`, `namespace`, `node`, `image` and
+`writableHostFilesystem`.
+
+The pod is pinned with `spec.nodeName`, tolerates every taint, sets `hostPID` and
+`hostNetwork`, and mounts the node's root filesystem at `/host` — **read-only
+unless `writableHostFilesystem` is true**, which is a deliberate departure from
+`kubectl debug`, which always mounts it writable. It is *not* privileged, sets
+`automountServiceAccountToken: false`, and does not set `hostIPC`.
+
+`before` is `null`, so the diff is the whole manifest as an addition. That is the
+disclosure mechanism: every privileged field is on screen before the confirming
+call.
+
+- **Two gates.** `ADMIN_ALLOW_MUTATIONS` **and** `ADMIN_NODE_DEBUG_ENABLED`.
+  Either off is `403 mutations_disabled` whose `hint` names both.
+- **The dry run is refused too**, uniquely among the writes in this contract.
+  Elsewhere §1.6 permits a projection on a read-only console because inspecting
+  what would change is a read; here the projection *is* a working manifest for a
+  privileged pod, and a deployment that switched this off has not consented to
+  handing one out.
+- **The gate refusal is audited** as `outcome: "denied"`, because the funnel that
+  records every other refusal is never reached.
+- **PodSecurity admission decides whether this is possible at all.** A namespace
+  enforcing `baseline` or `restricted` rejects the pod (host namespaces, hostPath
+  volume). Admission runs on `dryRun=All`, so the refusal arrives at the preview
+  step as `422 invalid` carrying the plugin's own message — before anything
+  exists.
+
+#### `DELETE /api/nodes/{name}/debug/{pod}?dryRun=`
+→ the §1.5 mutation response. The delete diff is §4's: `before=live, after=null`.
+
+Only pods carrying this console's label **and** pinned to this node; anything
+else is `404 not_found` from this route rather than a delete, or it would be a
+general pod-delete with a node in its path.
+
+> **Nothing removes this pod automatically, and that is not a gap this API can
+> close.** `kubectl debug` has no `--rm` either. A closed browser tab is not a
+> signal, and a restarted console drops whatever would have issued the DELETE, so
+> the honest answer is to label the pods, list them, and offer removal — not to
+> promise a cleanup that fails exactly when it matters.
+
+Contrast §7.4, which is the opposite case: an ephemeral container **cannot** be
+removed, because the API has no verb for it. A client must render the two
+differently.
+
+---
+
 ### `GET /api/events`
 Query `namespace`, `involvedObjectKind`, `involvedObjectName`, `type`
 (`Normal`|`Warning`), `limit` (default 200).
