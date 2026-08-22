@@ -470,12 +470,24 @@ def create_from_yaml(
     namespace: str | None,
     yaml_text: str,
     dry_run: bool,
+    *,
+    detail: str | None = None,
 ) -> dict[str, Any]:
     """``POST /api/resources/{group}/{version}/{plural}`` (§4).
 
     ``before`` is ``None`` — there is nothing live to diff against — so the
     unified diff shows the whole projected object as an addition, which is
     exactly what a create is.
+
+    ``detail`` overrides the audit sentence. The default — "create Route
+    checkout" — is the right sentence for the generic YAML editor, where the
+    object is all the caller knows. A typed caller that knows *why* it is
+    creating this object passes a better one: "expose checkout:8080 at
+    https://pay.example.com (edge)" answers the question an incident review
+    actually asks of the trail, and the generic sentence does not. It changes
+    only the sentence; the verb, target and diff digest are still derived from
+    the write itself, so a caller cannot describe a write as something it is
+    not.
     """
     normalized = catalog.normalize_group(group)
     info = catalog.resolve(normalized, version, plural)
@@ -519,7 +531,7 @@ def create_from_yaml(
             namespace=target_namespace, name=name,
         ),
         before=None,
-        detail=f"create {info['kind'] or plural} {name or '(generated name)'}",
+        detail=detail or f"create {info['kind'] or plural} {name or '(generated name)'}",
     )
 
 
@@ -536,8 +548,12 @@ def update_from_yaml(
     yaml_text: str,
     resource_version: str,
     dry_run: bool,
+    *,
+    detail: str | None = None,
 ) -> dict[str, Any]:
     """``PUT /api/resources/{group}/{version}/{plural}/{name}`` (§4).
+
+    ``detail`` overrides the audit sentence; see :func:`create_from_yaml`.
 
     The live object is read first and used for three things: the left side of the
     diff, the optimistic-concurrency comparison, and — when that comparison fails
@@ -640,7 +656,7 @@ def update_from_yaml(
         dry_run=dry_run,
         apply_fn=apply_fn,
         before=live,
-        detail=f"replace {info['kind'] or plural} {name}",
+        detail=detail or f"replace {info['kind'] or plural} {name}",
     )
 
 
@@ -656,8 +672,12 @@ def delete_resource(
     name: str,
     propagation_policy: str,
     dry_run: bool,
+    *,
+    detail: str | None = None,
 ) -> dict[str, Any]:
     """``DELETE /api/resources/{group}/{version}/{plural}/{name}`` (§4).
+
+    ``detail`` overrides the audit sentence; see :func:`create_from_yaml`.
 
     The live object is read first so the diff can be ``before=live, after=null``:
     a confirm dialog for a delete has one job, which is to show exactly what
@@ -713,7 +733,10 @@ def delete_resource(
         dry_run=dry_run,
         apply_fn=apply_fn,
         before=live,
-        detail=f"delete {info['kind'] or plural} {name} (propagation: {propagation_policy})",
+        detail=(
+            detail
+            or f"delete {info['kind'] or plural} {name} (propagation: {propagation_policy})"
+        ),
     )
 
 

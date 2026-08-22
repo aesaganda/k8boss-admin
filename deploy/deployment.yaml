@@ -91,6 +91,15 @@ spec:
             # values is a privileged READ, audited whichever way this is set.
             - name: SECRET_REVEAL_ENABLED
               value: "false"
+            # §14. OFF, and this is the third gate rather than a detail of the
+            # first: an install creates a cluster-scoped ClusterRole that can
+            # read every Secret in the cluster — what any ingress controller
+            # needs to terminate TLS, and what RBAC cannot narrow — and puts a
+            # process on this cluster's ingress path. The install PLAN stays
+            # readable with this off, because deciding whether to turn it on
+            # means reading what it would create. See adr-0004-shipped-router.md.
+            - name: ADMIN_ROUTER_MANAGE_ENABLED
+              value: "false"
 
             # ── Console identity ──────────────────────────────────────────
             # ENABLED — the k8boss-admin-auth Secret must exist first, or the

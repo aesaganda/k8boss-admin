@@ -65,6 +65,7 @@ const Workloads = lazyPage('Workloads', () => import('./pages/Workloads'));
 const WorkloadDetail = lazyPage('WorkloadDetail', () => import('./pages/WorkloadDetail'));
 const Pods = lazyPage('Pods', () => import('./pages/Pods'));
 const Network = lazyPage('Network', () => import('./pages/Network'));
+const RoutesPage = lazyPage('Routes', () => import('./pages/Routes'));
 const Config = lazyPage('Config', () => import('./pages/Config'));
 const Storage = lazyPage('Storage', () => import('./pages/Storage'));
 const Gateway = lazyPage('Gateway', () => import('./pages/Gateway'));
@@ -107,6 +108,10 @@ function ConsoleRoutes() {
 
               <Route path="pods" element={<Pods />} />
               <Route path="network" element={<Network />} />
+              {/* §13/§14. "routes" is the feature, not react-router's
+                  <Route> — the page component is aliased to RoutesPage so
+                  the two names cannot be confused at the point of use. */}
+              <Route path="routes" element={<RoutesPage />} />
               <Route path="config" element={<Config />} />
               <Route path="storage" element={<Storage />} />
               <Route path="gateway" element={<Gateway />} />

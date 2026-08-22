@@ -562,6 +562,69 @@ export const events = {
   list: (params) => api.get('/events', params),
 };
 
+/* ── §13 Routes — exposing a Service to the outside world ───────────────── */
+
+const routePath = (backend, namespace, name) =>
+  `/routes/${encodeURIComponent(backend)}/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}`;
+
+export const routes = {
+  /**
+   * Which of the three route backends this cluster serves, and what each can
+   * express. Read once per page: the answer drives which options the form
+   * offers and which controls it disables *with the reason* (rule 11.4).
+   */
+  capabilities: () => api.get('/routes/capabilities'),
+
+  /** params: { namespace, backend (repeatable), limit } */
+  list: (params) => api.get('/routes', params),
+
+  get: (backend, namespace, name) => api.get(routePath(backend, namespace, name)),
+
+  /**
+   * Compile an exposure into one object. **Writes nothing** — it returns a
+   * document and a `lossy[]` list, and no cluster is changed.
+   *
+   * `retry: true` is safe and is set: this is a POST, which `isReplaySafe`
+   * refuses to replay by default, but replaying a pure compilation costs
+   * nothing and a rendered form that fails on a transient 503 is a form the
+   * operator has to fill in again.
+   *
+   * body: { backend, spec, document }
+   */
+  render: (body) => request('/routes/render', { method: 'POST', body, retry: true }),
+
+  /** body: { backend, spec, document, acknowledgeLossy, dryRun } */
+  create: (body) => api.post('/routes', body),
+
+  /** body: { backend, spec, document, acknowledgeLossy, resourceVersion, dryRun } */
+  update: (backend, namespace, name, body) =>
+    api.put(routePath(backend, namespace, name), body),
+
+  /** params: { dryRun } — a query parameter, like §4's delete. */
+  remove: (backend, namespace, name, params) =>
+    api.del(routePath(backend, namespace, name), params),
+};
+
+/* ── §14 The shipped router ─────────────────────────────────────────────── */
+
+export const routerApi = {
+  /** Live read, every time. `installed` is a tri-state — null means unknown. */
+  status: (params) => api.get('/router', params),
+
+  /**
+   * The manifests an install would create. Pure and ungated, so it renders on
+   * a console where router management is switched off — which is exactly when
+   * an operator needs to read it.
+   */
+  plan: (body) => request('/router/plan', { method: 'POST', body, retry: true }),
+
+  /** body: { ...options, dryRun } — install or upgrade, same call. */
+  install: (body) => api.post('/router', body),
+
+  /** params: { namespace, ingressClassName, dryRun } */
+  uninstall: (params) => api.del('/router', params),
+};
+
 /* ── §9 Access preflight ────────────────────────────────────────────────── */
 
 // `group` is translated to its wire spelling only when the caller supplied one.
