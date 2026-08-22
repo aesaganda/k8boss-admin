@@ -981,10 +981,18 @@ def test_escalation_prevention_gets_a_hint_naming_escalate_not_the_verb(
         if "clusterroles" in path:
             raise RBACDenied(
                 "clusterroles is forbidden",
+                # Verbatim from a live API server (1.31), not paraphrased.
+                # The invented wording this used to carry is what let the
+                # marker sit wrong in app/admin/router.py while this test
+                # stayed green.
                 detail=(
-                    'clusterroles.rbac.authorization.k8s.io is forbidden: user '
-                    '"system:serviceaccount:k8boss-admin:console" (user) is '
-                    "attempt to grant extra privileges"
+                    'clusterroles.rbac.authorization.k8s.io "k8boss-admin-router" '
+                    'is forbidden: user '
+                    '"system:serviceaccount:k8boss-admin:k8boss-admin" '
+                    '(groups=["system:authenticated"]) is attempting to grant '
+                    'RBAC permissions not currently held:\n'
+                    '{APIGroups:[""], Resources:["ingressclasses"], '
+                    'Verbs:["get" "list" "watch"]}'
                 ),
                 context={"resource": "clusterroles"},
             )
@@ -1004,6 +1012,103 @@ def test_escalation_prevention_gets_a_hint_naming_escalate_not_the_verb(
     assert "escalate" in failed["error"]["hint"]
     # And the code is untouched: only the hint is rewritten.
     assert failed["error"]["code"] == "rbac_denied"
+
+
+def test_a_binding_orphaned_by_its_clusterrole_says_so_not_404(
+    monkeypatch, fake_k8s, allow_router,
+):
+    """The half-installed report has to name the object that is actually missing.
+
+    When the ClusterRole create fails and the caller does not hold `bind`, the
+    API server answers the ClusterRoleBinding create with a 404 naming *the
+    binding*. Relayed unchanged that sends the operator to inspect an object
+    with nothing wrong with it, while the real cause sits one row up in the
+    same report.
+    """
+    stub_discovery(monkeypatch)
+    allow_preflight(fake_k8s)
+
+    def fake_get(group, version, plural, name, namespace=None):
+        raise NotFound("not found", context={"resource": plural})
+
+    def fake_request(method, path, **kwargs):
+        if "clusterrolebindings" in path:
+            # What the API server really returns here: 404, naming the binding.
+            raise NotFound(
+                'No such object: create rbac.authorization.k8s.io/'
+                'clusterrolebindings "k8boss-admin-router".',
+                detail=(
+                    'clusterrolebindings.rbac.authorization.k8s.io '
+                    '"k8boss-admin-router" not found'
+                ),
+                context={"resource": "clusterrolebindings"},
+            )
+        if "clusterroles" in path:
+            raise RBACDenied(
+                "clusterroles is forbidden",
+                detail="is attempting to grant RBAC permissions not currently held",
+                context={"resource": "clusterroles"},
+            )
+        body = kwargs.get("body") or {}
+        return ({**body, "metadata": {**(body.get("metadata") or {}), "resourceVersion": "1"}}, [])
+
+    monkeypatch.setattr(router_service.reader, "get_resource", fake_get)
+    monkeypatch.setattr(
+        router_service.apply_service.reader, "get_resource", fake_get, raising=False,
+    )
+    monkeypatch.setattr(router_service.apply_service, "request_json", fake_request)
+
+    result = router_service.install({}, dry_run=False)
+
+    binding = next(o for o in result["objects"] if o["kind"] == "ClusterRoleBinding")
+    # The cause named is the ClusterRole, not the binding's own absence.
+    assert "ClusterRole" in binding["error"]["message"]
+    assert "failed earlier" in binding["error"]["message"]
+    assert "no problem of its own" in binding["error"]["hint"]
+    # The cluster's own answer is not overwritten, only explained.
+    assert binding["error"]["code"] == "not_found"
+    assert binding["applied"] is False
+    # And the install is honest about the whole thing.
+    assert result["installed"] is False
+    assert result["failed"] == 2
+
+
+def test_a_binding_that_fails_on_its_own_is_not_blamed_on_the_clusterrole(
+    monkeypatch, fake_k8s, allow_router,
+):
+    """The rewrite must not fire when the ClusterRole landed fine.
+
+    Otherwise the console invents a cause for a failure that has its own, which
+    is the same defect in the other direction.
+    """
+    stub_discovery(monkeypatch)
+    allow_preflight(fake_k8s)
+
+    def fake_get(group, version, plural, name, namespace=None):
+        raise NotFound("not found", context={"resource": plural})
+
+    def fake_request(method, path, **kwargs):
+        if "clusterrolebindings" in path:
+            raise RBACDenied(
+                "clusterrolebindings is forbidden",
+                detail="forbidden",
+                context={"resource": "clusterrolebindings"},
+            )
+        body = kwargs.get("body") or {}
+        return ({**body, "metadata": {**(body.get("metadata") or {}), "resourceVersion": "1"}}, [])
+
+    monkeypatch.setattr(router_service.reader, "get_resource", fake_get)
+    monkeypatch.setattr(
+        router_service.apply_service.reader, "get_resource", fake_get, raising=False,
+    )
+    monkeypatch.setattr(router_service.apply_service, "request_json", fake_request)
+
+    result = router_service.install({}, dry_run=False)
+
+    binding = next(o for o in result["objects"] if o["kind"] == "ClusterRoleBinding")
+    assert binding["error"]["code"] == "rbac_denied"
+    assert "failed earlier" not in (binding["error"]["message"] or "")
+    assert result["failed"] == 1
 
 
 def test_the_takeover_refusal_is_audited(monkeypatch, fake_k8s, allow_router, db_session):
