@@ -589,7 +589,135 @@ the page believes they read a secret.
 
 ---
 
-## 11. What this model does not claim
+---
+
+## 11. The exposure, and the router that serves it
+
+Two features in one lane, and the safety property is the same in both: **a
+change that reaches the outside world is a claim about traffic, not about an
+object.**
+
+### 11.1 An object created is not an exposure served
+
+`POST` an Ingress to a cluster with no ingress controller and the API server
+answers 201. Nothing routes. The object sits there looking created, `admitted`
+stays `null` forever, and the operator's browser hangs on the hostname.
+
+This is the defect standard aimed at §13, so §13 answers it three ways:
+
+* `admitted` is **tri-state**, and `null` — "no router has reported" — is the
+  common value rather than an edge case. Every Ingress is `null` permanently:
+  the Ingress API has no admission condition at all, and whether a controller
+  took the object is visible only through the address it publishes.
+* A Route admitted by one shard and refused by another is **admitted with the
+  refusal named**. It is being served on one shard; a bare green badge hides the
+  half the operator came to find, and a red one sends them to debug a working
+  exposure.
+* §14 exists so the answer to "nothing is serving this" can be something other
+  than a wall.
+
+### 11.2 What a backend cannot express is named, never guessed
+
+An Ingress cannot do passthrough TLS. Two ways to get this wrong, and the
+compiler does neither:
+
+* Emit `nginx.ingress.kubernetes.io/ssl-passthrough` and hope it is nginx. It
+  works on the controller the author tested against and silently does nothing on
+  every other one.
+* Quietly write edge termination instead. The operator finds out when their mTLS
+  client stops connecting.
+
+Instead the write is refused until the caller acknowledges each dropped feature
+**by name** — the same shape as `force` on a drain, and for the same reason:
+"I read this and accept it" has to be a separate act from "go". The
+acknowledgement is a list rather than a boolean, so editing the form after
+acknowledging one consequence requires reading the new one.
+
+The no-vendor-annotation rule is enforced by a test rather than stated as
+policy. That is exactly the pressure point where "report it as lossy" gets
+reversed into "guess the controller", and a reversal would leave `lossy[]`
+claiming a feature was dropped while the object silently carried it. An
+annotation the *operator* writes is kept, because they chose it for a controller
+they know they are running.
+
+### 11.3 The form cannot eat a field
+
+The YAML document is authoritative and the form is a projection of it. Form
+edits patch into the current document; `preserved[]` names every path the form
+is not showing; and once the YAML is hand-edited the form locks and the write
+sends the document **verbatim, with no form model at all**. Without that last
+part the form's fields would be recompiled over the hand-edit at write time —
+silently undoing the change the lock existed to protect.
+
+### 11.4 `routes/custom-host` — the denial preflight would otherwise misname
+
+OpenShift gates *choosing a hostname* behind its own RBAC subresource, separate
+from creating the Route. The funnel preflights `create routes`, that review
+passes, the API server refuses the write — and the operator is told they cannot
+create Routes, a permission the review just confirmed they hold. §13 preflights
+the subresource explicitly, only for Routes and only when a hostname is actually
+set, and audits the denial because it happens outside the funnel.
+
+### 11.5 The router is manifests, not a controller
+
+§14 installs a reverse proxy. What makes that defensible is what it does *not*
+do: no reconcile loop in the console, no desired state stored, no watch. Eight
+objects, eight passes through `mutate()`, eight audit rows. Status is a live
+read.
+
+Four refusals carry the safety of it:
+
+* **Never adopt an object it did not create.** An install that finds a
+  ClusterRole of the same name without `managed-by: k8boss-admin` refuses and
+  names it — before writing anything, on a dry run as much as on a real one, and
+  the refusal is audited. An operator who asked for an install and got a silent
+  takeover of another team's object is the worst outcome this feature has.
+* **A partial install is reported as partial.** `installed` is false unless all
+  eight landed. There is no rollback: deleting what succeeded is more writes
+  nobody approved, against objects that may already be in use.
+* **Uninstall retains the Namespace.** It can hold objects the console never put
+  there, and deleting one is not recoverable.
+* **`installed` is tri-state.** `null` during an outage, never `false` — which
+  would invite installing a second proxy beside the one already running.
+
+### 11.6 Two gates, and one deliberate departure
+
+`ADMIN_ALLOW_MUTATIONS` and `ADMIN_ROUTER_MANAGE_ENABLED`, both required for a
+real write, refusals audited.
+
+**The dry run is permitted with the feature gate off** — unlike §9.1's node
+debug pods, where the projection is itself withheld. The difference is what the
+projection *is*. A node debug pod's manifest is a working recipe for a
+privileged pod on a deployment that switched the feature off. The router's
+manifests are a pinned copy of a public upstream bundle, and an operator
+deciding whether to open the gate has to be able to read what it would create.
+Withholding it would be asking somebody to enable a feature sight unseen.
+
+### 11.7 What §14 does not claim
+
+* **It does not serve HTTPRoutes.** The HAProxy Kubernetes Ingress Controller
+  implements Gateway API for TCPRoute only. Enabling the Gateway API option
+  grants the permissions and sets the controller name and an HTTPRoute is still
+  never accepted. The console says so on the page, before anyone writes one.
+* **It does not serve OpenShift Routes**, and should not: that cluster already
+  runs its own router, and a second one contending for the same hostnames is how
+  an outage starts.
+* **`upgradeAvailable` is not "a newer HAProxy exists".** It is "the installed
+  version differs from the one this console ships" — the only version claim this
+  console can make honestly, since the other would be a statement about a third
+  party's release history read out of a string baked into this repo.
+* **Preflight cannot see RBAC escalation prevention.** See
+  [`adr-0004-shipped-router.md`](adr-0004-shipped-router.md); the console
+  rewrites the *hint* on that one failure and leaves the code mapped by status.
+* **Nothing here prevents two routers contending.** The install refuses to adopt
+  another controller's objects and the default-class option is off, but an
+  operator can still run this beside nginx and write an Ingress both could
+  claim. `otherClasses[]` is what lets the page say what else is already there —
+  and it is `null`, never `[]`, when that listing failed.
+
+---
+
+## 12. What this model does not claim
 
 Being honest about the edges is part of the model:
 

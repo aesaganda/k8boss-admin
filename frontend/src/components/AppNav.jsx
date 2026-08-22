@@ -101,6 +101,11 @@ export default function AppNav() {
             only itself. */}
         <RouterNavItem to="/storage">Storage</RouterNavItem>
         <RouterNavItem to="/network">Network</RouterNavItem>
+        {/* Routes sits beside Network rather than inside it: Network is a
+            browser over what exists, and this is the one page in the
+            console that makes something reachable from outside the
+            cluster. Burying that under a tab would be the wrong weight. */}
+        <RouterNavItem to="/routes">Routes</RouterNavItem>
         {/* Gateway API resources are CRD-backed and often absent — "(beta)"
             in the label is the same signal §1.2 gives every unsupported entry:
             a cluster with none of this installed is a normal cluster, not a

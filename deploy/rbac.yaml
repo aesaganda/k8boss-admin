@@ -168,10 +168,25 @@ rules:
     resources: ["jobs", "cronjobs"]
     verbs: ["get", "list", "watch"]
 
-  # §8 Ingresses. `ingressclasses` fills the `class` column for an Ingress whose
-  # spec names none; without it the column is blank rather than wrong.
+  # §8 Ingresses, and §13's Ingress backend. `ingressclasses` fills the `class`
+  # column for an Ingress whose spec names none; without it the column is blank
+  # rather than wrong. §14 also lists them to answer "what else is serving
+  # Ingresses on this cluster" before offering to install a router — withheld,
+  # that list is `null` rather than `[]`, and the console says it does not know
+  # rather than claiming nothing else is there.
   - apiGroups: ["networking.k8s.io"]
     resources: ["ingresses", "ingressclasses", "networkpolicies"]
+    verbs: ["get", "list", "watch"]
+
+  # §13 Routes — the OpenShift backend. Absent on every cluster that is not
+  # OpenShift, and that is an ordinary state: `route.openshift.io` then resolves
+  # to `unsupported`, the Routes page reports the backend as "not present on
+  # this cluster", and nothing is coloured red. Withholding this rule on a
+  # cluster that DOES serve Routes is different and worse — discovery is
+  # refused, the backend resolves to `unknown`, and §13 deliberately refuses to
+  # report that as absence.
+  - apiGroups: ["route.openshift.io"]
+    resources: ["routes"]
     verbs: ["get", "list", "watch"]
 
   # §8 storage classes — `is_default` is read from the annotation on the class,
@@ -400,6 +415,75 @@ rules:
   - apiGroups: ["networking.k8s.io"]
     resources: ["ingresses", "networkpolicies"]
     verbs: ["create", "update", "patch", "delete"]
+
+  # §13 writes. Three separate rules because they are three separate RBAC
+  # resources, and an install may reasonably want one without the others: an
+  # account allowed to write Ingresses is very often not allowed to write
+  # Routes. Withholding any one of them disables that backend's create button
+  # with the reason (§11.4) rather than hiding it.
+  #
+  # `routes/custom-host` is NOT optional if Routes are wanted, and it is the
+  # rule people miss. OpenShift gates *choosing a hostname* behind its own
+  # subresource, separately from creating the Route at all. Without it, the
+  # console's preflight on `create routes` passes, the API server refuses the
+  # write, and the operator is told they cannot create Routes — a permission
+  # the review just confirmed they hold. §13 preflights the subresource
+  # explicitly so the denial names this line.
+  - apiGroups: ["route.openshift.io"]
+    resources: ["routes", "routes/custom-host"]
+    verbs: ["create", "update", "patch", "delete"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["httproutes"]
+    verbs: ["create", "update", "patch", "delete"]
+
+  # §14 the shipped router. THE SECOND-LARGEST GRANT IN THIS FILE after the
+  # wildcard below — read it before applying.
+  #
+  # These are the verbs the console needs to CREATE the router's own objects.
+  # The router's ClusterRole, which these let the console create, is what can
+  # then read every Secret in the cluster: an ingress controller that terminates
+  # TLS must read certificate Secrets, and RBAC cannot scope that to "only the
+  # ones an Ingress references". The console shows that object in the diff
+  # before creating it, which is the only honest way to hand somebody a grant
+  # of that size.
+  #
+  # DELETE THESE RULES to keep the console out of the business of installing a
+  # data plane. What degrades: the Routes page's router panel reports the
+  # install action as denied with the reason, the plan stays readable (it is a
+  # pure render and touches no cluster), and every §13 exposure keeps working
+  # against whatever controller the cluster already runs.
+  - apiGroups: [""]
+    resources: ["namespaces", "serviceaccounts"]
+    verbs: ["create", "update", "patch", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingressclasses"]
+    verbs: ["create", "update", "patch", "delete"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterroles", "clusterrolebindings"]
+    verbs: ["create", "update", "patch", "delete"]
+
+  # §14, and the rule whose absence produces the most confusing failure in this
+  # whole file.
+  #
+  # `escalate` and `bind` are not ordinary verbs. Kubernetes refuses to let an
+  # identity create a ClusterRole granting permissions it does not itself hold,
+  # or bind a role it does not hold — enforced at admission, not by RBAC verb
+  # matching, and therefore INVISIBLE to a SelfSubjectAccessReview. Without
+  # these two, the console's preflight on `create clusterroles` answers "yes",
+  # object 3 of 8 then fails with 403 `attempt to grant extra privileges`, and
+  # the install is half-finished.
+  #
+  # `escalate` is a privilege-escalation primitive by design: it lets this
+  # ServiceAccount write a role granting anything, including more than it holds.
+  # It is granted here only because the console is already bound to the wildcard
+  # rule below. On a deployment that has deleted that rule, granting `escalate`
+  # re-opens what deleting it closed — so delete these two along with it.
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterroles"]
+    verbs: ["escalate"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterroles", "clusterrolebindings"]
+    verbs: ["bind"]
 
   # §4 generic write over ANYTHING the cluster serves — CRDs included.
   #

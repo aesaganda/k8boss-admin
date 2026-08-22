@@ -156,6 +156,39 @@ class Settings(BaseSettings):
         ),
     )
 
+    # -- the shipped router (§14) ------------------------------------------
+    router_manage_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("ADMIN_ROUTER_MANAGE_ENABLED", "router_manage_enabled"),
+        description=(
+            "Allows this console to install, upgrade and remove the HAProxy "
+            "ingress controller it ships (§14). Its own gate on top of "
+            "admin_allow_mutations, and the reason is the size of what an "
+            "install creates: a cluster-scoped ClusterRole that can read every "
+            "Secret in the cluster — which is what any ingress controller needs "
+            "to terminate TLS, and which RBAC cannot narrow — plus a process on "
+            "the cluster's ingress path. An operator may reasonably want every "
+            "other write in this console without wanting it to put a proxy on "
+            "their cluster. Off does not hide the feature: the install plan and "
+            "its diff still render, because reading what would be created is a "
+            "read, and deciding whether to turn this on requires it."
+        ),
+    )
+    router_namespace: str = Field(
+        default="k8boss-router",
+        validation_alias=AliasChoices("ADMIN_ROUTER_NAMESPACE", "router_namespace"),
+        min_length=1,
+        max_length=253,
+        description=(
+            "Default namespace the shipped router is installed into, and where "
+            "status looks when the cluster carries no installation to discover "
+            "it from. Only a default: the namespace an installed router actually "
+            "lives in is read back off its ClusterRoleBinding, so this setting "
+            "changing does not make the console lose track of a router that is "
+            "already running."
+        ),
+    )
+
     # -- console authentication ------------------------------------------
     auth_enabled: bool = Field(
         default=False,

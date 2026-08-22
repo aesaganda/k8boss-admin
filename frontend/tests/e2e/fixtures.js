@@ -554,6 +554,275 @@ export const FIXTURES = {
     namespace: 'default',
   },
 
+
+  /**
+   * §13 route capabilities.
+   *
+   * The important part of this fixture is that it carries all three states at
+   * once: `ingress` available, `openshift` unsupported, `gateway` unknown. A
+   * page that renders the second and third the same way is the defect the whole
+   * §13 read model exists to prevent — "this cluster has no Routes" and "we
+   * could not find out whether it has Routes" send an operator to two very
+   * different places.
+   */
+  routeCapabilities: {
+    items: [
+      {
+        backend: 'openshift',
+        kind: 'Route',
+        group: 'route.openshift.io',
+        version: null,
+        plural: 'routes',
+        label: 'OpenShift Route',
+        summary: 'The native OpenShift exposure.',
+        state: 'unsupported',
+        detail: 'This cluster does not serve Route objects.',
+        features: [
+          { feature: 'edge-tls', label: 'Terminate TLS at the router (edge)', supported: true },
+          { feature: 'passthrough-tls', label: 'Pass TLS through to the pod without terminating it', supported: true },
+          { feature: 'reencrypt-tls', label: 'Terminate TLS at the router and re-encrypt to the pod', supported: true },
+          { feature: 'insecure-redirect', label: 'Redirect plain HTTP to HTTPS', supported: true },
+          { feature: 'insecure-allow', label: 'Serve the same content on plain HTTP as well as HTTPS', supported: true },
+          { feature: 'weighted-backends', label: 'Split traffic across several Services by weight', supported: true },
+          { feature: 'wildcard-subdomain', label: 'Answer for every subdomain of the hostname', supported: true },
+          { feature: 'generated-host', label: 'Let the router pick the hostname', supported: true },
+          { feature: 'path-exact', label: 'Match the path exactly rather than as a prefix', supported: false },
+        ],
+      },
+      {
+        backend: 'ingress',
+        kind: 'Ingress',
+        group: 'networking.k8s.io',
+        version: 'v1',
+        plural: 'ingresses',
+        label: 'Ingress',
+        summary: 'The portable exposure every ingress controller understands.',
+        state: 'available',
+        detail: 'This cluster serves networking.k8s.io/v1 ingresses.',
+        features: [
+          { feature: 'edge-tls', label: 'Terminate TLS at the router (edge)', supported: true },
+          { feature: 'passthrough-tls', label: 'Pass TLS through to the pod without terminating it', supported: false },
+          { feature: 'reencrypt-tls', label: 'Terminate TLS at the router and re-encrypt to the pod', supported: false },
+          { feature: 'insecure-redirect', label: 'Redirect plain HTTP to HTTPS', supported: false },
+          { feature: 'insecure-allow', label: 'Serve the same content on plain HTTP as well as HTTPS', supported: false },
+          { feature: 'weighted-backends', label: 'Split traffic across several Services by weight', supported: false },
+          { feature: 'wildcard-subdomain', label: 'Answer for every subdomain of the hostname', supported: false },
+          { feature: 'generated-host', label: 'Let the router pick the hostname', supported: false },
+          { feature: 'path-exact', label: 'Match the path exactly rather than as a prefix', supported: true },
+        ],
+      },
+      {
+        backend: 'gateway',
+        kind: 'HTTPRoute',
+        group: 'gateway.networking.k8s.io',
+        version: null,
+        plural: 'httproutes',
+        label: 'Gateway API HTTPRoute',
+        summary: 'The upstream successor to Ingress.',
+        state: 'unknown',
+        detail:
+          'Whether this cluster serves HTTPRoute objects could not be determined: the API server did not answer for gateway.networking.k8s.io. This is not the same as the cluster not having them.',
+        features: [
+          { feature: 'edge-tls', label: 'Terminate TLS at the router (edge)', supported: false },
+          { feature: 'passthrough-tls', label: 'Pass TLS through to the pod without terminating it', supported: false },
+          { feature: 'reencrypt-tls', label: 'Terminate TLS at the router and re-encrypt to the pod', supported: false },
+          { feature: 'insecure-redirect', label: 'Redirect plain HTTP to HTTPS', supported: true },
+          { feature: 'insecure-allow', label: 'Serve the same content on plain HTTP as well as HTTPS', supported: false },
+          { feature: 'weighted-backends', label: 'Split traffic across several Services by weight', supported: true },
+          { feature: 'wildcard-subdomain', label: 'Answer for every subdomain of the hostname', supported: false },
+          { feature: 'generated-host', label: 'Let the router pick the hostname', supported: false },
+          { feature: 'path-exact', label: 'Match the path exactly rather than as a prefix', supported: true },
+        ],
+      },
+    ],
+    continue: null,
+    remaining: null,
+    partial: true,
+    unavailable: [
+      {
+        group: 'gateway.networking.k8s.io',
+        resource: 'httproutes',
+        namespace: null,
+        reason: 'unreachable',
+        detail: 'the API server did not answer for gateway.networking.k8s.io',
+      },
+    ],
+  },
+
+  /**
+   * §13 exposures. Three rows carrying the three `admitted` states, because
+   * that column is the one a green row can lie in.
+   */
+  routes: {
+    items: [
+      {
+        id: 'ingress/prod/shop',
+        backend: 'ingress',
+        kind: 'Ingress',
+        group: 'networking.k8s.io',
+        version: 'v1',
+        plural: 'ingresses',
+        name: 'shop',
+        namespace: 'prod',
+        hosts: ['shop.example.com'],
+        subdomain: null,
+        path: '/',
+        pathType: 'Prefix',
+        paths: [{ path: '/', pathType: 'Prefix', service: 'shop', port: 80, weight: null }],
+        targets: [{ service: 'shop', port: 80, weight: null }],
+        tls: { termination: 'edge', insecurePolicy: null, inlineCertificate: false, secretName: 'shop-tls' },
+        wildcardPolicy: null,
+        // Always null for an Ingress: the API has no admission condition.
+        admitted: null,
+        admittedDetail: null,
+        addresses: ['a1b2.elb.eu-west-1.amazonaws.com'],
+        ingressClass: 'haproxy',
+        tlsHosts: ['shop.example.com'],
+        parents: [],
+        age_seconds: 86400,
+        resourceVersion: '4021',
+        managedBy: { controller: null, tool: null, marker: null, detail: null },
+      },
+      {
+        id: 'ingress/prod/admin',
+        backend: 'ingress',
+        kind: 'Ingress',
+        group: 'networking.k8s.io',
+        version: 'v1',
+        plural: 'ingresses',
+        name: 'admin',
+        namespace: 'prod',
+        hosts: ['admin.example.com'],
+        subdomain: null,
+        path: '/',
+        pathType: 'Prefix',
+        paths: [{ path: '/', pathType: 'Prefix', service: 'admin', port: 8080, weight: null }],
+        targets: [{ service: 'admin', port: 8080, weight: null }],
+        tls: { termination: null, insecurePolicy: null, inlineCertificate: false, secretName: null },
+        wildcardPolicy: null,
+        admitted: null,
+        // The fixture that matters: no controller has claimed it. Not "rejected".
+        admittedDetail:
+          'No ingress controller has published an address for this Ingress. That is what an unclaimed Ingress looks like, and also what one on a cluster with no ingress controller looks like.',
+        addresses: [],
+        ingressClass: 'haproxy',
+        tlsHosts: [],
+        parents: [],
+        age_seconds: 3600,
+        resourceVersion: '4022',
+        // The case the column exists for: an edit here succeeds, reports
+        // `applied: true` truthfully, and is reverted seconds later.
+        managedBy: {
+          controller: { kind: 'Shop', name: 'storefront', apiVersion: 'example.com/v1' },
+          tool: null,
+          marker: null,
+          detail:
+            'This exposure is owned by Shop storefront, which is reconciling it. An edit made here will be applied and then reverted, and nothing will say so.',
+        },
+      },
+    ],
+    continue: null,
+    remaining: null,
+    partial: false,
+    unavailable: [],
+    backends: [],
+    truncated: [],
+  },
+
+  /** §14 — nothing installed, both gates shut. The default a fresh console shows. */
+  routerAbsent: {
+    enabled: false,
+    enabledDetail:
+      'Managing the shipped router is disabled on this deployment (ADMIN_ROUTER_MANAGE_ENABLED is off).',
+    installed: false,
+    namespace: 'k8boss-router',
+    namespaceDiscovered: false,
+    shippedVersion: '3.2.13',
+    installedVersion: null,
+    upgradeAvailable: null,
+    deployment: { present: false, version: null, desiredReplicas: null, readyReplicas: null, image: null, detail: null },
+    service: { present: false, type: null, addresses: [], nodePorts: [], detail: null },
+    ingressClass: { present: false, name: 'haproxy', default: null, controller: null },
+    serves: [
+      { backend: 'ingress', served: true, detail: 'The shipped router is an Ingress controller.' },
+      {
+        backend: 'gateway',
+        served: false,
+        detail:
+          'The HAProxy Kubernetes Ingress Controller implements Gateway API for TCPRoute only — HTTPRoute is not implemented.',
+      },
+      {
+        backend: 'openshift',
+        served: false,
+        detail: "Routes are served by OpenShift's own router, which an OpenShift cluster already runs.",
+      },
+    ],
+    image: 'docker.io/haproxytech/kubernetes-ingress:3.2.13',
+    partial: false,
+    unavailable: [],
+  },
+
+  /**
+   * §14 — the read failed. `installed: null`, and the page must not render that
+   * as "not installed": installing then would put a second proxy on the
+   * cluster's ingress path.
+   */
+  routerUnknown: {
+    enabled: true,
+    enabledDetail: 'Router management is enabled on this deployment.',
+    installed: null,
+    namespace: 'k8boss-router',
+    namespaceDiscovered: false,
+    shippedVersion: '3.2.13',
+    installedVersion: null,
+    upgradeAvailable: null,
+    deployment: { present: false, version: null, desiredReplicas: null, readyReplicas: null, image: null, detail: null },
+    service: { present: false, type: null, addresses: [], nodePorts: [], detail: null },
+    ingressClass: { present: false, name: 'haproxy', default: null, controller: null },
+    serves: [
+      { backend: 'ingress', served: true, detail: 'The shipped router is an Ingress controller.' },
+      { backend: 'gateway', served: false, detail: 'HTTPRoute is not implemented by this controller.' },
+      { backend: 'openshift', served: false, detail: "Routes are served by OpenShift's own router." },
+    ],
+    image: 'docker.io/haproxytech/kubernetes-ingress:3.2.13',
+    partial: true,
+    unavailable: [
+      {
+        group: 'apps',
+        resource: 'deployments',
+        namespace: 'k8boss-router',
+        reason: 'forbidden',
+        detail: 'deployments is forbidden',
+      },
+    ],
+  },
+
+  routerPlan: {
+    version: '3.2.13',
+    image: 'docker.io/haproxytech/kubernetes-ingress:3.2.13',
+    options: {
+      namespace: 'k8boss-router',
+      serviceType: 'LoadBalancer',
+      replicas: 2,
+      ingressClassName: 'haproxy',
+      defaultClass: false,
+      gatewayApi: false,
+    },
+    serves: [
+      { backend: 'ingress', served: true, detail: 'The shipped router is an Ingress controller.' },
+      {
+        backend: 'gateway',
+        served: false,
+        detail: 'The HAProxy Kubernetes Ingress Controller implements Gateway API for TCPRoute only.',
+      },
+      { backend: 'openshift', served: false, detail: "Routes are served by OpenShift's own router." },
+    ],
+    objects: [
+      { kind: 'Namespace', name: 'k8boss-router', namespace: null, group: '', resource: 'namespaces', yaml: 'apiVersion: v1\nkind: Namespace\n' },
+      { kind: 'ClusterRole', name: 'k8boss-admin-router', namespace: null, group: 'rbac.authorization.k8s.io', resource: 'clusterroles', yaml: 'kind: ClusterRole\n' },
+    ],
+  },
+
   emptyList: { items: [], continue: null, remaining: null, partial: false, unavailable: [] },
 };
 
@@ -575,6 +844,13 @@ export async function mockApi(
     nodeDebug = null,
     nodeDebugCreate = null,
     nodeDebugDeletes = [],
+    routeCapabilities = null,
+    routes = null,
+    routeRender = null,
+    routeWrite = null,
+    routeDetail = null,
+    routerStatus = null,
+    routerInstall = null,
   } = {},
 ) {
   // Counted so a spec can hand back a different manifest on the second read —
@@ -771,6 +1047,132 @@ export async function mockApi(
           : { verb: 'list', group: 'apps', resource: 'deployments', namespace: null, allowed: true, reason: '', evaluationError: null, hint: null },
       );
     }
+
+    /* ── §13 routes and §14 the shipped router ─────────────────────────── */
+
+    // Ordered before the generic branches below and before each other's
+    // prefixes: `/routes/capabilities` and `/routes/render` both live under
+    // `/routes/…`, and a router matching the exposure path first would answer
+    // a capabilities read with a single exposure.
+    if (path === '/routes/capabilities') {
+      return json(routeCapabilities ?? FIXTURES.routeCapabilities);
+    }
+    if (path === '/routes/render') {
+      const body = JSON.parse(route.request().postData() || '{}');
+      return json(
+        routeRender
+          ? routeRender(body)
+          : {
+              backend: body.backend,
+              kind: body.backend === 'ingress' ? 'Ingress' : 'Route',
+              group: 'networking.k8s.io',
+              version: 'v1',
+              plural: 'ingresses',
+              document: {},
+              yaml: `apiVersion: networking.k8s.io/v1\nkind: Ingress\nmetadata:\n  name: ${
+                body.spec?.name ?? 'x'
+              }\n`,
+              lossy: [],
+              preserved: [],
+              requested: [],
+            },
+      );
+    }
+    if (path === '/routes' && route.request().method() === 'POST') {
+      const body = JSON.parse(route.request().postData() || '{}');
+      return json(
+        routeWrite
+          ? routeWrite(body)
+          : {
+              dryRun: body.dryRun !== false,
+              // Derived, never echoed: §1.5 makes `applied` the only evidence
+              // a cluster changed.
+              applied: body.dryRun === false,
+              verb: 'create',
+              target: {
+                group: 'networking.k8s.io', version: 'v1', resource: 'ingresses',
+                namespace: body.spec?.namespace ?? 'prod', name: body.spec?.name ?? 'x',
+              },
+              diff: {
+                before: '',
+                after: 'apiVersion: networking.k8s.io/v1\nkind: Ingress\n',
+                unified:
+                  '--- live\n+++ projected\n@@ -0,0 +1,4 @@\n+apiVersion: networking.k8s.io/v1\n+kind: Ingress\n',
+                changed: true,
+              },
+              resourceVersion: '5001',
+              warnings: [],
+              auditId: 7100,
+              route: { backend: body.backend, kind: 'Ingress', lossy: [], preserved: [] },
+            },
+      );
+    }
+    if (path === '/routes') return json(routes ?? FIXTURES.routes);
+    if (/^\/routes\/[^/]+\/[^/]+\/[^/]+$/.test(path)) {
+      if (route.request().method() === 'GET') {
+        return json(
+          routeDetail ?? {
+            route: FIXTURES.routes.items[0],
+            manifest: {
+              apiVersion: 'networking.k8s.io/v1',
+              kind: 'Ingress',
+              metadata: { name: 'shop', namespace: 'prod', resourceVersion: '4021' },
+              spec: {},
+            },
+            backend: FIXTURES.routeCapabilities.items[1],
+          },
+        );
+      }
+      // PUT and DELETE answer with a §1.5 mutation response.
+      const isDelete = route.request().method() === 'DELETE';
+      const url = new URL(route.request().url());
+      const dryRun = isDelete
+        ? url.searchParams.get('dryRun') !== 'false'
+        : JSON.parse(route.request().postData() || '{}').dryRun !== false;
+      return json({
+        dryRun,
+        applied: !dryRun,
+        verb: isDelete ? 'delete' : 'update',
+        target: { group: 'networking.k8s.io', version: 'v1', resource: 'ingresses', namespace: 'prod', name: 'shop' },
+        diff: { before: 'kind: Ingress\n', after: isDelete ? '' : 'kind: Ingress\n', unified: '--- live\n+++ projected\n@@ -1 +1 @@\n-a\n+b\n', changed: true },
+        resourceVersion: isDelete ? null : '4022',
+        warnings: [],
+        auditId: 7101,
+        route: { backend: 'ingress', kind: 'Ingress', lossy: [], preserved: [] },
+      });
+    }
+    if (path === '/router/plan') return json(FIXTURES.routerPlan);
+    if (path === '/router') {
+      if (route.request().method() === 'POST') {
+        const body = JSON.parse(route.request().postData() || '{}');
+        return json(
+          routerInstall
+            ? routerInstall(body)
+            : {
+                dryRun: body.dryRun !== false,
+                installed: body.dryRun === false,
+                failed: 0,
+                version: '3.2.13',
+                namespace: body.namespace || 'k8boss-router',
+                ingressClassName: body.ingressClassName || 'haproxy',
+                objects: [],
+                serves: FIXTURES.routerPlan.serves,
+                options: FIXTURES.routerPlan.options,
+              },
+        );
+      }
+      if (route.request().method() === 'DELETE') {
+        const url = new URL(route.request().url());
+        const dryRun = url.searchParams.get('dryRun') !== 'false';
+        return json({
+          dryRun, removed: 7, failed: 0, uninstalled: !dryRun,
+          objects: [], skipped: [],
+          retained: [{ kind: 'Namespace', name: 'k8boss-router', reason: 'Deleting a namespace cannot be undone.' }],
+        });
+      }
+      return json(routerStatus ?? FIXTURES.routerAbsent);
+    }
+
     // Everything else: a well-formed, complete, empty listing. Complete on
     // purpose — an unmocked endpoint must not accidentally satisfy the
     // partial-banner assertions below.

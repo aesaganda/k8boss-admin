@@ -1187,3 +1187,329 @@ does not, the stored role is left alone rather than reset (§12.4). The `admin` 
 user-administration surface; both `admin` and `user` identities retain the
 console's normal cluster capabilities, still constrained by preflight and the
 deployment-wide mutation gate.
+
+---
+
+## 13. Routes — exposing a Service to the outside world
+
+One operator question — *what is reachable from outside, and where does it go* —
+answered across the three unrelated APIs that can answer it. The console models
+an **exposure** (a hostname, a path, one or more target Services, a decision
+about TLS) in OpenShift's vocabulary, because it is the only one of the three
+with a field for every part of it, and compiles that model down to whichever API
+the cluster actually serves.
+
+### 13.1 The three backends
+
+| `backend` | Kind | Group | Notes |
+|---|---|---|---|
+| `openshift` | `Route` | `route.openshift.io` | Lossless. Every feature is one field. |
+| `ingress` | `Ingress` | `networking.k8s.io` | Portable, and the lossiest. |
+| `gateway` | `HTTPRoute` | `gateway.networking.k8s.io` | Weights and redirects are real fields; TLS belongs to the Gateway. |
+
+Two of the three are CRDs whose served version depends on which release the
+cluster installed, so the version is **resolved through discovery** and never
+assumed. Pinning `gateway.networking.k8s.io/v1` 404s on a cluster serving
+`v1beta1`, and a 404 reads as "this cluster has no HTTPRoutes".
+
+### 13.2 Backend state is three-valued
+
+`available` / `unsupported` / `unknown`, and the third is not a variant of the
+second:
+
+- `available` — discovery lists the resource.
+- `unsupported` — discovery answered and it is not there. **An ordinary fact.**
+- `unknown` — discovery could not answer for that group. **We do not know.**
+
+`resolve()` already refuses to report `unsupported` for a group in its own
+`unavailable` list; §13 only has to not undo that. Getting it backwards during
+an aggregated-API outage tells an operator their Routes are gone, and the action
+that follows is re-creating an exposure on a hostname that is already claimed.
+
+**Only `unknown` makes the listing partial.** `unsupported` does *not* go in
+`unavailable[]` — a cluster that does not serve `route.openshift.io` is not a
+cluster whose Routes we failed to read, there are none, and raising the §1.2
+banner on the Routes page of every non-OpenShift cluster would train operators
+to ignore it. Per-backend state is reported in its own `backends[]` field.
+
+### 13.3 The exposure features
+
+Nine stable tokens. The frontend branches on them to disable a control **with
+the reason** (§11.4), so they are contract, not an internal enum.
+
+`edge-tls`, `passthrough-tls`, `reencrypt-tls`, `insecure-redirect`,
+`insecure-allow`, `weighted-backends`, `wildcard-subdomain`, `generated-host`,
+`path-exact`.
+
+`GET /api/routes/capabilities` reports **all nine for every backend**, including
+the unsupported ones — an absent key carries no reason, and §11.4 needs one.
+
+### 13.4 `GET /api/routes?namespace=&backend=&limit=`
+
+The §1.2 envelope, plus `backends[]` (§13.2) and `truncated[]`. `continue` is
+deliberately **not** propagated: three independent listings cannot share one
+cursor, and a token meaning "page 2 of the Ingresses and page 1 of everything
+else" produces a table that skips rows.
+
+Each row:
+
+```json
+{
+  "id": "ingress/prod/shop", "backend": "ingress", "kind": "Ingress",
+  "group": "networking.k8s.io", "version": "v1", "plural": "ingresses",
+  "name": "shop", "namespace": "prod",
+  "hosts": ["shop.example.com"], "subdomain": null,
+  "path": "/", "pathType": "Prefix", "paths": [ ... ],
+  "targets": [{"service": "shop", "port": 80, "weight": null}],
+  "tls": {"termination": "edge", "insecurePolicy": null,
+          "inlineCertificate": false, "secretName": "shop-tls"},
+  "wildcardPolicy": null,
+  "admitted": null, "admittedDetail": "...",
+  "addresses": ["a1b2.elb.eu-west-1.amazonaws.com"],
+  "ingressClass": "haproxy", "tlsHosts": ["shop.example.com"], "parents": [],
+  "age_seconds": 86400, "resourceVersion": "4021"
+}
+```
+
+**`admitted` is tri-state and the third value is the common one.**
+
+- `true` — a router admitted it. When another shard *refused* it, that is named
+  in `admittedDetail` rather than hidden: a Route admitted by `default` and
+  refused by `internal` with `HostAlreadyClaimed` is served on one shard and not
+  the other, and a bare green badge hides the half the operator came to find.
+- `false` — every router that reported refused it, carrying the reason verbatim.
+- `null` — **no router has reported.** Not a rejection. Also, permanently, the
+  value for every Ingress: the Ingress API has no admission condition at all,
+  and whether a controller took the object is visible only through `addresses`.
+
+**`admitted` is not generation-scoped, and cannot be.** §6 refuses to believe a
+workload's counts until `status.observedGeneration` matches `metadata.generation`.
+`RouteIngressCondition` has no such field: there is nothing in a Route saying
+which generation of the spec a router's verdict is about. An `Admitted: True`
+written before the hostname was changed still reads as `True` afterwards. The
+console does not synthesise a substitute from `lastTransitionTime` — that moves
+when the condition's *status* changes, not when the spec does, so comparing it
+would manufacture confidence from a timestamp that means something else. This is
+a limitation of the Route API, stated rather than papered over.
+
+`managedBy` reports whether something other than a person owns the exposure:
+`controller` from an `ownerReferences` entry with `controller: true`
+(definitive — something is reconciling it now), `tool` from a Helm, Argo CD or
+Flux marker (advisory — whether an edit survives depends on that tool's drift
+mode). All keys present and `null` throughout when nothing owns it.
+`kubectl.kubernetes.io/last-applied-configuration` is deliberately **not** a
+marker: it means somebody once ran `kubectl apply`, not that anything is
+watching, and flagging it would warn on a large fraction of every cluster's
+objects. `app.kubernetes.io/instance` is recognised but attributed to no tool,
+because Helm, hand-written manifests and half the ecosystem all set it.
+
+An edit to a controller-owned exposure succeeds, reports `applied: true`
+truthfully, and is reverted seconds later. Both halves are true at once, which
+is why the row carries this and the edit dialog says it before the diff.
+
+`targets[].weight` is `null`, never `100`, on a single-backend exposure. A
+weight rendered where no split was configured reads as one that was.
+
+A Route's `tls` reports `inlineCertificate: true|false` and **never the key**.
+The key lives in the object's own spec — an OpenShift API design fact, not a
+choice this console gets to make — but a list endpoint that echoed it would put
+key material in a table.
+
+### 13.5 `POST /api/routes/render` — compile, and write nothing
+
+Body `{backend, spec?, document?}`. Returns
+`{yaml, document, backend, kind, group, version, plural, lossy[], preserved[], requested[], verbatim}`.
+
+Not preflighted and not audited, because nothing happens. It reads the cluster
+only to resolve the served API version.
+
+Two modes:
+
+- **`spec` given** — the form's fields are compiled and patched **into**
+  `document` rather than replacing it. A `spec.rules[1]` somebody hand-wrote, a
+  controller annotation, an `externalCertificate` reference: all of it survives
+  a trip through the form, and `preserved[]` names each path the form is not
+  showing.
+- **`spec` omitted, `document` given** — the document is taken **verbatim**.
+  `lossy` and `preserved` are empty as statements of fact: the console compiled
+  nothing, so it dropped nothing and hides nothing. This is what the YAML view
+  sends once the operator has edited it, and without it a hand-edited document
+  would have the form's fields recompiled over the top of it at write time.
+
+### 13.6 `lossy[]`, and the acknowledgement that gates a write
+
+An Ingress cannot express passthrough TLS. The compiler does **not** emit a
+controller-specific annotation and hope, and it does not quietly downgrade. It
+returns the object it can write plus:
+
+```json
+{"feature": "passthrough-tls",
+ "label": "Pass TLS through to the pod without terminating it",
+ "consequence": "The Ingress API cannot express passthrough. This exposure will be written with the router terminating TLS instead, so client certificates the pod expects will not arrive…",
+ "mitigation": "Write this as an OpenShift Route if the cluster serves them, or use a Gateway API TLSRoute…"}
+```
+
+Every entry answers *what happens to my traffic* and then *what to do instead*,
+in that order. A warning that answers only the first is one people click past.
+
+**A write is refused with `422 invalid` unless `acknowledgeLossy` names every
+entry.** The same shape as `force` on a node drain, and for the same reason:
+consenting to a consequence is a separate act from requesting the change. The
+list is per-feature, not a boolean, so a caller that acknowledged one
+consequence and then edited the form must read the new one.
+
+No compiler output ever contains a vendor annotation of its own
+(`nginx.ingress.kubernetes.io/…`, `haproxy.org/…`, `traefik…`). Asserted by a
+test rather than stated as policy — that is the exact pressure point where
+"report it as lossy" gets quietly reversed into "guess the controller", and a
+reversal would leave `lossy[]` claiming a feature was dropped while the object
+silently carried it. An annotation the *operator* supplies is written, because
+they chose it for a controller they know they are running.
+
+### 13.7 Writes
+
+- `POST /api/routes` — `{backend, spec?, document?, acknowledgeLossy[], dryRun}`
+- `PUT /api/routes/{backend}/{namespace}/{name}` — the above plus a required
+  `resourceVersion`
+- `DELETE /api/routes/{backend}/{namespace}/{name}?dryRun=` — `dryRun` is a
+  query parameter for the same reason §4's delete is
+
+All three return the §1.5 mutation response, with an extra `route` object
+carrying `{backend, kind, lossy, preserved, verbatim}`.
+
+They delegate to `app.admin.apply.create_from_yaml` / `update_from_yaml` /
+`delete_resource`, which is what routes them through the single funnel. A second
+create path here would be a second place for the gate, the preflight, the dry
+run and the audit row to be got right. What §13 adds is the audit *sentence*:
+`create Route checkout: expose checkout:8080 at https://checkout.example.com/ (edge)`
+rather than `create Route checkout`, because the question the trail is asked is
+who exposed the payments service to the internet, and the generic sentence does
+not answer it. A verbatim write says so instead —
+`create Ingress prod/checkout (written verbatim from the YAML view)` — because
+the console did not model the intent and must not narrate one it inferred.
+
+**`routes/custom-host` is preflighted separately.** OpenShift gates *choosing a
+hostname* behind its own RBAC subresource, distinct from creating the Route. The
+funnel preflights `create routes`, that review passes, and the API server then
+refuses the write — so without this the operator is told they cannot create
+Routes, a permission the review just confirmed they hold. It is checked only for
+`openshift` and only when `spec.host` is set (a generated hostname is not a
+custom one), and the denial is audited here because it happens outside the
+funnel.
+
+---
+
+## 14. The shipped router
+
+k8boss-admin ships a reverse proxy and can install it. That is a deliberate
+departure from *not a deployment engine*, and the shape of the departure is the
+whole design: **the console writes manifests, and nothing else.**
+
+There is no controller in the console process, no reconcile loop, and no desired
+state stored anywhere. Install, upgrade and uninstall are each a sequence of
+ordinary writes — one per object, each through `mutate()`, each gated,
+preflighted, dry-run, diffed and audited exactly like a scale. What keeps the
+router running is the Kubernetes control plane. What routes traffic is HAProxy's
+own in-cluster controller. `GET /api/router` is a live read like every other page
+in this console.
+
+### 14.1 What it is, and what it does not serve
+
+HAProxy Kubernetes Ingress Controller, pinned, as eight objects: Namespace,
+ServiceAccount, ClusterRole, ClusterRoleBinding, IngressClass, ConfigMap,
+Deployment, Service. `deploy/router.yaml` is the same bundle at default options,
+generated by `make router-manifest` and enforced by a test, so
+`kubectl apply -f` and pressing Install are demonstrably the same install.
+
+`serves[]` reports, as facts about the software rather than about the
+installation:
+
+| backend | served | why |
+|---|---|---|
+| `ingress` | **yes** | It is an Ingress controller. This is the point of it. |
+| `gateway` | **no** | The controller implements Gateway API for **TCPRoute only**. Enabling the Gateway API option grants the permissions and the controller name and it still will not accept an HTTPRoute. |
+| `openshift` | **no** | Routes are served by OpenShift's own router, which an OpenShift cluster already runs. A second one contending for the same hostnames is how an outage starts. |
+
+### 14.2 `GET /api/router`
+
+A live read, never cached. `installed` is **tri-state**: `true`, `false`, or
+`null` when one of the reads failed — reporting `false` during an API outage
+invites an operator to install a second router on top of the one already
+running. `deployment.present`, `service.present` and `ingressClass.present` are
+tri-state for the same reason one level down.
+
+`readyReplicas` is `null`, not `0`, when the Deployment controller has not
+reported on the current generation — the §6 staleness rule applied to the one
+workload whose health decides whether the cluster is reachable at all.
+
+`otherClasses[]` lists every IngressClass on the cluster with
+`{name, controller, default, managedByUs, retired}`, and is `null` — never `[]` —
+when the listing failed: "nothing else is serving Ingresses here" is a real
+claim and an unreadable listing does not support it. `retired` is matched on the
+**exact** `spec.controller` string: `k8s.io/ingress-nginx` was retired in March
+2026, and F5's NGINX Ingress Controller and NGINX Gateway Fabric are different,
+supported products. Telling an operator their supported controller is retired is
+the confidently-wrong answer aimed at their whole ingress path.
+
+`upgradeAvailable` means **the installed version differs from the one this
+console ships** — not that a newer HAProxy exists, which would be a claim about
+a third party's release history made from a string baked into this repo, wrong
+in both directions. `versionMatches` carries the same fact without the
+directional word.
+
+### 14.3 `POST /api/router/plan`
+
+The manifests an install would create. **Pure and ungated**: nothing is written,
+nothing is audited, and it renders on a console where router management is
+switched off — because deciding whether to enable it requires reading what it
+would create.
+
+### 14.4 `POST /api/router` — install or upgrade
+
+One endpoint for both; there is no difference in what happens. Each object is a
+create if absent and a replace if it is already ours.
+
+**The console never adopts an object it did not create.** Every bundle object
+carries `app.kubernetes.io/managed-by: k8boss-admin`. An install that finds one
+of the same name without it refuses with `409 conflict` naming the object —
+before writing anything, on a dry run as much as on a real one, and the refusal
+is audited because it happens before the funnel is reached.
+
+**A partial install is reported as one.** `installed` is false unless every
+object landed; `failed` counts the rest; `objects[]` carries a per-object
+outcome with the error and its hint. There is no rollback — deleting what
+succeeded would be more writes the operator did not approve.
+
+**RBAC escalation prevention is the one denial preflight cannot foresee.** A
+`SelfSubjectAccessReview` on `create clusterroles` answers *yes*; the API server
+then refuses the ClusterRole with `attempt to grant extra privileges`, because
+the caller does not itself hold cluster-wide Secret reads. The status-code
+mapping stands (it is `rbac_denied`); only the **hint** is rewritten, to name
+escalation prevention and the `escalate`/`bind` grants instead of a verb the
+operator demonstrably has.
+
+Optimistic concurrency here is **weaker than §13's, on purpose**: the
+`resourceVersion` a replace carries is the one read by the ownership scan
+moments earlier, not one an operator was shown. Rule 4 holds — the API server
+enforces it and the scan-to-apply window is closed — but there is no editor
+here, so there is no "fresh diff against what you were looking at" to offer.
+
+### 14.5 `DELETE /api/router`
+
+Reverse order, and **the Namespace is left standing**, reported in `retained[]`
+with the reason. A namespace can hold objects the console never put there and
+deleting one is not recoverable. Objects that are not ours are `skipped[]`, not
+deleted.
+
+### 14.6 The gates
+
+Two, both required for a real write: `ADMIN_ALLOW_MUTATIONS` and
+`ADMIN_ROUTER_MANAGE_ENABLED` (off by default). Refusals are
+`403 mutations_disabled` — not `rbac_denied`, because the operator's permissions
+are irrelevant — and are audited.
+
+**Dry runs are permitted with the feature gate off**, which is a deliberate
+departure from §5.5's node debug pods. The difference is what the projection
+*is*: a node debug pod's manifest is a working recipe for a privileged pod on a
+deployment that switched the feature off; the router's manifests are a pinned
+copy of a public upstream bundle, and reading them is the whole point.

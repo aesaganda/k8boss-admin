@@ -20,7 +20,7 @@ API_PORT ?= 8020
 .DEFAULT_GOAL := help
 
 .PHONY: help dev-backend dev-frontend test test-backend test-frontend \
-        lint build docker-build clean
+        lint build docker-build clean router-manifest
 
 help:  ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -63,6 +63,12 @@ lint:  ## ESLint over the frontend (non-zero exit on any error)
 
 build:  ## Production bundle into frontend/dist
 	cd $(FRONTEND) && npm run build
+
+router-manifest:  ## Regenerate deploy/router.yaml from the shipped bundle (§14)
+	@# The checked-in manifest and the objects the console installs are the same
+	@# bundle, and a test fails the build when they disagree. Run this after
+	@# changing ROUTER_VERSION or anything in app/admin/router_bundle.py.
+	$(PYTHON) scripts/render-router-manifest.py
 
 docker-build:  ## Build both images through docker compose
 	docker compose build
