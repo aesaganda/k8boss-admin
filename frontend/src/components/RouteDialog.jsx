@@ -397,6 +397,22 @@ export default function RouteDialog({
       className="admin-route-dialog"
     >
       <Form onSubmit={(event) => event.preventDefault()} data-testid="route-form">
+        {editing && existing?.route?.managedBy?.detail && (
+          <Alert
+            isInline
+            variant={existing.route.managedBy.controller ? 'warning' : 'info'}
+            className="admin-confirm__alert"
+            data-testid="route-managed-by"
+            title={
+              existing.route.managedBy.controller
+                ? 'Something else owns this exposure and will put its version back'
+                : 'This exposure was deployed by a tool, not created by hand'
+            }
+          >
+            {existing.route.managedBy.detail}
+          </Alert>
+        )}
+
         <FormGroup label="Route backend" fieldId="route-backend" isRequired>
           <FormSelect
             id="route-backend"

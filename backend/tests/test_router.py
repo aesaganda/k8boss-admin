@@ -546,6 +546,75 @@ def test_every_installed_object_gets_its_own_audit_row(
     assert db_session.query(AuditRecord).count() == before + 8
 
 
+
+
+def test_an_install_goes_through_the_real_transport(monkeypatch, fake_k8s, allow_router):
+    """One install exercised end to end against the fake that raises on surprises.
+
+    The other install tests patch `apply_service.request_json` out, which skips
+    URL construction, the dryRun query parameter and the three-tuple the funnel
+    asks for. Stubbing `api_client.call_api` instead runs all of it — and an
+    unstubbed call still raises, which is the whole point of that fake.
+    """
+    stub_discovery(monkeypatch)
+    allow_preflight(fake_k8s)
+    calls: list = []
+
+    def fake_get(group, version, plural, name, namespace=None):
+        raise NotFound("not found", context={"resource": plural})
+
+    def call_api(path, method, **kwargs):
+        calls.append((method, path, dict(kwargs.get("query_params") or [])))
+        body = kwargs.get("body") or {}
+        return (
+            {**body, "metadata": {**(body.get("metadata") or {}), "resourceVersion": "1"}},
+            200,
+            {},
+        )
+
+    monkeypatch.setattr(router_service.reader, "get_resource", fake_get)
+    fake_k8s.api_client.returns("call_api", call_api)
+
+    result = router_service.install({}, dry_run=False)
+
+    assert result["installed"] is True
+    assert len(calls) == 8
+    assert {c[0] for c in calls} == {"POST"}
+    # The cluster-scoped objects address a non-namespaced path, and the
+    # namespaced ones do not — a mistake here creates the ClusterRole inside a
+    # namespace, where nothing binds it.
+    paths = [c[1] for c in calls]
+    assert any("/apis/rbac.authorization.k8s.io/v1/clusterroles" == p for p in paths)
+    assert any(p.endswith("/namespaces/k8boss-router/deployments") for p in paths)
+    # A real install sends no dryRun; that difference is the only one.
+    assert all("dryRun" not in c[2] for c in calls)
+
+
+def test_a_dry_run_install_sends_dry_run_all_on_every_object(
+    monkeypatch, fake_k8s, allow_router,
+):
+    stub_discovery(monkeypatch)
+    allow_preflight(fake_k8s)
+    calls: list = []
+
+    monkeypatch.setattr(
+        router_service.reader, "get_resource",
+        lambda *a, **k: (_ for _ in ()).throw(NotFound("gone", context={})),
+    )
+    fake_k8s.api_client.returns(
+        "call_api",
+        lambda path, method, **kwargs: (
+            calls.append(dict(kwargs.get("query_params") or [])),
+            ({**(kwargs.get("body") or {})}, 200, {}),
+        )[1],
+    )
+
+    router_service.install({}, dry_run=True)
+
+    assert len(calls) == 8
+    assert all(c.get("dryRun") == "All" for c in calls)
+
+
 # --------------------------------------------------------------------------- #
 # Uninstall
 # --------------------------------------------------------------------------- #

@@ -423,6 +423,110 @@ def _unknown_entry(state: BackendState) -> dict[str, Any]:
     )
 
 
+
+# --------------------------------------------------------------------------- #
+# Who owns this object
+# --------------------------------------------------------------------------- #
+
+#: Labels and annotations that mean a tool outside this cluster owns the object
+#: and will put its own version back. Mapped to the tool's name, because
+#: "something will revert this" is not actionable and "Argo CD will revert this
+#: on its next sync" is.
+#:
+#: Deliberately short. `kubectl.kubernetes.io/last-applied-configuration` is NOT
+#: here: it means somebody once ran `kubectl apply`, not that anything is
+#: watching. Flagging it would put a warning on a large fraction of every
+#: cluster's objects, and a warning that is always up is one nobody reads.
+_MANAGEMENT_MARKERS: tuple[tuple[str, str, str], ...] = (
+    ("annotations", "meta.helm.sh/release-name", "Helm"),
+    ("labels", "argocd.argoproj.io/instance", "Argo CD"),
+    ("labels", "app.kubernetes.io/instance", None),  # ambiguous — see below
+    ("labels", "kustomize.toolkit.fluxcd.io/name", "Flux"),
+    ("labels", "helm.toolkit.fluxcd.io/name", "Flux"),
+)
+
+
+def _managed_by(obj: Any) -> dict[str, Any]:
+    """Whether something other than a person is expected to own this exposure.
+
+    An edit the console makes to an object a controller owns succeeds, reports
+    ``applied: true`` truthfully, and is reverted seconds later. Both halves are
+    true at once, which is the shape of confidently-wrong this project cares
+    about most: the console's claim is accurate and the operator's conclusion
+    from it is not.
+
+    Two kinds of owner, reported separately because they are different
+    certainties:
+
+    * **A controller in the cluster** — ``ownerReferences`` with
+      ``controller: true``. Definitive. Something is reconciling this object
+      right now, and an edit will be undone without anybody being told.
+    * **A deployment tool** — a Helm release annotation, an Argo CD instance
+      label, a Flux label. Advisory: it means the object was *applied* by that
+      tool, and whether an edit survives depends on whether the tool is running
+      in a mode that reverts drift. Argo CD with automated self-heal reverts it;
+      a Helm release sits still until the next `helm upgrade`, which then
+      overwrites it.
+
+    ``app.kubernetes.io/instance`` is recognised but is deliberately **not**
+    attributed to a tool: it is the standard recommended label, set by Helm
+    charts, by hand-written manifests and by half the operators in the
+    ecosystem. Naming a tool from it would be a guess, so the row says the
+    object carries an instance label and does not say what put it there.
+    """
+    metadata = get_field(obj, "metadata", default={}) or {}
+    labels = get_field(metadata, "labels", default={}) or {}
+    annotations = get_field(metadata, "annotations", default={}) or {}
+
+    controller: dict[str, Any] | None = None
+    for reference in get_field(metadata, "ownerReferences", default=[]) or []:
+        if get_field(reference, "controller") is True:
+            controller = {
+                "kind": get_field(reference, "kind"),
+                "name": get_field(reference, "name"),
+                "apiVersion": get_field(reference, "apiVersion"),
+            }
+            break
+
+    tool: str | None = None
+    marker: str | None = None
+    for where, key, name in _MANAGEMENT_MARKERS:
+        source = annotations if where == "annotations" else labels
+        if key in source:
+            marker = key
+            if name is not None:
+                tool = name
+                break
+            # An ambiguous marker is remembered but does not stop the scan: a
+            # definite one later in the list is the better answer.
+
+    if controller is None and marker is None:
+        return {"controller": None, "tool": None, "marker": None, "detail": None}
+
+    if controller is not None:
+        detail = (
+            f"This exposure is owned by {controller['kind']} "
+            f"{controller['name']}, which is reconciling it. An edit made here "
+            "will be applied and then reverted, and nothing will say so."
+        )
+    elif tool is not None:
+        detail = (
+            f"This exposure was applied by {tool}. Whether an edit here survives "
+            "depends on how that tool is configured — a Git-sync tool set to "
+            "self-heal reverts it, and a release tool overwrites it at the next "
+            "upgrade. The durable change is in the source it deploys from."
+        )
+    else:
+        detail = (
+            f"This exposure carries {marker}, so something deployed it rather "
+            "than a person creating it by hand. Which tool is not knowable from "
+            "the object — that label is set by several. An edit here may not be "
+            "the durable place to make the change."
+        )
+
+    return {"controller": controller, "tool": tool, "marker": marker, "detail": detail}
+
+
 # --------------------------------------------------------------------------- #
 # Row shaping — one per backend, all producing the same row
 # --------------------------------------------------------------------------- #
@@ -480,6 +584,21 @@ def _route_admission(obj: Any) -> tuple[bool | None, str | None]:
     Every shard is examined before answering, rather than returning on the first
     admission: an early return would make the caveat depend on the order the API
     server happened to list the shards in.
+
+    **What this cannot tell you, and does not pretend to.**
+    ``RouteIngressCondition`` has no ``observedGeneration``. §6 checks a
+    workload's ``status.observedGeneration`` against ``metadata.generation``
+    before believing any count, and that check is simply not available here:
+    there is no field saying which generation of the spec a router's verdict is
+    about. So an ``Admitted: True`` written before the operator changed the
+    hostname still reads as ``True`` afterwards, and nothing in the object
+    distinguishes the two.
+
+    ``lastTransitionTime`` is deliberately not used to synthesise one. It moves
+    when the condition's *status* changes, not when the spec does — a router
+    that re-admits an edited Route to the same verdict does not touch it — so
+    comparing it against anything would manufacture confidence out of a
+    timestamp that means something else. §13 states the limitation instead.
     """
     reported = False
     refusal: str | None = None
@@ -910,6 +1029,9 @@ def _row(
         "parents": parents if parents is not None else [],
         "age_seconds": age_seconds(get_field(obj, "metadata", "creationTimestamp")),
         "resourceVersion": get_field(obj, "metadata", "resourceVersion"),
+        # Every key present, `None` throughout when nothing owns it — so the UI
+        # reads `row.managedBy.detail` unconditionally.
+        "managedBy": _managed_by(obj),
     }
 
 

@@ -1282,6 +1282,31 @@ Each row:
   value for every Ingress: the Ingress API has no admission condition at all,
   and whether a controller took the object is visible only through `addresses`.
 
+**`admitted` is not generation-scoped, and cannot be.** §6 refuses to believe a
+workload's counts until `status.observedGeneration` matches `metadata.generation`.
+`RouteIngressCondition` has no such field: there is nothing in a Route saying
+which generation of the spec a router's verdict is about. An `Admitted: True`
+written before the hostname was changed still reads as `True` afterwards. The
+console does not synthesise a substitute from `lastTransitionTime` — that moves
+when the condition's *status* changes, not when the spec does, so comparing it
+would manufacture confidence from a timestamp that means something else. This is
+a limitation of the Route API, stated rather than papered over.
+
+`managedBy` reports whether something other than a person owns the exposure:
+`controller` from an `ownerReferences` entry with `controller: true`
+(definitive — something is reconciling it now), `tool` from a Helm, Argo CD or
+Flux marker (advisory — whether an edit survives depends on that tool's drift
+mode). All keys present and `null` throughout when nothing owns it.
+`kubectl.kubernetes.io/last-applied-configuration` is deliberately **not** a
+marker: it means somebody once ran `kubectl apply`, not that anything is
+watching, and flagging it would warn on a large fraction of every cluster's
+objects. `app.kubernetes.io/instance` is recognised but attributed to no tool,
+because Helm, hand-written manifests and half the ecosystem all set it.
+
+An edit to a controller-owned exposure succeeds, reports `applied: true`
+truthfully, and is reverted seconds later. Both halves are true at once, which
+is why the row carries this and the edit dialog says it before the diff.
+
 `targets[].weight` is `null`, never `100`, on a single-backend exposure. A
 weight rendered where no split was configured reads as one that was.
 

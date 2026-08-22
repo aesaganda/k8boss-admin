@@ -681,6 +681,7 @@ export const FIXTURES = {
         parents: [],
         age_seconds: 86400,
         resourceVersion: '4021',
+        managedBy: { controller: null, tool: null, marker: null, detail: null },
       },
       {
         id: 'ingress/prod/admin',
@@ -709,6 +710,15 @@ export const FIXTURES = {
         parents: [],
         age_seconds: 3600,
         resourceVersion: '4022',
+        // The case the column exists for: an edit here succeeds, reports
+        // `applied: true` truthfully, and is reverted seconds later.
+        managedBy: {
+          controller: { kind: 'Shop', name: 'storefront', apiVersion: 'example.com/v1' },
+          tool: null,
+          marker: null,
+          detail:
+            'This exposure is owned by Shop storefront, which is reconciling it. An edit made here will be applied and then reverted, and nothing will say so.',
+        },
       },
     ],
     continue: null,

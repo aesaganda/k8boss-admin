@@ -966,3 +966,104 @@ def test_an_ingress_never_preflights_custom_host(monkeypatch, fake_k8s, allow_mu
     result = admin_routes.create_route("ingress", exposure(), dry_run=True)
 
     assert result["dryRun"] is True
+
+
+# --------------------------------------------------------------------------- #
+# The real transport, not a monkeypatched stand-in
+# --------------------------------------------------------------------------- #
+
+def _dispatch_call_api(fake_k8s, *, warning=None, record=None):
+    """Stub the transport itself, so `request_json` actually runs.
+
+    Every other write test in this file patches ``apply_service.request_json``
+    out, which is fine for asserting funnel behaviour and useless for asserting
+    that the funnel talks to the cluster correctly — it skips URL construction,
+    the ``dryRun`` query parameter, the ``_return_http_data_only=False``
+    three-tuple, and ``parse_warnings`` entirely. This one stubs
+    ``api_client.call_api``, the sharp-edged fake's own method, so all of that is
+    exercised and an unstubbed call still raises.
+    """
+
+    def call_api(path, method, **kwargs):
+        if record is not None:
+            record.append((method, path, dict(kwargs.get("query_params") or [])))
+        body = kwargs.get("body") or {}
+        projected = {
+            **body,
+            "metadata": {**(body.get("metadata") or {}), "resourceVersion": "9001"},
+        }
+        headers = {"Warning": f'299 - "{warning}"'} if warning else {}
+        # The three-tuple `_return_http_data_only=False` asks for. Returning the
+        # body alone here would let a regression that stopped requesting headers
+        # pass unnoticed — which is exactly how the Warning relay would go quiet.
+        return projected, 200, headers
+
+    fake_k8s.api_client.returns("call_api", call_api)
+
+
+def test_a_create_goes_through_the_real_transport_with_dry_run_on_the_query(
+    monkeypatch, fake_k8s, allow_mutations,
+):
+    """The projection and the real write differ by one query parameter, asserted.
+
+    Two code paths — one that previews and one that writes — is how a console
+    ends up showing a diff of something it is not about to do.
+    """
+    stub_discovery(monkeypatch)
+    _allow_preflight(fake_k8s)
+    calls: list = []
+    _dispatch_call_api(fake_k8s, record=calls)
+
+    admin_routes.create_route("ingress", exposure(), dry_run=True)
+    admin_routes.create_route("ingress", exposure(), dry_run=False)
+
+    assert [c[0] for c in calls] == ["POST", "POST"]
+    assert calls[0][1] == calls[1][1], "preview and write must address the same URL"
+    assert calls[0][2].get("dryRun") == "All"
+    assert "dryRun" not in calls[1][2]
+
+
+def test_api_server_warnings_reach_the_mutation_response(
+    monkeypatch, fake_k8s, allow_mutations,
+):
+    """§1.5 relays `Warning:` headers verbatim.
+
+    Only reachable through the real `request_json`, which is why every other
+    write test in this file cannot catch it going quiet.
+    """
+    stub_discovery(monkeypatch)
+    _allow_preflight(fake_k8s)
+    _dispatch_call_api(
+        fake_k8s,
+        warning="annotation nginx.ingress.kubernetes.io/rewrite-target is deprecated",
+    )
+
+    result = admin_routes.create_route("ingress", exposure(), dry_run=True)
+
+    assert result["warnings"] == [
+        "annotation nginx.ingress.kubernetes.io/rewrite-target is deprecated",
+    ]
+
+
+def test_the_projected_resource_version_is_what_the_confirming_call_carries(
+    monkeypatch, fake_k8s, allow_mutations,
+):
+    """The dry run echoes the current version, and §1.5 hands it back for the PUT."""
+    stub_discovery(monkeypatch)
+    _allow_preflight(fake_k8s)
+    _dispatch_call_api(fake_k8s)
+
+    result = admin_routes.create_route("ingress", exposure(), dry_run=True)
+
+    assert result["resourceVersion"] == "9001"
+
+
+def _allow_preflight(fake_k8s):
+    fake_k8s.authorization_v1.returns(
+        "create_self_subject_access_review",
+        lambda body, **kw: type(
+            "R", (), {"status": type("S", (), {
+                "allowed": True, "reason": "", "evaluation_error": None,
+            })()},
+        )(),
+    )

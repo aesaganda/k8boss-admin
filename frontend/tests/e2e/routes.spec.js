@@ -490,3 +490,45 @@ test.describe('the fixture router itself', () => {
     expect(status).not.toHaveProperty('items');
   });
 });
+
+test.describe('an exposure something else owns', () => {
+  test('the table says which controller owns it', async ({ page }) => {
+    await mockApi(page, { preflight: ALLOW_ALL });
+    await openRoutes(page);
+
+    const owned = page.getByRole('row', { name: /admin/ });
+    await expect(owned.getByText('Shop storefront')).toBeVisible();
+
+    // And an exposure nobody owns is quiet, or the warning stops meaning anything.
+    const handMade = page.getByRole('row', { name: /shop/ }).first();
+    await expect(handMade.getByText('nothing — created by hand')).toBeVisible();
+  });
+
+  test('editing one warns that the change will be reverted, before the diff', async ({
+    page,
+  }) => {
+    await mockApi(page, {
+      preflight: ALLOW_ALL,
+      routeDetail: {
+        route: FIXTURES.routes.items[1],
+        manifest: {
+          apiVersion: 'networking.k8s.io/v1',
+          kind: 'Ingress',
+          metadata: { name: 'admin', namespace: 'prod', resourceVersion: '4022' },
+          spec: {},
+        },
+        backend: FIXTURES.routeCapabilities.items[1],
+      },
+    });
+    await openRoutes(page);
+
+    await page.getByRole('row', { name: /admin/ }).getByRole('button').click();
+    await page.getByRole('menuitem', { name: 'Edit…' }).click();
+
+    const warning = page.getByTestId('route-managed-by');
+    await expect(warning).toBeVisible();
+    await expect(warning).toContainText('will be applied and then reverted');
+    // Before the diff, not after: the operator decides whether to bother at all.
+    await expect(page.getByTestId('diff-view')).toHaveCount(0);
+  });
+});

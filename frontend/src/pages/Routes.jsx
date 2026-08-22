@@ -255,6 +255,41 @@ export default function Routes() {
           ),
       },
       {
+        key: 'managedBy',
+        title: 'Managed by',
+        sortable: true,
+        value: (row) =>
+          row.managedBy?.controller
+            ? `${row.managedBy.controller.kind} ${row.managedBy.controller.name}`
+            : (row.managedBy?.tool ?? (row.managedBy?.marker ? 'a deployment tool' : '')),
+        // Not decoration. An edit to an object a controller owns succeeds,
+        // reports `applied: true` truthfully, and is reverted seconds later —
+        // both halves true at once. The column is where that stops being a
+        // surprise discovered afterwards.
+        cell: (row) => {
+          const managed = row.managedBy ?? {};
+          if (managed.controller) {
+            return (
+              <StatusBadge
+                status="Warning"
+                label={`${managed.controller.kind} ${managed.controller.name}`}
+                tooltip={managed.detail}
+              />
+            );
+          }
+          if (managed.tool || managed.marker) {
+            return (
+              <StatusBadge
+                status="Unknown"
+                label={managed.tool ?? 'a deployment tool'}
+                tooltip={managed.detail}
+              />
+            );
+          }
+          return <Muted>nothing — created by hand</Muted>;
+        },
+      },
+      {
         key: 'age_seconds',
         title: 'Age',
         sortable: true,

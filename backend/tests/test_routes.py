@@ -618,6 +618,120 @@ def test_a_rule_with_no_matches_renders_as_a_catch_all_not_a_blank():
     assert row["paths"][0]["pathType"] == "PathPrefix"
 
 
+
+
+# --------------------------------------------------------------------------- #
+# Who owns the exposure
+# --------------------------------------------------------------------------- #
+
+def test_an_exposure_nobody_owns_reports_no_manager():
+    """The common case must be quiet, or the warning stops meaning anything."""
+    row = svc.route_row(_route(), version="v1")
+
+    assert row["managedBy"] == {
+        "controller": None, "tool": None, "marker": None, "detail": None,
+    }
+
+
+def test_a_controller_owned_exposure_says_an_edit_will_be_reverted():
+    """`applied: true` and "the cluster disagrees seconds later" are both true.
+
+    That pair is the shape of confidently-wrong this project cares most about:
+    the console's claim is accurate and the operator's conclusion from it is not.
+    """
+    obj = _route()
+    obj["metadata"]["ownerReferences"] = [
+        {"apiVersion": "example.com/v1", "kind": "Shop", "name": "storefront",
+         "controller": True},
+    ]
+
+    row = svc.route_row(obj, version="v1")
+
+    assert row["managedBy"]["controller"] == {
+        "kind": "Shop", "name": "storefront", "apiVersion": "example.com/v1",
+    }
+    assert "reverted" in row["managedBy"]["detail"]
+
+
+def test_a_non_controller_owner_reference_is_not_a_manager():
+    """`ownerReferences` without `controller: true` is a lifetime link, not a reconciler.
+
+    It makes the object garbage-collected with its parent; it does not mean
+    anything is putting a version back.
+    """
+    obj = _route()
+    obj["metadata"]["ownerReferences"] = [
+        {"apiVersion": "v1", "kind": "Service", "name": "checkout", "controller": False},
+    ]
+
+    row = svc.route_row(obj, version="v1")
+
+    assert row["managedBy"]["controller"] is None
+
+
+@pytest.mark.parametrize(
+    ("where", "key", "tool"),
+    [
+        ("annotations", "meta.helm.sh/release-name", "Helm"),
+        ("labels", "argocd.argoproj.io/instance", "Argo CD"),
+        ("labels", "kustomize.toolkit.fluxcd.io/name", "Flux"),
+    ],
+)
+def test_a_deployment_tool_marker_names_the_tool(where, key, tool):
+    obj = _ingress()
+    obj["metadata"][where] = {key: "shop"}
+
+    row = svc.ingress_route_row(obj, version="v1")
+
+    assert row["managedBy"]["tool"] == tool
+    assert tool in row["managedBy"]["detail"]
+
+
+def test_the_ambiguous_instance_label_does_not_name_a_tool():
+    """`app.kubernetes.io/instance` is set by Helm, by hand, and by everyone else.
+
+    Naming a tool from it would be a guess, and a guess in a warning is worse
+    than the warning being vaguer.
+    """
+    obj = _ingress()
+    obj["metadata"]["labels"] = {"app.kubernetes.io/instance": "shop"}
+
+    row = svc.ingress_route_row(obj, version="v1")
+
+    assert row["managedBy"]["tool"] is None
+    assert row["managedBy"]["marker"] == "app.kubernetes.io/instance"
+    assert "which tool is not knowable" in row["managedBy"]["detail"].lower()
+
+
+def test_last_applied_configuration_is_not_treated_as_management():
+    """It means somebody once ran `kubectl apply`, not that anything is watching.
+
+    Flagging it would warn on a large fraction of every cluster's objects.
+    """
+    obj = _ingress()
+    obj["metadata"]["annotations"] = {
+        "kubectl.kubernetes.io/last-applied-configuration": "{}",
+    }
+
+    row = svc.ingress_route_row(obj, version="v1")
+
+    assert row["managedBy"]["detail"] is None
+
+
+def test_a_controller_outranks_a_tool_marker():
+    """A live reconciler is a certainty; a tool marker is advisory."""
+    obj = _ingress()
+    obj["metadata"]["labels"] = {"argocd.argoproj.io/instance": "shop"}
+    obj["metadata"]["ownerReferences"] = [
+        {"apiVersion": "example.com/v1", "kind": "Shop", "name": "storefront",
+         "controller": True},
+    ]
+
+    row = svc.ingress_route_row(obj, version="v1")
+
+    assert "Shop storefront" in row["managedBy"]["detail"]
+
+
 # --------------------------------------------------------------------------- #
 # The row shape is the same for all three
 # --------------------------------------------------------------------------- #
