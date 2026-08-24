@@ -434,8 +434,24 @@ call.
 - **PodSecurity admission decides whether this is possible at all.** A namespace
   enforcing `baseline` or `restricted` rejects the pod (host namespaces, hostPath
   volume). Admission runs on `dryRun=All`, so the refusal arrives at the preview
-  step as `422 invalid` carrying the plugin's own message — before anything
-  exists.
+  step carrying the plugin's own message — before anything exists:
+
+  ```
+  403 rbac_denied
+  detail: pods "node-debugger-…" is forbidden: violates PodSecurity
+          "baseline:latest": host namespaces (hostNetwork=true, hostPID=true),
+          hostPath volumes (volume "host-root")
+  ```
+
+  **`403 rbac_denied`, not `422 invalid`.** Pod Security refuses with
+  `Forbidden`, and §1.3 maps by status rather than by `Status.reason` — which is
+  `Forbidden` here exactly as it is for a real RBAC denial, and is the reason
+  that mapping exists. The code is therefore right and the advice it implies is
+  wrong: no ClusterRole admits a pod the namespace's enforce label refuses. So
+  the **hint** is rewritten to name Pod Security and `ADMIN_NODE_DEBUG_NAMESPACE`
+  — `app.errors.podsecurity_hint`, shared with §15, and the same treatment §14.4
+  gives RBAC escalation prevention. The code, the status and the API server's own
+  detail are left alone.
 
 #### `DELETE /api/nodes/{name}/debug/{pod}?dryRun=`
 → the §1.5 mutation response. The delete diff is §4's: `before=live, after=null`.
@@ -1578,3 +1594,159 @@ departure from §5.5's node debug pods. The difference is what the projection
 *is*: a node debug pod's manifest is a working recipe for a privileged pod on a
 deployment that switched the feature off; the router's manifests are a pinned
 copy of a public upstream bundle, and reading them is the whole point.
+
+---
+
+## 15. The CLI session
+
+A pod carrying `kubectl` (or `oc`), and §7's shell into it. For the one command
+this console has no page for — `kubectl auth can-i --list`, `kubectl get --raw
+/metrics`, an `oc adm` subcommand — where the alternative is leaving the console
+for a laptop with a kubeconfig on it, which is the moment the trail stops.
+
+**This API creates the pod. It does not serve the terminal.** The shell is
+§7's `WS /api/ws/pods/{namespace}/{name}/exec`, unchanged, with `container` set
+to the `container` this section returns. There is deliberately no CLI-specific
+exec route: a second one would be a second place for the mutations gate, the
+`create pods/exec` preflight and the open/close audit records to be got right.
+
+### 15.1 What this section cannot promise
+
+Every other write in this contract is preflighted for the exact permission,
+projected with `dryRun=All`, shown as a diff and recorded in §10 naming the
+object. **A command typed into this shell is none of those.** The trail records
+that a session was opened on this pod, by whom, for how long and how many bytes
+went through it (§7); it cannot record the `kubectl delete` typed into it.
+
+A client must say so before creating the pod. An operator who has learned to
+trust the diff will otherwise reasonably assume this surface has one.
+
+### 15.2 The ServiceAccount is the whole permission story
+
+`kubectl` inside the pod authenticates as the pod's ServiceAccount. What a shell
+here can do is therefore that account's permissions — **not** the console's, and
+**not** the signed-in operator's.
+
+Kubernetes offers no RBAC verb covering *which* ServiceAccount a pod may bind: a
+caller holding `create pods` in a namespace can bind any account in it,
+including one far more privileged than themselves, and no ClusterRole can narrow
+it afterwards. So `ADMIN_CLI_SERVICE_ACCOUNT` is the only control over this
+feature's reach, it is a deployment setting rather than a per-user one, and this
+API must never present it as anything else.
+
+The default is `default` — the account every namespace has and which holds no
+permissions. Out of the box `kubectl` in this pod is refused by the API server
+for everything until a cluster admin deliberately binds a Role. A feature that
+arrives useless rather than one that arrives dangerous.
+
+### 15.3 `GET /api/cli`
+
+A §1.2 envelope of the CLI pods this console created, plus:
+```json
+{ "items": [ {"name","namespace","image","serviceAccount","phase","state",
+              "reason","node","started_at","created_at"} ],
+  "continue": null, "remaining": null, "partial": false, "unavailable": [],
+  "enabled": true,
+  "enabledDetail": "CLI pods are enabled on this deployment.",
+  "namespace": "default",
+  "image": "alpine/k8s:1.34.9",
+  "serviceAccount": "default",
+  "container": "cli" }
+```
+- `enabled` is this deployment's **two** gates answered together, so a client can
+  disable the action with the reason rather than offering it and taking a 403.
+- `namespace`, `image` and `serviceAccount` describe what a **new** pod would be
+  made of. A client must not guess any of them: they are what the operator is
+  confirming, and the third decides what the shell can reach.
+- `container` is the container name to pass to §7's exec socket.
+- A row's `serviceAccount` is **`null`** when the pod names none and the API
+  server defaulted it. That is not `"default"`: rendering it so would be a claim
+  about what a shell in that pod may do, made from a field that was absent.
+- The listing is a **read** and answers even when creating is gated off. That is
+  what makes rule 11.4 possible here, and a pod left behind after the gate was
+  switched off is the one that most needs finding.
+- `items: []` is a real zero: the namespace was listed and holds none. A read
+  that could **not** happen is an error, never an empty list (§0.1) — a client
+  shown "no session" because the namespace was unreadable creates a second pod
+  beside the one already running.
+
+### 15.4 `POST /api/cli`
+
+`{"image": null, "dryRun": true}` → the §1.5 mutation response plus `pod`,
+`namespace`, `image`, `serviceAccount` and `container`.
+
+There is **no ServiceAccount field**, deliberately: see §15.2. `image` is the
+only thing a caller chooses, and everything else is fixed by the deployment.
+
+The pod binds `ADMIN_CLI_SERVICE_ACCOUNT` with `automountServiceAccountToken:
+true`, runs a shell loop rather than the image's entrypoint (which for a kubectl
+image *is* kubectl and would exit immediately), sets `stdin` and `tty` so §7 has
+a terminal to attach to, and drops every capability with
+`allowPrivilegeEscalation: false` and the runtime's default seccomp profile. It
+sets no host namespace, mounts no host path, and is not privileged — §5.5 is the
+feature for that and is gated separately.
+
+`before` is `null`, so the diff is the whole manifest as an addition. That is the
+disclosure mechanism: `serviceAccountName` is on screen before the confirming
+call.
+
+- **Two gates.** `ADMIN_ALLOW_MUTATIONS` **and** `ADMIN_CLI_ENABLED`. Either off
+  is `403 mutations_disabled` whose `hint` names both.
+- **The dry run is permitted on a read-only console** and refused by the feature
+  gate — the two behave differently on purpose. §1.6's ordinary rule applies to
+  the first, because this projection is a pod running `sleep` bound to an account
+  named in the deployment's own configuration and inspecting it discloses nothing
+  new. The second refuses both, because a deployment that switched this off has
+  decided the console is not a kubectl terminal, and offering a preview of one is
+  offering the feature.
+- **The feature-gate refusal is audited** as `outcome: "denied"`, because the
+  funnel that records every other refusal is never reached. The mutations gate is
+  *not* audited here — `mutate()` already did, and two rows for one attempt makes
+  the count of "who tried" wrong in the one table that exists to answer it.
+- **This endpoint always creates.** Reusing a Running pod is the client's
+  decision, made from §15.3, because a POST that sometimes creates and sometimes
+  does not cannot report `applied` honestly.
+- **PodSecurity admission decides whether this is possible at all.** A namespace
+  enforcing `restricted` wants `runAsNonRoot`, which this pod deliberately does
+  not set — setting it would make an image whose user is root fail to start with
+  a kubelet error naming a field the operator never chose. Admission runs on
+  `dryRun=All`, so the refusal arrives at the preview step carrying the plugin's
+  own message, before anything exists:
+
+  ```
+  403 rbac_denied
+  detail: pods "k8boss-cli-3q27n" is forbidden: violates PodSecurity
+          "restricted:latest": runAsNonRoot != true (pod or container "cli"
+          must set securityContext.runAsNonRoot=true)
+  ```
+
+  **`403 rbac_denied`, not `422 invalid`.** Pod Security refuses with
+  `Forbidden`, and §1.3 maps by status rather than by `Status.reason` — which is
+  `Forbidden` here exactly as it is for a real RBAC denial, and is the reason
+  that mapping exists. The code is therefore right and the advice it implies is
+  wrong: nothing the operator can write in a ClusterRole fixes a namespace
+  label. So the **hint** is rewritten to name Pod Security and
+  `ADMIN_CLI_NAMESPACE` — `app.errors.podsecurity_hint`, shared with §5.5, which
+  meets the same refusal for the same reason and used to describe it the same
+  wrong way. It is the treatment §14.4 gives RBAC escalation prevention, and for
+  the same reason. The code, the status and the API server's own detail are left
+  alone.
+
+### 15.5 `DELETE /api/cli/{pod}?dryRun=`
+
+→ the §1.5 mutation response. The delete diff is §4's: `before=live, after=null`.
+
+Only pods carrying this console's label; anything else is `404 not_found` from
+this route rather than a delete, or it would be a namespaced pod-delete wearing
+a friendlier URL.
+
+> **Nothing removes this pod automatically, and that is not a gap this API can
+> close.** A closed browser tab is not a signal, and a restarted console drops
+> whatever would have issued the DELETE. `ADMIN_CLI_MAX_SECONDS` bounds how long
+> the *container* runs — the kubelet stops it at the deadline and marks the pod
+> Failed; the object stays and still has to be removed. So the honest answer is
+> the same as §5.5's: label the pods, list them, bound them, and offer removal —
+> not promise a cleanup that fails exactly when it matters.
+
+Note what a pod left behind here holds: a live API credential for as long as it
+exists. §5.5's leaked pod holds a node's filesystem; this one holds a token.

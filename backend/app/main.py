@@ -38,6 +38,7 @@ from app.middleware.auth import AuthenticationMiddleware
 
 from app.api.access import router as access_router
 from app.api.audit import router as audit_router
+from app.api.cli import router as cli_router
 from app.api.clusters import router as clusters_router
 from app.api.debug import router as debug_router
 from app.api.events import router as events_router
@@ -137,6 +138,7 @@ app.include_router(audit_router)
 app.include_router(logs_router)
 app.include_router(debug_router)
 app.include_router(exec_ws_router)
+app.include_router(cli_router)
 
 
 if __name__ == "__main__":  # pragma: no cover - developer convenience

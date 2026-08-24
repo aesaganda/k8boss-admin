@@ -73,7 +73,13 @@ from app.admin.apply import create_fn, delete_resource
 from app.admin.mutate import mutate
 from app.audit import recorder
 from app.config import settings
-from app.errors import Invalid, MutationsDisabled, NotFound
+from app.errors import (
+    AdminError,
+    Invalid,
+    MutationsDisabled,
+    NotFound,
+    podsecurity_hint,
+)
 from app.resources import reader
 from app.resources.envelope import envelope
 from app.resources.shaping import container_state, get_field
@@ -558,24 +564,38 @@ def create_node_debug_pod(
         namespace=namespace, writable_host=writable_host,
     )
 
-    result = mutate(
-        verb="create",
-        group="",
-        version="v1",
-        plural="pods",
-        namespace=namespace,
-        name=name,
-        dry_run=dry_run,
-        apply_fn=create_fn("", "v1", "pods", body, namespace=namespace, name=name),
-        before=None,
-        # The audit sentence names the node, the image and — because it is the
-        # difference between reading the machine and being able to change it —
-        # whether the host filesystem was mounted writable.
-        detail=(
-            f"node debug pod {name} on {resolved} ({resolved_image}); "
-            f"host filesystem {'read-write' if writable_host else 'read-only'}"
-        ),
-    )
+    try:
+        result = mutate(
+            verb="create",
+            group="",
+            version="v1",
+            plural="pods",
+            namespace=namespace,
+            name=name,
+            dry_run=dry_run,
+            apply_fn=create_fn("", "v1", "pods", body, namespace=namespace, name=name),
+            before=None,
+            # The audit sentence names the node, the image and — because it is the
+            # difference between reading the machine and being able to change it —
+            # whether the host filesystem was mounted writable.
+            detail=(
+                f"node debug pod {name} on {resolved} ({resolved_image}); "
+                f"host filesystem {'read-write' if writable_host else 'read-only'}"
+            ),
+        )
+    except AdminError as e:
+        # Pod Security is the likeliest refusal this feature meets, and the one
+        # whose default advice is worst. This pod carries a hostPath volume and
+        # host namespaces, so every level above `privileged` rejects it — with a
+        # 403 that reads as a missing permission, sending the operator to widen a
+        # ClusterRole that was never the obstacle. No RBAC grant admits a pod the
+        # namespace's enforce label refuses.
+        #
+        # The funnel has already audited the failure; only the advice changes,
+        # and the code, the status and the API server's own message are untouched.
+        raise podsecurity_hint(
+            e, namespace=namespace, setting="ADMIN_NODE_DEBUG_NAMESPACE"
+        ) from None
 
     result["pod"] = name
     result["namespace"] = namespace

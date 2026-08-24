@@ -554,6 +554,57 @@ export const FIXTURES = {
     namespace: 'default',
   },
 
+  // §15. Both gates on, one CLI pod already Running — the reuse case, where
+  // opening the panel shows a terminal without creating anything.
+  cliEnabled: {
+    items: [
+      {
+        name: 'k8boss-cli-x4k2p',
+        namespace: 'default',
+        image: 'alpine/k8s:1.34.9',
+        // The field that decides what a shell in this pod can do to the
+        // cluster. It is not the console's permissions and not the operator's,
+        // so it is on screen rather than implied.
+        serviceAccount: 'k8boss-cli',
+        phase: 'Running',
+        state: 'Running',
+        reason: null,
+        node: 'ip-10-0-1-4',
+        started_at: '2026-08-21T09:00:05Z',
+        created_at: '2026-08-21T09:00:00Z',
+      },
+    ],
+    continue: null,
+    remaining: null,
+    partial: false,
+    unavailable: [],
+    enabled: true,
+    enabledDetail: 'CLI pods are enabled on this deployment.',
+    namespace: 'default',
+    image: 'alpine/k8s:1.34.9',
+    serviceAccount: 'k8boss-cli',
+    container: 'cli',
+  },
+
+  // The feature gate off while writes are on — the case the second switch
+  // exists for, and the one the UI must explain rather than merely disable.
+  cliDisabled: {
+    items: [],
+    continue: null,
+    remaining: null,
+    partial: false,
+    unavailable: [],
+    enabled: false,
+    enabledDetail:
+      'CLI pods are disabled on this deployment (ADMIN_CLI_ENABLED is off). This is a separate ' +
+      'gate from ADMIN_ALLOW_MUTATIONS because a shell running kubectl bypasses every control ' +
+      'this console puts in front of a write.',
+    namespace: 'default',
+    image: 'alpine/k8s:1.34.9',
+    serviceAccount: 'default',
+    container: 'cli',
+  },
+
 
   /**
    * §13 route capabilities.
@@ -877,6 +928,9 @@ export async function mockApi(
     nodeDebug = null,
     nodeDebugCreate = null,
     nodeDebugDeletes = [],
+    cli = null,
+    cliCreate = null,
+    cliDeletes = [],
     routeCapabilities = null,
     routes = null,
     routeRender = null,
@@ -1009,6 +1063,62 @@ export async function mockApi(
     }
     if (path === '/resources/core/v1/pods') return json(pods ?? FIXTURES.pods);
     if (path === '/resources/core/v1/services') return json(services ?? FIXTURES.services);
+    // §15. The CLI pod, and the shell into it — the terminal itself is §7's
+    // exec websocket, which no route here answers because Playwright never
+    // opens one.
+    if (path === '/cli') {
+      if (route.request().method() === 'POST') {
+        const body = JSON.parse(route.request().postData() || '{}');
+        return json(
+          cliCreate
+            ? cliCreate(body)
+            : {
+                dryRun: body.dryRun !== false,
+                // Derived, never echoed: §1.5 makes `applied` the only evidence
+                // a cluster changed.
+                applied: body.dryRun === false,
+                verb: 'create',
+                target: { group: '', version: 'v1', resource: 'pods',
+                          namespace: 'default', name: 'k8boss-cli-x4k2p' },
+                diff: {
+                  before: '',
+                  after: 'apiVersion: v1\nkind: Pod\n',
+                  unified:
+                    '--- live\n+++ projected\n@@ -0,0 +1,7 @@\n+apiVersion: v1\n+kind: Pod\n' +
+                    '+spec:\n+  serviceAccountName: k8boss-cli\n' +
+                    '+  automountServiceAccountToken: true\n+  containers:\n' +
+                    '+    - image: alpine/k8s:1.34.9\n',
+                  changed: true,
+                },
+                resourceVersion: '9002',
+                warnings: [],
+                auditId: 5151,
+                pod: 'k8boss-cli-x4k2p',
+                namespace: 'default',
+                image: body.image || 'alpine/k8s:1.34.9',
+                serviceAccount: 'k8boss-cli',
+                container: 'cli',
+              },
+        );
+      }
+      return json(cli ?? FIXTURES.cliEnabled);
+    }
+    if (/^\/cli\/[^/]+$/.test(path) && route.request().method() === 'DELETE') {
+      const url = new URL(route.request().url());
+      const isDryRun = url.searchParams.get('dryRun') !== 'false';
+      cliDeletes.push({ path, dryRun: isDryRun });
+      return json({
+        dryRun: isDryRun,
+        applied: !isDryRun,
+        verb: 'delete',
+        target: { group: '', version: 'v1', resource: 'pods', namespace: 'default' },
+        // §4: a delete diffs live against nothing.
+        diff: { before: 'kind: Pod\n', after: '', unified: '--- live\n+++ projected\n@@ -1,1 +0,0 @@\n-kind: Pod\n', changed: true },
+        resourceVersion: null,
+        warnings: [],
+        auditId: 5152,
+      });
+    }
     if (path === '/namespaces') return json(FIXTURES.namespaces);
     if (path === '/nodes') return json(FIXTURES.nodes);
     // §5.5. Ordered before the node detail branch: both live under /nodes/…, and

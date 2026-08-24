@@ -156,6 +156,91 @@ class Settings(BaseSettings):
         ),
     )
 
+    # -- the CLI pod (§15) -------------------------------------------------
+    cli_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("ADMIN_CLI_ENABLED", "cli_enabled"),
+        description=(
+            "Allows a CLI pod: a pod carrying kubectl (or oc) that the console "
+            "opens a shell into, so an operator can run a command this console "
+            "has no page for without leaving it for a laptop. Its own gate on "
+            "top of admin_allow_mutations, because everything typed in that "
+            "shell happens OUTSIDE the write funnel — no preflight naming the "
+            "permission, no dry run, no diff, no resourceVersion check, and no "
+            "audit record of what changed. The trail records that a shell was "
+            "opened, by whom and for how long; it cannot record the kubectl "
+            "delete typed into it. An operator may reasonably want every other "
+            "write in this console without wanting that."
+        ),
+    )
+    cli_namespace: str = Field(
+        default="default",
+        validation_alias=AliasChoices("ADMIN_CLI_NAMESPACE", "cli_namespace"),
+        min_length=1,
+        max_length=253,
+        description=(
+            "Namespace the CLI pod is created in, and where cli_service_account "
+            "is looked for. Configurable because the namespace decides both "
+            "which PodSecurity level admits the pod and which ServiceAccounts "
+            "are bindable to it — keeping both in one place an administrator "
+            "chose, rather than wherever the namespace selector happened to be."
+        ),
+    )
+    cli_image: str = Field(
+        default="alpine/k8s:1.34.9",
+        validation_alias=AliasChoices("ADMIN_CLI_IMAGE", "cli_image"),
+        min_length=1,
+        max_length=512,
+        description=(
+            "Image the CLI pod runs. Two hard requirements, neither of which "
+            "this console can check and neither of which it pretends to: kubectl "
+            "(or oc) on the PATH, and a /bin/sh — the pod's command is a shell "
+            "loop, because a kubectl image's own entrypoint IS kubectl and would "
+            "exit immediately. An image missing either starts and then answers "
+            "'command not found', which is at least legible. "
+            "The default is Alpine-based, so its BusyBox sh and sleep both "
+            "behave. Pick a kubectl within one minor version of the cluster — "
+            "that is Kubernetes' own supported skew, and this default will drift "
+            "out of it. Set an image carrying oc for OpenShift, and one in your "
+            "own registry for an air-gapped cluster, where the default cannot be "
+            "pulled and the failure is an ImagePullBackOff on a pod somebody is "
+            "waiting for."
+        ),
+    )
+    cli_service_account: str = Field(
+        default="default",
+        validation_alias=AliasChoices("ADMIN_CLI_SERVICE_ACCOUNT", "cli_service_account"),
+        min_length=1,
+        max_length=253,
+        description=(
+            "ServiceAccount the CLI pod binds, and therefore the identity every "
+            "kubectl command typed in it runs as. This is the ONLY control over "
+            "what that shell can do: Kubernetes has no RBAC verb covering which "
+            "ServiceAccount a pod may bind, so a caller holding `create pods` in "
+            "this namespace can bind an account far more privileged than "
+            "themselves, and no ClusterRole can narrow it afterwards. The "
+            "default is the namespace's own `default` account, which holds no "
+            "permissions at all — kubectl in the pod is refused by the API "
+            "server for everything until a cluster admin deliberately binds a "
+            "Role. That is a feature that arrives useless rather than one that "
+            "arrives dangerous."
+        ),
+    )
+    cli_max_seconds: int = Field(
+        default=3600,
+        validation_alias=AliasChoices("ADMIN_CLI_MAX_SECONDS", "cli_max_seconds"),
+        ge=0,
+        le=86400,
+        description=(
+            "Wall-clock limit on the CLI pod's container, as "
+            "spec.activeDeadlineSeconds. 0 means unbounded. Be clear about what "
+            "it does: the kubelet stops the container at the deadline and marks "
+            "the pod Failed; the pod object stays and still has to be removed. "
+            "It bounds the window in which an unattended shell with a cluster "
+            "credential is possible, and does not clean up after itself."
+        ),
+    )
+
     # -- the shipped router (§14) ------------------------------------------
     router_manage_enabled: bool = Field(
         default=False,

@@ -302,13 +302,67 @@ def test_podsecurity_admission_surfaces_at_the_dry_run(db_engine, server, allow_
     hostPath volume and host namespaces — and admission runs on `dryRun=All`
     exactly as on the real call, so the operator learns at the *preview* step,
     before anything exists. Nothing in this module implements that; it is the
-    funnel's dry run doing its job."""
-    server.raises["POST"] = ApiException(status=422, reason="Unprocessable Entity")
+    funnel's dry run doing its job.
 
-    with pytest.raises(Invalid):
+    **403, not 422.** This test asserted a fabricated 422 until §15 was run
+    against a real cluster and Pod Security was seen to refuse with `Forbidden`
+    — so the funnel maps it to `rbac_denied` like any other 403, and the test
+    was passing while asserting a status the API server never sends. The message
+    below is the shape a `baseline` namespace actually returns.
+    """
+    server.raises["POST"] = ApiException(
+        status=403,
+        reason="Forbidden",
+        http_resp=SimpleNamespace(
+            status=403,
+            reason="Forbidden",
+            getheaders=lambda: {},
+            data=json.dumps({
+                "kind": "Status", "status": "Failure", "code": 403, "reason": "Forbidden",
+                "message": (
+                    'pods "node-debugger-ip-10-0-1-4-x4k2p" is forbidden: violates '
+                    'PodSecurity "baseline:latest": host namespaces (hostNetwork=true, '
+                    'hostPID=true), hostPath volumes (volume "host-root")'
+                ),
+            }),
+        ),
+    )
+
+    with pytest.raises(RBACDenied) as caught:
         create(dry_run=True)
 
-    assert audit_rows()[0]["outcome"] == "failed"
+    # `rbac_denied` is the right code — §1.3 maps by status — but the advice it
+    # implies is wrong: no ClusterRole admits a pod the namespace's enforce
+    # label refuses. The hint is rewritten to send the operator to the label.
+    assert "Pod Security admission" in (caught.value.hint or "")
+    assert "ADMIN_NODE_DEBUG_NAMESPACE" in (caught.value.hint or "")
+    assert audit_rows()[0]["outcome"] in ("failed", "denied")
+
+
+def test_an_ordinary_rbac_denial_on_create_keeps_its_own_hint(
+    db_engine, server, allow_node_debug,
+):
+    """The rewrite must not fire on every 403, or a genuinely missing `create
+    pods` would be explained as a namespace label and the operator would relabel
+    a namespace that was never the problem."""
+    server.raises["POST"] = ApiException(
+        status=403,
+        reason="Forbidden",
+        http_resp=SimpleNamespace(
+            status=403,
+            reason="Forbidden",
+            getheaders=lambda: {},
+            data=json.dumps({
+                "kind": "Status", "status": "Failure", "code": 403, "reason": "Forbidden",
+                "message": 'pods is forbidden: User "sa" cannot create resource "pods"',
+            }),
+        ),
+    )
+
+    with pytest.raises(RBACDenied) as caught:
+        create(dry_run=True)
+
+    assert "Pod Security admission" not in (caught.value.hint or "")
 
 
 # --------------------------------------------------------------------------- #
