@@ -1210,6 +1210,52 @@ body.admin-resizing * {
   margin-block-end: var(--admin-gap);
 }
 
+/*
+ * One option in a resource picker: a kind badge, the name, and an optional
+ * note. §13's Target Service dropdown is the only user today.
+ *
+ * The badge carries the object's kind because a Service name can be any string
+ * at all — in a list of them there is nothing else on the row saying what kind
+ * of thing is being chosen. It is the same device the OpenShift console uses on
+ * the same field, and the letter is content rather than decoration only in the
+ * sense that it repeats the field's own label, which is why it is aria-hidden:
+ * a screen reader already has "Target 1 Service" from the control.
+ */
+.admin-resource-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-inline-size: 0;
+}
+
+.admin-resource-option__badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* Fixed, and `flex: none`: a long name must eat its own width rather than
+     squash the badge into an ellipse. */
+  flex: none;
+  inline-size: 1.25rem;
+  block-size: 1.25rem;
+  border-radius: 50%;
+  background: var(--pf-t--global--icon--color--status--success--default, #3e8635);
+  color: var(--pf-t--global--text--color--inverse, #fff);
+  font-size: 0.75rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.admin-resource-option__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.admin-resource-option__note {
+  color: var(--admin-muted);
+  white-space: nowrap;
+}
+
 /* ── Dark theme adjustments ─────────────────────────────────────────────── */
 
 /*
