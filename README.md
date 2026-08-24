@@ -400,6 +400,26 @@ tells you, by path, which parts of the document it is not showing you. Once you
 edit the YAML by hand the form locks and the write sends your document verbatim,
 with no form model at all.
 
+**The hostname and the target Service are picked, not typed.** Set an **App
+domain** on the cluster — its wildcard DNS, `apps.example.com` — and naming an
+exposure fills the hostname in as `<name>-<namespace>.<domain>`, OpenShift's own
+rule. On OpenShift the domain is read from the cluster and offered; elsewhere you
+type it once, on the registration. Any keystroke in the hostname field takes it
+over for good, with a link back to the generated one, and editing an existing
+exposure never rewrites the hostname it is already admitted under.
+
+With **no** app domain set the console generates nothing and asks you to type a
+hostname, which is the point rather than a gap: a name under a wildcard that does
+not resolve is an exposure that is created, reports Admitted and routes nothing.
+The namespace is in the generated name because without it the same Service name
+in two namespaces produces one hostname twice, and the second exposure quietly
+loses.
+
+The target Service is a list of what is actually in the namespace, and a
+single-port Service fills its port in too. If that listing *fails* the control
+falls back to a text box and says so — an empty dropdown would read as "this
+namespace has no Services" and send you to create one you already have.
+
 **A backend that cannot express what you asked for says so and refuses to guess.**
 An Ingress cannot do passthrough TLS. The console does not emit an
 `nginx.ingress.kubernetes.io` annotation and hope it is nginx you are running,
