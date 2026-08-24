@@ -75,7 +75,9 @@ import { resources as resourcesApi, routes as routesApi } from '../api/client';
 const DNS_LABEL = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/;
 
 /**
- * `<name>-<namespace>.<domain>` — the same rule as `route_domain.generated_host`.
+ * `<name>-<namespace>.<domain>` — OpenShift's rule, and the only implementation
+ * of it. The backend publishes the domain and the rule as a string; it does not
+ * build hostnames, because both inputs change per keystroke.
  *
  * Deliberately a *suggestion* and nothing more. The value it produces goes into
  * `spec.host` and is then compiled and validated server-side like any hostname
@@ -84,10 +86,14 @@ const DNS_LABEL = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/;
  * check is here only so the form never offers a hostname that is obviously
  * illegal; the backend remains the authority on whether it is accepted.
  *
- * Returns null rather than a partial string, for the same reason the backend
- * does: a truncated hostname is a different hostname, and one that silently
- * points somewhere else is worse than the empty box the operator would have
- * filled in themselves.
+ * The namespace is in the rule on purpose. Without it a Service called `web` in
+ * two namespaces generates one hostname twice; most controllers admit both and
+ * route to whichever won, which is an outage whose cause is invisible in either
+ * object.
+ *
+ * Returns null rather than a partial string: a truncated hostname is a
+ * different hostname, and one that silently points somewhere else is worse than
+ * the empty box the operator would have filled in themselves.
  */
 function generatedHostFor(name, namespace, domain) {
   if (!domain || !name || !namespace) return null;

@@ -23,6 +23,16 @@ produces an exposure that is created, reports Admitted, and routes nothing —
 resolve is worse than an empty field, because the empty field asks a question
 and the suffix answers it wrongly.
 
+**Building the hostname is not done here.** The rule is
+``<name>-<namespace>.<domain>``, and it is applied in ``RouteDialog.jsx`` as the
+operator types, because it depends on two fields that change per keystroke and
+a round trip per keystroke is not a design. This module publishes the domain and
+the rule as a string (``pattern``, below) and nothing else. A Python copy of the
+rule did exist and was called by nothing but its own tests — green, and attesting
+to a code path that never ran, which is the advisory-lint failure in test form.
+If you want the backend to generate hostnames, give it a caller in the same
+change.
+
 **Discovery never overwrites what an operator typed.** OpenShift publishes its
 wildcard at ``ingresses.config.openshift.io/cluster``; this module reads it and
 offers it, and the stored value still wins. A cluster can perfectly well serve
@@ -188,30 +198,6 @@ def discover_domain(unavailable: list[dict[str, Any]] | None = None) -> str | No
             "Cluster published an app domain that is not a DNS name: %r", domain,
         )
         return None
-
-
-def generated_host(name: str, namespace: str, domain: str | None) -> str | None:
-    """``<name>-<namespace>.<domain>``, OpenShift's rule, or None.
-
-    The namespace is in there on purpose. Without it, a Service called ``web``
-    in two namespaces generates one hostname twice; the second exposure is
-    admitted by most controllers and then loses to the first, which is a routing
-    outage whose cause is invisible in either object.
-
-    Returns None rather than a partial string whenever a piece is missing or the
-    result would not be a legal hostname — the caller renders an empty field and
-    the operator types what they want, which is the honest outcome when this
-    function cannot produce a correct answer.
-    """
-    if not domain or not name or not namespace:
-        return None
-    left = f"{name.strip().lower()}-{namespace.strip().lower()}"
-    if not _LABEL.match(left):
-        return None
-    host = f"{left}.{domain}"
-    if len(host) > _MAX_HOSTNAME:
-        return None
-    return host
 
 
 def domain_report() -> tuple[dict[str, Any], list[dict[str, Any]]]:

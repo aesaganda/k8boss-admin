@@ -133,47 +133,11 @@ def test_a_domain_that_would_not_resolve_is_refused_at_the_form(typed):
     assert caught.value.context["field"] == "app_domain"
 
 
-# --------------------------------------------------------------------------- #
-# generated_host
-# --------------------------------------------------------------------------- #
-
-def test_the_generated_host_is_openshifts_rule():
-    assert route_domain.generated_host("shop", "web", "apps.k8boss.local") == (
-        "shop-web.apps.k8boss.local"
-    )
-
-
-def test_the_namespace_is_in_the_hostname_so_two_namespaces_do_not_collide():
-    """The reason the rule is not simply ``<name>.<domain>``.
-
-    A Service called `web` in two namespaces would otherwise generate one
-    hostname twice. Most controllers admit both and route to whichever won,
-    which is an outage whose cause is invisible in either object.
-    """
-    first = route_domain.generated_host("web", "team-a", "apps.k8boss.local")
-    second = route_domain.generated_host("web", "team-b", "apps.k8boss.local")
-
-    assert first != second
-
-
-@pytest.mark.parametrize(
-    "name,namespace,domain",
-    [
-        ("shop", "web", None),        # no domain: nothing to build under
-        ("", "web", "apps.x.com"),    # no name yet — the operator is still typing
-        ("shop", "", "apps.x.com"),
-        ("Shop_1", "web", "apps.x.com"),  # not a DNS label
-        ("a" * 250, "web", "apps.x.com"),  # over 253 once assembled
-    ],
-)
-def test_nothing_is_generated_when_it_could_not_be_correct(name, namespace, domain):
-    """None, never a partial or truncated string.
-
-    A truncated hostname is a *different* hostname, and one that quietly points
-    somewhere else is worse than the empty field the operator would otherwise
-    have filled in themselves.
-    """
-    assert route_domain.generated_host(name, namespace, domain) is None
+# Hostname *generation* is not tested here, because it does not happen here.
+# The rule lives in RouteDialog.jsx — it depends on two fields that change per
+# keystroke — and routes.spec.js covers it against the code that actually runs.
+# There were three tests in this slot asserting against a Python copy nothing
+# called; they passed regardless of whether the shipped rule worked.
 
 
 # --------------------------------------------------------------------------- #
