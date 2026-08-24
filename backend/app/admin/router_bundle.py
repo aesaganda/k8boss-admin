@@ -59,11 +59,13 @@ this use:
    with ``spec.ingressClassName: haproxy`` matches nothing and is never served —
    and the console's Routes screen writes exactly that. The suffix is not
    decoration: because the Deployment passes ``--ingress.class``, the controller
-   matches only ``haproxy.org/ingress-controller/<that value>``, and the bare
-   string it accepts when the flag is absent matches nothing at all. Getting this
-   pair wrong is silent — see :func:`ingress_controller_for`, which is where the
-   whole failure is written down. **If you are re-deriving this bundle against a
-   newer upstream release, check this pair first.**
+   matches only ``haproxy.org/ingress-controller/<that value>``. The bare string
+   is the other half of the *other* valid pairing — the one where the flag is
+   absent — and mixing the two halves is what this bundle shipped for its first
+   releases, which admitted nothing at all while reporting itself healthy.
+   Getting this pair wrong is silent; see :func:`ingress_controller_for`. **If you
+   are re-deriving this bundle against a newer upstream release, check this pair
+   first.**
 3. **``--publish-service`` is set.** Without it the controller never writes
    ``status.loadBalancer`` on the Ingresses it serves, so the console's
    ``address`` column stays empty forever and an operator cannot tell a working
@@ -118,10 +120,17 @@ def ingress_controller_for(ingress_class_name: str) -> str:
     routes nothing while looking created", produced by the very thing installed
     to prevent it.
 
-    Upstream's own documentation says a single instance can drop the flag and
-    keep the bare string. On the pinned build it cannot: dropping the flag with
-    the bare controller string serves nothing either, verified against 3.2.13 on
-    a live cluster. So the flag stays and the suffix comes with it.
+    There are two valid pairings, not one. Dropping ``--ingress.class`` and
+    keeping the bare string works exactly as upstream documents it — verified on
+    a live cluster, picked up within twelve seconds of the Ingress appearing.
+    What does not work is a *mismatched* pair, which is what this bundle shipped.
+
+    We keep the flag and the suffix rather than dropping both, because the suffix
+    makes the pairing exclusive: an IngressClass carrying the bare string belongs
+    to any HAProxy controller running without the flag, and on a cluster that
+    already has one, a class-less configuration would have the two of them
+    contending for the same objects. ``docs/adr-0004-shipped-router.md`` is about
+    not doing that.
     """
     return f"{INGRESS_CONTROLLER}/{ingress_class_name}"
 
