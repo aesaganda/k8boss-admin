@@ -145,6 +145,43 @@ test.describe('the routes listing', () => {
   });
 });
 
+test.describe('the address column', () => {
+  test('the hostname is a link that opens away from the console', async ({ page }) => {
+    await mockApi(page, { preflight: ALLOW_ALL });
+    await openRoutes(page);
+
+    const link = page.getByRole('link', { name: /^https?:\/\// }).first();
+    await expect(link).toBeVisible();
+
+    const href = await link.getAttribute('href');
+    expect(href).toMatch(/^https?:\/\//);
+
+    // Its own tab: this leaves the console for a workload on someone's
+    // cluster, and losing the page you were working on to it is not a
+    // navigation anyone asked for.
+    await expect(link).toHaveAttribute('target', '_blank');
+    // Not optional on a link whose target is a workload nobody has vetted.
+    const rel = await link.getAttribute('rel');
+    expect(rel).toContain('noopener');
+    expect(rel).toContain('noreferrer');
+  });
+
+  test('an exposure with no hostname offers no link to follow', async ({ page }) => {
+    // The empty state here is a reason, not a URL. Linking `—` would be a
+    // link to nothing; linking a guessed host would be worse.
+    await mockApi(page, {
+      preflight: ALLOW_ALL,
+      routes: {
+        ...FIXTURES.routes,
+        items: FIXTURES.routes.items.map((r) => ({ ...r, hosts: [] })),
+      },
+    });
+    await openRoutes(page);
+
+    await expect(page.getByRole('link', { name: /^https?:\/\// })).toHaveCount(0);
+  });
+});
+
 test.describe('the configuration screen', () => {
   test('offers a form and a YAML view of the same object', async ({ page }) => {
     await mockApi(page, { preflight: ALLOW_ALL });
