@@ -15,6 +15,14 @@ services:
       dockerfile: Dockerfile
     image: k8boss-admin-backend:local
     container_name: k8boss-admin-backend
+    # `restart: unless-stopped` only fires on container EXIT — a wedged event
+    # loop that stops accepting connections but never crashes the process stays
+    # "unhealthy" forever with nothing to restart it. This label is what
+    # `autoheal` (below) watches; it force-restarts a container Docker has
+    # already marked unhealthy instead of leaving an operator to notice and do
+    # it by hand.
+    labels:
+      - "autoheal=true"
     ports:
       - "${API_BIND:-127.0.0.1}:${API_PORT:-8020}:8020"
     environment:
@@ -183,6 +191,22 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+
+  autoheal:
+    image: willfarrell/autoheal:latest
+    container_name: k8boss-admin-autoheal
+    environment:
+      - AUTOHEAL_CONTAINER_LABEL=autoheal
+      # Give the backend's own retries (3 x 30s interval, after start_period) a
+      # chance to pass first; only act once Docker has settled on "unhealthy"
+      # rather than restarting mid-flap.
+      - AUTOHEAL_START_PERIOD=60
+      - AUTOHEAL_INTERVAL=30
+    volumes:
+      # Read-only: autoheal only ever calls `docker restart` on containers
+      # carrying its label, never anything broader.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    restart: unless-stopped
 
 volumes:
   # Named, not a bind mount: it holds the SQLite database AND the generated

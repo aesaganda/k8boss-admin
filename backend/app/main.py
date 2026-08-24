@@ -22,7 +22,9 @@ the context is pinned, and both are outside the routes that read them.
 
 from __future__ import annotations
 
+import faulthandler
 import logging
+import signal
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -53,6 +55,12 @@ from app.api.workloads import router as workloads_router
 from app.api.auth import router as auth_router
 
 logger = logging.getLogger(__name__)
+
+# `docker kill -s USR1 <container>` dumps every thread's Python stack to stderr.
+# Without this, a wedged event loop (the whole point of a wedge is that it stops
+# answering, including its own liveness probe) leaves no way to tell "blocked on
+# a lock" from "blocked on a socket" apart from killing and losing the evidence.
+faulthandler.register(signal.SIGUSR1, all_threads=True)
 
 
 @asynccontextmanager
