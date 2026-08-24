@@ -72,6 +72,7 @@ from app.resources.envelope import (
     unavailable_entry,
 )
 from app.resources.shaping import age_seconds, get_field
+from app.services import route_domain
 
 logger = logging.getLogger(__name__)
 
@@ -383,7 +384,17 @@ def capabilities() -> dict[str, Any]:
         if state.state == STATE_UNKNOWN and state.error is not None:
             unavailable.append(_unknown_entry(state))
 
-    return envelope(backends, unavailable=unavailable)
+    # The cluster's wildcard domain rides along because the dialog that reads
+    # this envelope is the one that needs it, and asking for it separately would
+    # let the form render its hostname field before knowing whether it can
+    # generate one — which is a field that changes under the operator after they
+    # have started typing in it.
+    domain, domain_unavailable = route_domain.domain_report()
+    unavailable.extend(domain_unavailable)
+
+    body = envelope(backends, unavailable=unavailable)
+    body["appDomain"] = domain
+    return body
 
 
 def _backend_payload(state: BackendState) -> dict[str, Any]:

@@ -37,6 +37,7 @@ from app.k8s.auth import TOKEN_AUTH_TYPES
 from app.k8s.client import manager
 from app.k8s.context import reset_current_cluster_id, set_current_cluster_id
 from app.models import Cluster, utcnow
+from app.services import route_domain
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +95,10 @@ class ClusterCreate(BaseModel):
     token: str = Field(..., min_length=1)
     ca_certificate: str | None = None
     skip_tls_verify: bool = False
+    #: §13. The cluster's wildcard DNS domain, used to generate exposure
+    #: hostnames. Optional, and blank is meaningful: it means the console
+    #: generates none rather than guessing one.
+    app_domain: str | None = None
 
 
 class ClusterUpdate(BaseModel):
@@ -112,6 +117,11 @@ class ClusterUpdate(BaseModel):
     token: str | None = None
     ca_certificate: str | None = None
     skip_tls_verify: bool | None = None
+    #: Sending "" clears it. That is the only way to clear it, because the
+    #: generic assignment loop below skips None so that an omitted field cannot
+    #: blank a stored one — and an operator who typed the wrong domain has to be
+    #: able to remove it, not just overwrite it with another wrong one.
+    app_domain: str | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -251,6 +261,7 @@ def create_cluster(payload: ClusterCreate, db: Session = Depends(get_db)) -> dic
         token_encrypted=encrypt(payload.token),
         ca_certificate=payload.ca_certificate,
         skip_tls_verify=payload.skip_tls_verify,
+        app_domain=route_domain.normalize_domain(payload.app_domain),
         # Never tested yet, and that is a distinct state from "failed". See
         # Cluster.status.
         status="unknown",
@@ -292,6 +303,13 @@ def update_cluster(
                 context={"field": "token"},
             )
         cluster.token_encrypted = encrypt(token)
+
+    if "app_domain" in fields:
+        # Normalised here rather than in the loop: it is the one field where a
+        # blank is an instruction ("stop generating hostnames") rather than an
+        # absent value, and normalize_domain refuses anything that would build a
+        # hostname DNS cannot resolve.
+        cluster.app_domain = route_domain.normalize_domain(fields.pop("app_domain"))
 
     for key, value in fields.items():
         if value is not None:
@@ -402,11 +420,21 @@ def test_cluster(cluster_id: int, db: Session = Depends(get_db)) -> dict:
     with _cluster_context(cluster.id):
         permissions = preflight.check_many([dict(check) for check in BASELINE_PREFLIGHT_CHECKS])
 
+    # §13. Offered, never applied: the stored value is the operator's and this
+    # is only what the cluster says about itself. The dialog shows it as a
+    # suggestion beside the field. None covers both "not OpenShift" and "we
+    # could not ask", which are the same thing to a form that has nothing to
+    # pre-fill — the difference is reported where it can be acted on, in the
+    # capabilities envelope the route dialog reads.
+    with _cluster_context(cluster.id):
+        discovered = route_domain.discover_domain()
+
     return {
         "reachable": True,
         "server_version": server_version,
         "latency_ms": latency_ms,
         "permissions": permissions,
+        "discovered_app_domain": discovered,
     }
 
 

@@ -50,8 +50,11 @@ import {
   Checkbox,
   Form,
   FormGroup,
+  FormHelperText,
   FormSelect,
   FormSelectOption,
+  HelperText,
+  HelperTextItem,
   Modal,
   ModalBody,
   ModalFooter,
@@ -90,6 +93,7 @@ const EMPTY_FORM = {
   token: '',
   ca_certificate: '',
   skip_tls_verify: false,
+  app_domain: '',
 };
 
 /**
@@ -156,6 +160,11 @@ function ClusterFormModal({ isOpen, editing, onClose, onSaved }) {
             // boolean, not the certificate, so there is nothing to prefill.
             ca_certificate: '',
             skip_tls_verify: Boolean(editing.skip_tls_verify),
+            // Unlike the token and the CA, this one is not a credential, so
+            // ClusterPublic carries it and it prefills for real. Blanking the
+            // box and saving clears it — the backend reads "" as "generate no
+            // hostnames" rather than as "field omitted".
+            app_domain: editing.app_domain ?? '',
           }
         : EMPTY_FORM,
     );
@@ -176,6 +185,10 @@ function ClusterFormModal({ isOpen, editing, onClose, onSaved }) {
           api_server: form.api_server,
           authentication_type: form.authentication_type,
           skip_tls_verify: form.skip_tls_verify,
+          // Always sent, including empty: "" is how the operator clears a
+          // domain they got wrong, and omitting it would make a wrong domain
+          // unremovable through this form.
+          app_domain: form.app_domain.trim(),
         };
         if (form.token.trim()) body.token = form.token;
         if (form.ca_certificate.trim()) body.ca_certificate = form.ca_certificate;
@@ -280,6 +293,28 @@ function ClusterFormModal({ isOpen, editing, onClose, onSaved }) {
                 A CA certificate is already stored. Leave this empty to keep it.
               </p>
             )}
+          </FormGroup>
+
+          <FormGroup label="App domain" fieldId="cluster-app-domain">
+            <TextInput
+              id="cluster-app-domain"
+              value={form.app_domain}
+              placeholder="apps.example.com"
+              onChange={(_e, v) => set('app_domain')(v)}
+              data-testid="cluster-app-domain"
+            />
+            <FormHelperText>
+              <HelperText>
+                <HelperTextItem>
+                  The cluster&apos;s wildcard DNS domain. With one set, exposing a Service
+                  offers <code>&lt;name&gt;-&lt;namespace&gt;.{form.app_domain.trim() || 'apps.example.com'}</code> as
+                  the hostname instead of asking you to type it. Leave it empty if this
+                  cluster has no wildcard record — a generated hostname nothing resolves is
+                  worse than a blank field, because the blank field asks the question and
+                  the hostname answers it wrongly.
+                </HelperTextItem>
+              </HelperText>
+            </FormHelperText>
           </FormGroup>
 
           <FormGroup fieldId="cluster-skip-tls">

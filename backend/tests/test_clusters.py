@@ -107,6 +107,35 @@ def stub_preflight(monkeypatch):
 
 
 @pytest.fixture
+def plain_kubernetes(monkeypatch):
+    """Discovery answers, and says this cluster is not OpenShift.
+
+    §13's connection test asks the cluster whether it publishes a wildcard app
+    domain, which only OpenShift does. Stubbed rather than left to the fake's
+    assertion because the branch under test is the *ordinary* one — a plain
+    Kubernetes cluster has no `config.openshift.io`, and the test needs that to
+    stay a quiet `None` rather than becoming an `unavailable` entry. A fake that
+    answered anything here would hide the difference.
+    """
+    from app.resources import catalog
+
+    def fake_raw_get(path, *, query=None):
+        if path == "/api":
+            return {"versions": ["v1"]}
+        if path == "/apis":
+            # No groups at all: the smallest cluster that is still a cluster,
+            # and the one where `config.openshift.io` is unambiguously absent
+            # rather than merely unread.
+            return {"groups": []}
+        if path == "/api/v1":
+            return {"resources": []}
+        raise AssertionError(f"discovery asked for an unstubbed path: {path}")
+
+    monkeypatch.setattr(catalog, "raw_get", fake_raw_get)
+    return fake_raw_get
+
+
+@pytest.fixture
 def healthy_cluster(fake_k8s):
     """A fake cluster that answers every overview collector."""
     fake_k8s.version_api.returns("get_code", obj(git_version="v1.31.4"))
@@ -159,8 +188,8 @@ def test_create_returns_the_public_shape(client):
     body = response.json()
     assert set(body) == {
         "id", "name", "platform", "api_server", "authentication_type",
-        "has_ca_certificate", "skip_tls_verify", "status", "server_version",
-        "last_connected", "created_at", "updated_at",
+        "has_ca_certificate", "skip_tls_verify", "app_domain", "status",
+        "server_version", "last_connected", "created_at", "updated_at",
     }
     assert body["has_ca_certificate"] is True
     # Never tested yet — and that is not the same as "failed".
@@ -170,7 +199,7 @@ def test_create_returns_the_public_shape(client):
 
 
 def test_the_token_never_appears_in_any_clusters_response(
-    client, stub_preflight, healthy_cluster
+    client, stub_preflight, healthy_cluster, plain_kubernetes
 ):
     """The central guarantee of §3, checked across every response the resource
     can produce, including the error path."""
@@ -294,7 +323,7 @@ def test_missing_cluster_is_not_found(client):
 # --------------------------------------------------------------------------- #
 
 def test_test_reports_reachability_version_and_baseline_permissions(
-    client, registered_cluster, fake_k8s, stub_preflight
+    client, registered_cluster, fake_k8s, stub_preflight, plain_kubernetes
 ):
     fake_k8s.version_api.returns("get_code", obj(git_version="v1.31.4"))
 
@@ -319,7 +348,7 @@ def test_test_reports_reachability_version_and_baseline_permissions(
 
 
 def test_a_successful_test_records_connectivity_on_the_cluster(
-    client, registered_cluster, fake_k8s, stub_preflight
+    client, registered_cluster, fake_k8s, stub_preflight, plain_kubernetes
 ):
     fake_k8s.version_api.returns("get_code", obj(git_version="v1.30.2"))
     client.post(f"/api/clusters/{registered_cluster.id}/test")
