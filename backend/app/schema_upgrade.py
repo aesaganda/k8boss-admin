@@ -125,6 +125,18 @@ ADDITIVE_COLUMNS: tuple[AdditiveColumn, ...] = (
             "ON audit_records (event_hash)"
         ),
     ),
+    AdditiveColumn(
+        table="clusters",
+        column="app_domain",
+        ddl_type="VARCHAR(253)",
+        purpose=(
+            "the cluster's wildcard DNS domain, which §13's generated exposure "
+            "hostnames are built under; NULL means the console does not know of "
+            "one and therefore offers to generate nothing, because a hostname "
+            "under a wildcard that does not exist routes nothing while looking "
+            "created"
+        ),
+    ),
 )
 
 #: Indexes that belong to columns which already existed. Issued unconditionally

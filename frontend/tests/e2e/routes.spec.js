@@ -226,6 +226,117 @@ test.describe('the configuration screen', () => {
   });
 });
 
+/**
+ * §13 hostname generation.
+ *
+ * Like the Service picker above it, this exists to stop the operator typing
+ * something the console already knows. What is asserted here is mostly the
+ * *restraint*: the generated hostname must stop the instant it is typed over,
+ * and must not appear at all on a cluster with no wildcard domain to build it
+ * under.
+ */
+
+/** The capabilities envelope with a wildcard domain on the cluster. */
+function withAppDomain(domain, extra = {}) {
+  return {
+    ...FIXTURES.routeCapabilities,
+    appDomain: {
+      value: domain,
+      source: 'configured',
+      stored: domain,
+      discovered: null,
+      pattern: '<name>-<namespace>.<domain>',
+      ...extra,
+    },
+  };
+}
+
+test.describe('the generated hostname', () => {
+  test('is built from the name and namespace under the cluster domain', async ({ page }) => {
+    await mockApi(page, {
+      preflight: ALLOW_ALL,
+      routeCapabilities: withAppDomain('apps.k8boss.local'),
+    });
+    await openRoutes(page);
+    await page.getByTestId('routes-create').click();
+
+    await page.getByTestId('route-name').fill('shop');
+    await page.getByTestId('route-namespace').fill('web');
+
+    // OpenShift's rule, namespace included. Without it, `web` in two namespaces
+    // generates one hostname twice and the second exposure quietly loses.
+    await expect(page.getByTestId('route-host')).toHaveValue('shop-web.apps.k8boss.local');
+  });
+
+  test('follows the name until the operator types over it, then stops', async ({ page }) => {
+    await mockApi(page, {
+      preflight: ALLOW_ALL,
+      routeCapabilities: withAppDomain('apps.k8boss.local'),
+    });
+    await openRoutes(page);
+    await page.getByTestId('routes-create').click();
+
+    await page.getByTestId('route-name').fill('shop');
+    await page.getByTestId('route-namespace').fill('web');
+    await expect(page.getByTestId('route-host')).toHaveValue('shop-web.apps.k8boss.local');
+
+    await page.getByTestId('route-host').fill('checkout.example.com');
+    // The whole point: editing the name again must not take the field back. A
+    // box that rewrites itself while somebody is typing in it is worse than one
+    // that never filled itself in.
+    await page.getByTestId('route-name').fill('shopfront');
+
+    await expect(page.getByTestId('route-host')).toHaveValue('checkout.example.com');
+  });
+
+  test('offers the generated one back after an override, and takes it', async ({ page }) => {
+    await mockApi(page, {
+      preflight: ALLOW_ALL,
+      routeCapabilities: withAppDomain('apps.k8boss.local'),
+    });
+    await openRoutes(page);
+    await page.getByTestId('routes-create').click();
+
+    await page.getByTestId('route-name').fill('shop');
+    await page.getByTestId('route-namespace').fill('web');
+    await page.getByTestId('route-host').fill('mine.example.com');
+
+    await page.getByTestId('route-host-reset').click();
+    await expect(page.getByTestId('route-host')).toHaveValue('shop-web.apps.k8boss.local');
+  });
+
+  test('generates nothing when the cluster has no wildcard domain', async ({ page }) => {
+    // The default fixture: appDomain.value is null. A suffix invented here
+    // would produce an exposure that is created, admitted, and resolvable by
+    // nobody — §14's failure with a hostname instead of a controller.
+    await mockApi(page, { preflight: ALLOW_ALL });
+    await openRoutes(page);
+    await page.getByTestId('routes-create').click();
+
+    await page.getByTestId('route-name').fill('shop');
+    await page.getByTestId('route-namespace').fill('web');
+
+    await expect(page.getByTestId('route-host')).toHaveValue('');
+    await expect(page.getByTestId('route-host-generated')).toHaveCount(0);
+  });
+
+  test('never rewrites the hostname of an exposure being edited', async ({ page }) => {
+    await mockApi(page, {
+      preflight: ALLOW_ALL,
+      routeCapabilities: withAppDomain('apps.k8boss.local'),
+    });
+    await openRoutes(page);
+
+    await page.getByRole('row', { name: /shop/ }).getByRole('button').click();
+    await page.getByRole('menuitem', { name: 'Edit…' }).click();
+
+    // Live and admitted under a hostname somebody chose. Changing it because a
+    // domain was configured later is a routing outage delivered by a form the
+    // operator opened to change something else.
+    await expect(page.getByTestId('route-host')).toHaveValue('shop.example.com');
+  });
+});
+
 test.describe('the Service picker', () => {
   test('lists the namespace Services instead of asking for a name', async ({ page }) => {
     await mockApi(page, { preflight: ALLOW_ALL });

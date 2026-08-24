@@ -647,6 +647,18 @@ export const FIXTURES = {
         detail: 'the API server did not answer for gateway.networking.k8s.io',
       },
     ],
+    // §13. The default fixture cluster has no wildcard domain — the ordinary
+    // case, and the one where the dialog must generate nothing at all. The key
+    // is present rather than omitted because the real endpoint always sends it,
+    // and a fixture that leaves it out would let a `?.` typo pass here and fail
+    // against a live backend.
+    appDomain: {
+      value: null,
+      source: null,
+      stored: null,
+      discovered: null,
+      pattern: null,
+    },
   },
 
   /**
