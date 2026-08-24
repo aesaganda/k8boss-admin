@@ -70,6 +70,7 @@ import TrashIcon from '@patternfly/react-icons/dist/esm/icons/trash-icon';
 import MutationDialog from './MutationDialog';
 import YamlEditor from './YamlEditor';
 import { resources as resourcesApi, routes as routesApi } from '../api/client';
+import { objectName } from '../pages/_data';
 
 /** One DNS label. Mirrors `_LABEL` in app/services/route_domain.py. */
 const DNS_LABEL = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/;
@@ -453,17 +454,26 @@ export default function RouteDialog({
         // A partial listing is still a listing, but it is not a complete answer
         // about what exists — so the picker keeps its free-text escape hatch
         // open by recording the shortfall rather than hiding it.
+        // `/resources/core/v1/services` returns §8 *rows* — `service_row` in
+        // shaping.py, with `name` and `ports` at the top level — not raw
+        // manifests. Reading `metadata.name` here found nothing on every real
+        // cluster and produced a picker that said "No Service matches", which
+        // is the empty-is-never-blind failure wearing a dropdown. `objectName`
+        // understands both shapes and exists because this went wrong once
+        // before, in the generic browser's Name column.
+        const rows = body?.items ?? [];
+        const portsOf = (item) => (item?.ports ?? item?.spec?.ports ?? []);
         setServices({
-          names: (body?.items ?? [])
-            .map((item) => item?.metadata?.name)
+          names: rows
+            .map(objectName)
             .filter(Boolean)
             .sort((a, b) => a.localeCompare(b)),
           ports: Object.fromEntries(
-            (body?.items ?? [])
-              .filter((item) => item?.metadata?.name)
+            rows
+              .filter((item) => objectName(item))
               .map((item) => [
-                item.metadata.name,
-                (item?.spec?.ports ?? []).map((p) => p?.name || String(p?.port)).filter(Boolean),
+                objectName(item),
+                portsOf(item).map((p) => p?.name || String(p?.port)).filter(Boolean),
               ]),
           ),
           partial: Boolean(body?.partial),
