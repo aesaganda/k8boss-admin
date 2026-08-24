@@ -891,15 +891,38 @@ export const FIXTURES = {
   // §13. What the exposure dialog's Service picker reads. `checkout` is
   // single-port on purpose — that is the case where picking a Service also
   // fills the port in, and the specs assert it.
+  // §8 rows, as `service_row` in backend/app/resources/shaping.py actually
+  // emits them: `name` and `ports` at the top level, not `metadata.name` and
+  // `spec.ports`. The first version of this fixture invented the raw-manifest
+  // shape, matched the reader that was wrong in the same way, and passed on
+  // every run while the picker found nothing on a real cluster. A fixture is
+  // only worth what it costs if it is the shape the backend returns.
   services: {
     items: [
       {
-        metadata: { name: 'checkout', namespace: 'prod' },
-        spec: { ports: [{ name: 'http', port: 8080 }] },
+        name: 'checkout',
+        namespace: 'prod',
+        type: 'ClusterIP',
+        clusterIP: '10.96.0.11',
+        externalIPs: [],
+        ports: [{ name: 'http', port: 8080, targetPort: 'http', protocol: 'TCP', nodePort: null }],
+        selector: { app: 'checkout' },
+        age_seconds: 3600,
+        endpoint_count: 2,
       },
       {
-        metadata: { name: 'payments', namespace: 'prod' },
-        spec: { ports: [{ name: 'http', port: 80 }, { name: 'grpc', port: 9090 }] },
+        name: 'payments',
+        namespace: 'prod',
+        type: 'ClusterIP',
+        clusterIP: '10.96.0.12',
+        externalIPs: [],
+        ports: [
+          { name: 'http', port: 80, targetPort: 'http', protocol: 'TCP', nodePort: null },
+          { name: 'grpc', port: 9090, targetPort: 'grpc', protocol: 'TCP', nodePort: null },
+        ],
+        selector: { app: 'payments' },
+        age_seconds: 7200,
+        endpoint_count: 3,
       },
     ],
     continue: null,
