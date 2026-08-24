@@ -54,9 +54,16 @@ this use:
    with no tag, which is ``:latest``. A router that silently changes major
    version when its pod restarts is not something to install on somebody's
    cluster from a console.
-2. **An IngressClass is created.** Upstream ships none, so an Ingress written
+2. **An IngressClass is created**, and its ``spec.controller`` carries the class
+   name as a suffix. Upstream ships no IngressClass at all, so an Ingress written
    with ``spec.ingressClassName: haproxy`` matches nothing and is never served —
-   and the console's Routes screen writes exactly that.
+   and the console's Routes screen writes exactly that. The suffix is not
+   decoration: because the Deployment passes ``--ingress.class``, the controller
+   matches only ``haproxy.org/ingress-controller/<that value>``, and the bare
+   string it accepts when the flag is absent matches nothing at all. Getting this
+   pair wrong is silent — see :func:`ingress_controller_for`, which is where the
+   whole failure is written down. **If you are re-deriving this bundle against a
+   newer upstream release, check this pair first.**
 3. **``--publish-service`` is set.** Without it the controller never writes
    ``status.loadBalancer`` on the Ingresses it serves, so the console's
    ``address`` column stays empty forever and an operator cannot tell a working
