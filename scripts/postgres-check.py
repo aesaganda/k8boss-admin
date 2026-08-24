@@ -78,6 +78,7 @@ from app.models import AuditRecord, install_audit_append_only_guard
 with engine.begin() as c:
     c.execute(text("DROP TABLE IF EXISTS audit_records CASCADE"))
     c.execute(text("DROP TABLE IF EXISTS users CASCADE"))
+    c.execute(text("DROP TABLE IF EXISTS clusters CASCADE"))
     c.execute(text("""
         CREATE TABLE audit_records (
             id SERIAL PRIMARY KEY,
@@ -100,6 +101,32 @@ with engine.begin() as c:
             auth_source VARCHAR(32) NOT NULL, password_hash TEXT,
             active BOOLEAN NOT NULL, last_login TIMESTAMP,
             created_at TIMESTAMP NOT NULL, updated_at TIMESTAMP NOT NULL)"""))
+    # §13's app_domain, added later than this table. Created here WITHOUT it and
+    # populated, because a column added to an empty table proves nothing: the
+    # ACCESS EXCLUSIVE lock an ALTER takes is only interesting when there are
+    # rows under it, and a registered cluster is exactly what an upgraded
+    # deployment has.
+    c.execute(text("""
+        CREATE TABLE clusters (
+            id SERIAL PRIMARY KEY,
+            name VARCHAR(255) NOT NULL UNIQUE,
+            platform VARCHAR(50) NOT NULL,
+            api_server VARCHAR(1024) NOT NULL,
+            authentication_type VARCHAR(50) NOT NULL,
+            token_encrypted TEXT,
+            ca_certificate TEXT,
+            skip_tls_verify BOOLEAN NOT NULL,
+            status VARCHAR(50) NOT NULL,
+            status_detail TEXT,
+            server_version VARCHAR(64),
+            last_connected TIMESTAMP,
+            created_at TIMESTAMP NOT NULL,
+            updated_at TIMESTAMP NOT NULL)"""))
+    c.execute(text(
+        "INSERT INTO clusters (name, platform, api_server, authentication_type, "
+        "skip_tls_verify, status, created_at, updated_at) VALUES "
+        "('legacy-prod', 'kubernetes', 'https://api.legacy:6443', "
+        "'service_account_token', false, 'connected', now(), now())"))
     c.execute(text("INSERT INTO audit_records (ts, actor, verb, target, dry_run, outcome, detail) "
                    "VALUES (now(), 'legacy', 'patch', '{}', false, 'applied', 'pre-chain row')"))
 
@@ -110,7 +137,26 @@ schema_upgrade.upgrade(engine)
 cols = {c["name"] for c in inspect(engine).get_columns("audit_records")}
 assert {"category", "prev_hash", "event_hash"} <= cols, cols
 assert "external_id" in {c["name"] for c in inspect(engine).get_columns("users")}
+assert "app_domain" in {c["name"] for c in inspect(engine).get_columns("clusters")}
 print("PASS  ALTER TABLE ADD COLUMN on a populated PostgreSQL table")
+
+# The registered cluster is still there and its new column is NULL — "we do not
+# know of a wildcard domain", which §13.3.1 renders as "generate no hostname".
+# A migration that defaulted it to anything would start generating hostnames
+# under a domain nobody chose, on every cluster registered before the upgrade.
+with engine.begin() as c:
+    row = c.execute(text("SELECT name, app_domain FROM clusters")).fetchall()
+assert row == [("legacy-prod", None)], row
+print("PASS  app_domain lands as NULL on an already-registered PostgreSQL cluster")
+
+# Removed now that the ALTER has been exercised over it. The audit sections below
+# were written against a database with no clusters registered, and `record()`
+# attributes to the sole registered cluster when there is one — leaving this row
+# in place re-labels five of the nine audit records and fails the NO_CLUSTER
+# filter check twenty lines down, for a reason that has nothing to do with what
+# either check is about.
+with engine.begin() as c:
+    c.execute(text("DELETE FROM clusters"))
 
 assert schema_upgrade.apply_additive_upgrades(engine) == []
 print("PASS  upgrade is idempotent on PostgreSQL")
