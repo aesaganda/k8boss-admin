@@ -824,6 +824,26 @@ export const FIXTURES = {
   },
 
   emptyList: { items: [], continue: null, remaining: null, partial: false, unavailable: [] },
+
+  // §13. What the exposure dialog's Service picker reads. `checkout` is
+  // single-port on purpose — that is the case where picking a Service also
+  // fills the port in, and the specs assert it.
+  services: {
+    items: [
+      {
+        metadata: { name: 'checkout', namespace: 'prod' },
+        spec: { ports: [{ name: 'http', port: 8080 }] },
+      },
+      {
+        metadata: { name: 'payments', namespace: 'prod' },
+        spec: { ports: [{ name: 'http', port: 80 }, { name: 'grpc', port: 9090 }] },
+      },
+    ],
+    continue: null,
+    remaining: null,
+    partial: false,
+    unavailable: [],
+  },
 };
 
 /** Answer every /api call from the fixtures above. */
@@ -832,6 +852,7 @@ export async function mockApi(
   {
     health = FIXTURES.health,
     auth = null,
+    services = null,
     audit = null,
     chain = null,
     yaml = null,
@@ -975,6 +996,7 @@ export async function mockApi(
       return json(debug ?? FIXTURES.debugSupported);
     }
     if (path === '/resources/core/v1/pods') return json(pods ?? FIXTURES.pods);
+    if (path === '/resources/core/v1/services') return json(services ?? FIXTURES.services);
     if (path === '/namespaces') return json(FIXTURES.namespaces);
     if (path === '/nodes') return json(FIXTURES.nodes);
     // §5.5. Ordered before the node detail branch: both live under /nodes/…, and

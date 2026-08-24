@@ -42,6 +42,21 @@ const ALLOW_ALL = (checks) =>
     hint: null,
   }));
 
+/**
+ * Pick a target Service, once the picker is actually a picker.
+ *
+ * The control starts as a text box and becomes a `<select>` when the
+ * namespace's Services arrive, so acting the moment the namespace is typed
+ * races the listing. Without this wait the specs fail roughly one run in ten,
+ * on the assertion after the one that actually broke — and an e2e suite that
+ * fails intermittently gets re-run rather than read, which costs it the only
+ * thing it was for.
+ */
+async function pickService(page, index, name) {
+  await expect(page.locator(`select[data-testid="route-target-service-${index}"]`)).toBeVisible();
+  await page.getByTestId(`route-target-service-${index}`).selectOption(name);
+}
+
 async function openRoutes(page) {
   await page.goto('/routes');
   await expectPageRendered(page, 'Routes');
@@ -134,7 +149,7 @@ test.describe('the configuration screen', () => {
     await page.getByTestId('route-name').fill('checkout');
     await page.getByTestId('route-namespace').fill('prod');
     await page.getByTestId('route-host').fill('checkout.example.com');
-    await page.getByTestId('route-target-service-0').fill('checkout');
+    await pickService(page, 0, 'checkout');
     await page.getByTestId('route-target-port-0').fill('8080');
 
     await page.getByRole('tab', { name: 'YAML' }).click();
@@ -166,7 +181,7 @@ test.describe('the configuration screen', () => {
 
     await page.getByTestId('route-name').fill('checkout');
     await page.getByTestId('route-namespace').fill('prod');
-    await page.getByTestId('route-target-service-0').fill('checkout');
+    await pickService(page, 0, 'checkout');
 
     await page.getByRole('tab', { name: 'YAML' }).click();
     await page.locator('#route-yaml').fill(
@@ -202,12 +217,81 @@ test.describe('the configuration screen', () => {
 
     await page.getByTestId('route-name').fill('checkout');
     await page.getByTestId('route-namespace').fill('prod');
-    await page.getByTestId('route-target-service-0').fill('checkout');
+    await pickService(page, 0, 'checkout');
 
     const preserved = page.getByTestId('route-preserved');
     await expect(preserved).toBeVisible();
     await expect(preserved).toContainText('spec.rules[1]');
     await expect(preserved).toContainText('haproxy.org/ssl-redirect');
+  });
+});
+
+test.describe('the Service picker', () => {
+  test('lists the namespace Services instead of asking for a name', async ({ page }) => {
+    await mockApi(page, { preflight: ALLOW_ALL });
+    await openRoutes(page);
+    await page.getByTestId('routes-create').click();
+    await page.getByTestId('route-namespace').fill('prod');
+
+    const picker = page.getByTestId('route-target-service-0');
+    await expect(picker.locator('option[value="checkout"]')).toHaveCount(1);
+    await expect(picker.locator('option[value="payments"]')).toHaveCount(1);
+  });
+
+  test('fills the port in when the Service has exactly one', async ({ page }) => {
+    await mockApi(page, { preflight: ALLOW_ALL });
+    await openRoutes(page);
+    await page.getByTestId('routes-create').click();
+    await page.getByTestId('route-namespace').fill('prod');
+
+    await pickService(page, 0, 'checkout');
+    await expect(page.getByTestId('route-target-port-0')).toHaveValue('http');
+
+    // Two ports is a choice the console does not have the standing to make, so
+    // it leaves the box alone rather than picking the first one.
+    await page.getByTestId('route-target-service-0').selectOption('payments');
+    await expect(page.getByTestId('route-target-port-0')).toHaveValue('http');
+  });
+
+  test('a namespace with no Services says so, rather than looking unread', async ({ page }) => {
+    await mockApi(page, {
+      preflight: ALLOW_ALL,
+      services: { items: [], continue: null, remaining: null, partial: false, unavailable: [] },
+    });
+    await openRoutes(page);
+    await page.getByTestId('routes-create').click();
+    await page.getByTestId('route-namespace').fill('prod');
+
+    await expect(page.getByTestId('route-services-empty')).toBeVisible();
+  });
+
+  test('a Service listing that failed is not rendered as an empty namespace', async ({ page }) => {
+    // The §1 rule applied to a dropdown. An empty picker after a failed read
+    // says "this namespace has no Services", which sends the operator to create
+    // one they already have — so the control falls back to free text and says
+    // which question it could not answer.
+    await mockApi(page, { preflight: ALLOW_ALL });
+    // After mockApi, deliberately: page.route matches the most recently
+    // registered handler first, so an override installed before the catch-all
+    // never runs and the test would silently assert against the happy path.
+    await page.route('**/api/resources/core/v1/services**', (route) =>
+      route.fulfill({
+        status: 502,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          error: 'cluster_unreachable',
+          message: 'The cluster API server could not be reached.',
+        }),
+      }),
+    );
+    await openRoutes(page);
+    await page.getByTestId('routes-create').click();
+    await page.getByTestId('route-namespace').fill('prod');
+
+    await expect(page.getByTestId('route-services-unavailable')).toBeVisible();
+    // Still usable: the operator who knows the name can type it.
+    await page.getByTestId('route-target-service-0').fill('checkout');
+    await expect(page.getByTestId('route-target-service-0')).toHaveValue('checkout');
   });
 });
 
@@ -239,7 +323,7 @@ test.describe('a backend that cannot express what was asked for', () => {
     await page.getByTestId('routes-create').click();
     await page.getByTestId('route-name').fill('checkout');
     await page.getByTestId('route-namespace').fill('prod');
-    await page.getByTestId('route-target-service-0').fill('checkout');
+    await pickService(page, 0, 'checkout');
     await page.getByTestId('route-host').fill('checkout.example.com');
     await page.getByTestId('route-termination').selectOption('passthrough');
   }
@@ -303,7 +387,7 @@ test.describe('writing an exposure', () => {
     await page.getByTestId('route-name').fill('checkout');
     await page.getByTestId('route-namespace').fill('prod');
     await page.getByTestId('route-host').fill('checkout.example.com');
-    await page.getByTestId('route-target-service-0').fill('checkout');
+    await pickService(page, 0, 'checkout');
     await page.getByTestId('route-target-port-0').fill('8080');
 
     await page.getByTestId('mutation-preview').click();

@@ -61,7 +61,7 @@ import PlusCircleIcon from '@patternfly/react-icons/dist/esm/icons/plus-circle-i
 import TrashIcon from '@patternfly/react-icons/dist/esm/icons/trash-icon';
 import MutationDialog from './MutationDialog';
 import YamlEditor from './YamlEditor';
-import { routes as routesApi } from '../api/client';
+import { resources as resourcesApi, routes as routesApi } from '../api/client';
 
 /** Termination modes, in the order the OpenShift console offers them. */
 const TERMINATIONS = [
@@ -247,6 +247,54 @@ export default function RouteDialog({
       setDocument('');
     }
   }, [isOpen, editing, existing, defaultNamespace, defaultIngressClass]);
+
+  /* ── The namespace's Services, for the target picker ─────────────────── */
+
+  // `undefined` while we have not asked, an object once we have, and `null`
+  // when the read failed. Three states, not two, and the third is the reason:
+  // an empty dropdown after a failed list would say "this namespace has no
+  // Services", which sends the operator to go and create one they already
+  // have. On null the control falls back to a free-text box and says why.
+  const [services, setServices] = useState(undefined);
+  const namespaceForServices = spec.namespace?.trim() ?? '';
+
+  useEffect(() => {
+    if (!isOpen || !namespaceForServices) {
+      setServices(undefined);
+      return undefined;
+    }
+    let cancelled = false;
+    setServices(undefined);
+    resourcesApi
+      .list('', 'v1', 'services', { namespace: namespaceForServices, limit: 500 })
+      .then((body) => {
+        if (cancelled) return;
+        // A partial listing is still a listing, but it is not a complete answer
+        // about what exists — so the shortfall is recorded and shown rather
+        // than letting a short list read as the whole namespace.
+        setServices({
+          names: (body?.items ?? [])
+            .map((item) => item?.metadata?.name)
+            .filter(Boolean)
+            .sort((a, b) => a.localeCompare(b)),
+          ports: Object.fromEntries(
+            (body?.items ?? [])
+              .filter((item) => item?.metadata?.name)
+              .map((item) => [
+                item.metadata.name,
+                (item?.spec?.ports ?? []).map((port) => port?.name || String(port?.port)).filter(Boolean),
+              ]),
+          ),
+          partial: Boolean(body?.partial),
+        });
+      })
+      .catch(() => {
+        if (!cancelled) setServices(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, namespaceForServices]);
 
   /* ── Rendering ───────────────────────────────────────────────────────── */
 
@@ -644,14 +692,79 @@ export default function RouteDialog({
                 {spec.targets.map((target, index) => (
                   <Grid hasGutter key={index} style={{ marginBottom: '0.5rem' }}>
                     <GridItem span={5}>
-                      <TextInput
-                        aria-label={`Target ${index + 1} Service`}
-                        placeholder="Service name"
-                        value={target.service}
-                        isDisabled={handEdited}
-                        onChange={(_e, value) => setTarget(index, { service: value })}
-                        data-testid={`route-target-service-${index}`}
-                      />
+                      {services?.names ? (
+                        <FormSelect
+                          aria-label={`Target ${index + 1} Service`}
+                          value={target.service}
+                          isDisabled={handEdited}
+                          onChange={(_e, value) => {
+                            // A Service with exactly one port has no ambiguity
+                            // to resolve, so filling it in saves a lookup the
+                            // operator would otherwise do in another tab. More
+                            // than one and we leave it alone rather than
+                            // picking for them.
+                            const ports = services.ports?.[value] ?? [];
+                            setTarget(index, {
+                              service: value,
+                              ...(ports.length === 1 ? { port: ports[0] } : {}),
+                            });
+                          }}
+                          data-testid={`route-target-service-${index}`}
+                        >
+                          <FormSelectOption value="" label="Select a Service" isPlaceholder />
+                          {/* A value that is not in the list still has to be
+                              selectable, or editing an exposure whose Service
+                              was deleted — or one outside a truncated listing —
+                              silently rewrites its target to blank on save. */}
+                          {target.service && !services.names.includes(target.service) && (
+                            <FormSelectOption
+                              value={target.service}
+                              label={`${target.service} — not in this namespace`}
+                            />
+                          )}
+                          {services.names.map((name) => (
+                            <FormSelectOption key={name} value={name} label={name} />
+                          ))}
+                        </FormSelect>
+                      ) : (
+                        <TextInput
+                          aria-label={`Target ${index + 1} Service`}
+                          placeholder="Service name"
+                          value={target.service}
+                          isDisabled={handEdited}
+                          onChange={(_e, value) => setTarget(index, { service: value })}
+                          data-testid={`route-target-service-${index}`}
+                        />
+                      )}
+                      {index === 0 && services === null && (
+                        <FormHelperText>
+                          <HelperText>
+                            <HelperTextItem variant="warning" data-testid="route-services-unavailable">
+                              The Services in this namespace could not be listed, so this is
+                              a free-text box. That is not the same as the namespace having
+                              none — type the name if you know it.
+                            </HelperTextItem>
+                          </HelperText>
+                        </FormHelperText>
+                      )}
+                      {index === 0 && services?.names?.length === 0 && (
+                        <FormHelperText>
+                          <HelperText>
+                            <HelperTextItem data-testid="route-services-empty">
+                              This namespace has no Services. An exposure needs one to point at.
+                            </HelperTextItem>
+                          </HelperText>
+                        </FormHelperText>
+                      )}
+                      {index === 0 && services?.partial && (
+                        <FormHelperText>
+                          <HelperText>
+                            <HelperTextItem variant="warning">
+                              Some Services could not be read, so this list may be short.
+                            </HelperTextItem>
+                          </HelperText>
+                        </FormHelperText>
+                      )}
                     </GridItem>
                     <GridItem span={3}>
                       <TextInput
