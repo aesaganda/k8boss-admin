@@ -53,8 +53,15 @@ const ALLOW_ALL = (checks) =>
  * thing it was for.
  */
 async function pickService(page, index, name) {
-  await expect(page.locator(`select[data-testid="route-target-service-${index}"]`)).toBeVisible();
-  await page.getByTestId(`route-target-service-${index}`).selectOption(name);
+  // A filterable dropdown, not a native select: open it, then click the option.
+  // The menu is appended to the body so the dialog's scroll container cannot
+  // clip it, which is why the option is located from `page` rather than from
+  // within the toggle.
+  const toggle = page.getByTestId(`route-target-service-${index}`);
+  await expect(toggle).toBeVisible();
+  await toggle.click();
+  await page.getByTestId(`route-target-service-option-${name}`).click();
+  await expect(toggle).toContainText(name);
 }
 
 async function openRoutes(page) {
@@ -344,9 +351,20 @@ test.describe('the Service picker', () => {
     await page.getByTestId('routes-create').click();
     await page.getByTestId('route-namespace').fill('prod');
 
-    const picker = page.getByTestId('route-target-service-0');
-    await expect(picker.locator('option[value="checkout"]')).toHaveCount(1);
-    await expect(picker.locator('option[value="payments"]')).toHaveCount(1);
+    await page.getByTestId('route-target-service-0').click();
+    await expect(page.getByTestId('route-target-service-option-checkout')).toBeVisible();
+    await expect(page.getByTestId('route-target-service-option-payments')).toBeVisible();
+
+    // The filter is the reason this is a dropdown rather than a select: a
+    // namespace with sixty Services makes a plain list scroll-and-squint.
+    await page.getByTestId('route-target-service-filter-0').locator('input').fill('pay');
+    await expect(page.getByTestId('route-target-service-option-checkout')).toHaveCount(0);
+    await expect(page.getByTestId('route-target-service-option-payments')).toBeVisible();
+
+    // And a filter that matches nothing says so, rather than showing an empty
+    // menu an operator would read as "this namespace has no Services".
+    await page.getByTestId('route-target-service-filter-0').locator('input').fill('zzz');
+    await expect(page.getByTestId('route-target-service-nomatch-0')).toBeVisible();
   });
 
   test('fills the port in when the Service has exactly one', async ({ page }) => {
@@ -360,7 +378,7 @@ test.describe('the Service picker', () => {
 
     // Two ports is a choice the console does not have the standing to make, so
     // it leaves the box alone rather than picking the first one.
-    await page.getByTestId('route-target-service-0').selectOption('payments');
+    await pickService(page, 0, 'payments');
     await expect(page.getByTestId('route-target-port-0')).toHaveValue('http');
   });
 

@@ -42,6 +42,10 @@ import {
   Alert,
   Button,
   Checkbox,
+  Divider,
+  Dropdown,
+  DropdownItem,
+  DropdownList,
   Form,
   FormGroup,
   FormHelperText,
@@ -51,6 +55,10 @@ import {
   GridItem,
   HelperText,
   HelperTextItem,
+  MenuSearch,
+  MenuSearchInput,
+  MenuToggle,
+  SearchInput,
   Tab,
   TabTitleText,
   Tabs,
@@ -194,6 +202,134 @@ function Reasoned({ reason, children }) {
         {children}
       </span>
     </Tooltip>
+  );
+}
+
+/**
+ * ServiceSelect — the Target Service picker, as a filterable dropdown.
+ *
+ * The OpenShift console offers this same field as a typeahead with a resource
+ * badge, and the reason is the case a native `<select>` is worst at: a
+ * namespace with sixty Services turns choosing one into scroll-and-squint,
+ * while the operator almost always knows the first few characters of the name.
+ * So the filter is the feature. The badge is smaller but not decoration — a
+ * Service name can be any string at all, and in a list of them there is nothing
+ * else on the row saying what kind of object these are.
+ *
+ * Built from the same PatternFly pieces as the masthead's namespace selector
+ * rather than introducing a second filterable-dropdown pattern to this app.
+ *
+ * Two behaviours carried over from the `FormSelect` this replaces, both of
+ * which are the difference between editing an exposure and silently rewriting
+ * one:
+ *
+ *   - a `value` the listing does not contain stays selectable and stays shown,
+ *     labelled as absent. Editing an exposure whose Service was deleted, or one
+ *     outside a truncated listing, must not blank its target on save.
+ *   - a Service with exactly one port fills the port in; more than one and it
+ *     is left alone rather than picked for the operator.
+ */
+function ServiceSelect({ index, value, names, ports, isDisabled, onSelect }) {
+  const [open, setOpen] = useState(false);
+  const [filter, setFilter] = useState('');
+
+  const matches = useMemo(() => {
+    const query = filter.trim().toLowerCase();
+    if (!query) return names;
+    return names.filter((name) => name.toLowerCase().includes(query));
+  }, [names, filter]);
+
+  const unknown = Boolean(value) && !names.includes(value);
+
+  const choose = useCallback(
+    (name) => {
+      setOpen(false);
+      setFilter('');
+      const servicePorts = ports?.[name] ?? [];
+      onSelect({
+        service: name,
+        ...(servicePorts.length === 1 ? { port: servicePorts[0] } : {}),
+      });
+    },
+    [ports, onSelect],
+  );
+
+  const option = (name, note) => (
+    <span className="admin-resource-option">
+      <span className="admin-resource-option__badge" aria-hidden="true">S</span>
+      <span className="admin-resource-option__name">{name}</span>
+      {note && <span className="admin-resource-option__note">{note}</span>}
+    </span>
+  );
+
+  return (
+    <Dropdown
+      isOpen={open}
+      isScrollable
+      onOpenChange={(next) => {
+        setOpen(next);
+        // Reset on close so reopening does not present yesterday's filter as
+        // though it were the whole list.
+        if (!next) setFilter('');
+      }}
+      // Appended to the body so the menu is not clipped by the dialog's own
+      // scroll container. A picker whose options cannot be reached would be
+      // strictly worse than the plain select it replaced.
+      popperProps={{ appendTo: () => document.body }}
+      toggle={(ref) => (
+        <MenuToggle
+          ref={ref}
+          isFullWidth
+          isExpanded={open}
+          isDisabled={isDisabled}
+          onClick={() => setOpen((v) => !v)}
+          aria-label={`Target ${index + 1} Service`}
+          data-testid={`route-target-service-${index}`}
+        >
+          {value
+            ? option(value, unknown ? ' — not in this namespace' : null)
+            : 'Select a Service'}
+        </MenuToggle>
+      )}
+    >
+      <MenuSearch>
+        <MenuSearchInput>
+          <SearchInput
+            value={filter}
+            placeholder="Filter by name"
+            aria-label={`Filter Services for target ${index + 1}`}
+            onChange={(_event, next) => setFilter(next)}
+            onClear={() => setFilter('')}
+            data-testid={`route-target-service-filter-${index}`}
+          />
+        </MenuSearchInput>
+      </MenuSearch>
+      <Divider component="li" />
+      <DropdownList>
+        {unknown && (
+          <DropdownItem key={value} isSelected onClick={() => choose(value)}>
+            {option(value, ' — not in this namespace')}
+          </DropdownItem>
+        )}
+        {matches.map((name) => (
+          <DropdownItem
+            key={name}
+            isSelected={name === value}
+            onClick={() => choose(name)}
+            data-testid={`route-target-service-option-${name}`}
+          >
+            {option(name)}
+          </DropdownItem>
+        ))}
+        {matches.length === 0 && (
+          // Not an empty menu: an operator who mistyped a filter and saw
+          // nothing would reasonably conclude the namespace has no Services.
+          <DropdownItem isDisabled data-testid={`route-target-service-nomatch-${index}`}>
+            No Service matches “{filter.trim()}”
+          </DropdownItem>
+        )}
+      </DropdownList>
+    </Dropdown>
   );
 }
 
@@ -785,39 +921,14 @@ export default function RouteDialog({
                   <Grid hasGutter key={index} style={{ marginBottom: '0.5rem' }}>
                     <GridItem span={5}>
                       {services?.names ? (
-                        <FormSelect
-                          aria-label={`Target ${index + 1} Service`}
+                        <ServiceSelect
+                          index={index}
                           value={target.service}
+                          names={services.names}
+                          ports={services.ports}
                           isDisabled={handEdited}
-                          onChange={(_e, value) => {
-                            // A Service with exactly one port has no ambiguity
-                            // to resolve, so filling it in saves a lookup the
-                            // operator would otherwise do in another tab. More
-                            // than one and we leave it alone rather than
-                            // picking for them.
-                            const ports = services.ports?.[value] ?? [];
-                            setTarget(index, {
-                              service: value,
-                              ...(ports.length === 1 ? { port: ports[0] } : {}),
-                            });
-                          }}
-                          data-testid={`route-target-service-${index}`}
-                        >
-                          <FormSelectOption value="" label="Select a Service" isPlaceholder />
-                          {/* A value that is not in the list still has to be
-                              selectable, or editing an exposure whose Service
-                              was deleted — or one outside a truncated listing —
-                              silently rewrites its target to blank on save. */}
-                          {target.service && !services.names.includes(target.service) && (
-                            <FormSelectOption
-                              value={target.service}
-                              label={`${target.service} — not in this namespace`}
-                            />
-                          )}
-                          {services.names.map((name) => (
-                            <FormSelectOption key={name} value={name} label={name} />
-                          ))}
-                        </FormSelect>
+                          onSelect={(patch) => setTarget(index, patch)}
+                        />
                       ) : (
                         <TextInput
                           aria-label={`Target ${index + 1} Service`}
