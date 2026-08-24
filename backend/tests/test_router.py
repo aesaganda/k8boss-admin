@@ -151,6 +151,19 @@ def test_the_class_controller_string_agrees_with_the_deployments_ingress_class_f
         "the router admits nothing while looking perfectly healthy."
     )
 
+    # The second half of the rule, and the one that is not in upstream's
+    # ingressclass.md: the class's *name* must equal the flag value too.
+    # Verified in isolation — a class named `ic2-class` carrying the correct
+    # `.../ic2` controller string, with `--ingress.class=ic2`, is never matched;
+    # renaming it to `ic2` and changing nothing else is picked up in 15 seconds.
+    # The bundle derives both from one option so they cannot drift today, which
+    # is exactly why it is worth pinning: the coupling is invisible.
+    name = next(o for o in objects if o.kind == "IngressClass").body["metadata"]["name"]
+    assert name == flag, (
+        "The IngressClass name must equal --ingress.class. A class whose "
+        "controller string is right but whose name differs is never matched."
+    )
+
 
 def test_the_controller_publishes_its_service_so_ingress_status_gets_an_address():
     """Without --publish-service, §13's `addresses` is empty for every Ingress, forever."""

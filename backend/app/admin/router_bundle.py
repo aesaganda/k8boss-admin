@@ -125,6 +125,16 @@ def ingress_controller_for(ingress_class_name: str) -> str:
     a live cluster, picked up within twelve seconds of the Ingress appearing.
     What does not work is a *mismatched* pair, which is what this bundle shipped.
 
+    The rule has a second half that upstream's ``ingressclass.md`` does not
+    state: **the IngressClass's name must equal the flag value as well.** A class
+    named ``ic2-class`` carrying a correct ``.../ic2`` controller string, under
+    ``--ingress.class=ic2``, is never matched and never logs a reason; renaming
+    it to ``ic2`` and changing nothing else is picked up in fifteen seconds. Both
+    halves were established one variable at a time against 3.2.13. This bundle
+    derives the name and the flag from the same option so they cannot drift, and
+    a test pins that, because a coupling nothing can violate is also a coupling
+    nobody can see.
+
     We keep the flag and the suffix rather than dropping both, because the suffix
     makes the pairing exclusive: an IngressClass carrying the bare string belongs
     to any HAProxy controller running without the flag, and on a cluster that
