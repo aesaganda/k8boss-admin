@@ -91,6 +91,33 @@ ROUTER_IMAGE = f"docker.io/haproxytech/kubernetes-ingress:{ROUTER_VERSION}"
 INGRESS_CLASS_NAME = "haproxy"
 INGRESS_CONTROLLER = "haproxy.org/ingress-controller"
 
+
+def ingress_controller_for(ingress_class_name: str) -> str:
+    """The ``spec.controller`` string that binds our IngressClass to our router.
+
+    It is **not** a constant, and the reason is the single most expensive defect
+    this bundle has had. The deployment passes ``--ingress.class=<name>``, and
+    when that flag is set the controller only accepts an IngressClass whose
+    ``spec.controller`` is ``haproxy.org/ingress-controller/<name>`` — the bare
+    string is what it matches when the flag is *absent*. Shipping the bare
+    string alongside the flag means every Ingress naming this class is dropped
+    with ``ignored: no matching``, and the router serves nothing at all: not the
+    class it ships, not the annotation forms, not a class-less Ingress.
+
+    Nothing about that is visible from outside. The Deployment is Available, both
+    pods are Ready, ``/api/router`` reports the bundle installed and healthy, and
+    every exposure the console creates is admitted by the API server. The only
+    symptom is a 404 from a hostname that looks correct — §14's "an object that
+    routes nothing while looking created", produced by the very thing installed
+    to prevent it.
+
+    Upstream's own documentation says a single instance can drop the flag and
+    keep the bare string. On the pinned build it cannot: dropping the flag with
+    the bare controller string serves nothing either, verified against 3.2.13 on
+    a live cluster. So the flag stays and the suffix comes with it.
+    """
+    return f"{INGRESS_CONTROLLER}/{ingress_class_name}"
+
 #: Everything this bundle creates carries these, so :func:`app.admin.router`
 #: can find what it installed without keeping a record of it. That is what makes
 #: the console stateless about its own router: "what did I install" is a live
@@ -327,7 +354,7 @@ def _ingress_class(options: RouterOptions) -> dict[str, Any]:
         "apiVersion": "networking.k8s.io/v1",
         "kind": "IngressClass",
         "metadata": metadata,
-        "spec": {"controller": INGRESS_CONTROLLER},
+        "spec": {"controller": ingress_controller_for(options.ingress_class_name)},
     }
 
 
@@ -589,6 +616,7 @@ def validate_options(payload: dict[str, Any]) -> RouterOptions:
 __all__ = [
     "INGRESS_CLASS_NAME",
     "INGRESS_CONTROLLER",
+    "ingress_controller_for",
     "LABELS",
     "MANAGED_BY",
     "NAME",
