@@ -553,6 +553,42 @@ export const nodes = {
     ),
 };
 
+/* ── §15 CLI pods — a pod with kubectl in it ────────────────────────────── */
+
+export const cli = {
+  /**
+   * The CLI pods this console created, plus what a new one would be made of.
+   *
+   * The envelope carries `enabled` — this deployment's two gates answered
+   * together — `enabledDetail`, `namespace`, `image`, `container`, and
+   * `serviceAccount`. That last one is not cosmetic and not a detail of the
+   * others: kubectl inside the pod authenticates as that account, so it is the
+   * whole of what a shell there is able to do to the cluster.
+   */
+  session: () => api.get('/cli'),
+
+  /**
+   * Create one. body: `{ image, dryRun }`.
+   *
+   * There is no ServiceAccount field, deliberately. It comes from the
+   * deployment's configuration, and letting a caller name it would hand the
+   * choice of *what this shell can do* to whoever opens the dialog. The whole
+   * manifest comes back in the diff, which is how the account gets disclosed
+   * before the confirming call.
+   */
+  create: (body) => api.post('/cli', body),
+
+  /**
+   * Remove one. `dryRun` is a query parameter, not a body: DELETE bodies are
+   * handled inconsistently by proxies and HTTP clients, and a `dryRun` that
+   * went missing in transit would turn a projection into a deletion.
+   *
+   * Only removes pods this console created — anything else is `404 not_found`
+   * from this route rather than a delete.
+   */
+  remove: (pod, params) => api.del(`/cli/${encodeURIComponent(pod)}`, params),
+};
+
 export const namespaces = {
   list: () => api.get('/namespaces'),
 };

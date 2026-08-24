@@ -101,6 +101,23 @@ spec:
             - name: ADMIN_ROUTER_MANAGE_ENABLED
               value: "false"
 
+            # §15. OFF, and this gate is about what the feature REMOVES rather
+            # than what it creates. A CLI pod is an ordinary pod; the shell into
+            # it is not an ordinary write. Everything typed there bypasses the
+            # funnel — no preflight naming the permission, no dry run, no diff,
+            # and no audit record of what changed. The trail can say a session
+            # was opened, by whom and for how long; it cannot say what was run.
+            #
+            # Turning this on is therefore also a decision about
+            # ADMIN_CLI_SERVICE_ACCOUNT below, which is the only thing bounding
+            # what those sessions reach. Leaving that at `default` is the safe
+            # pairing: kubectl in the pod is refused everything until somebody
+            # binds a Role to it. See docs/safety-model.md §9.2.
+            - name: ADMIN_CLI_ENABLED
+              value: "false"
+            - name: ADMIN_CLI_SERVICE_ACCOUNT
+              value: "default"
+
             # ── Console identity ──────────────────────────────────────────
             # ENABLED — the k8boss-admin-auth Secret must exist first, or the
             # backend refuses to start: AUTH_ENABLED with no bootstrap user and

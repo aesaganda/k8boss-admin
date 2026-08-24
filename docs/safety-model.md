@@ -565,6 +565,57 @@ differently for that reason.
 
 ---
 
+## 9.2 The CLI pod, and the control this model does not have
+
+§15 creates a pod carrying `kubectl` and opens §7's shell in it. It is in this
+chapter because it looks like the two features above, and it is written out
+separately because the thing that bounds it is not the thing that bounds them.
+
+**Everything typed in that shell is outside the funnel.** No preflight naming
+the permission, no `dryRun=All`, no diff on screen, no `resourceVersion` check,
+and no audit record of what changed. §7 records that a session was opened on the
+pod, by whom, for how long and how many bytes crossed it; it cannot record the
+`kubectl delete` typed into it. Every other control in this document works by
+standing between an intention and a cluster. Here there is nothing to stand
+between: the operator is talking to the API server directly.
+
+That is the same bargain §7 strikes for a shell in any pod, and it is stated
+again because this is the pod whose entire purpose is running cluster commands.
+An operator who has learned that this console shows them a diff first will
+otherwise assume this surface does too.
+
+**The bound is the ServiceAccount, and RBAC cannot enforce which one.** kubectl
+in the pod authenticates as the account the pod binds, so a shell here can do
+exactly what that account can do — not what the console can do, and not what the
+signed-in operator can do. Kubernetes has no verb covering which ServiceAccount
+a pod may bind: `create pods` in a namespace is enough to bind any account in
+it, including one more privileged than the caller, and no ClusterRole narrows it
+afterwards.
+
+So there is exactly one control, and it is a deployment setting:
+`ADMIN_CLI_SERVICE_ACCOUNT`. It defaults to `default`, which holds no
+permissions, so kubectl in the pod is refused everything until a cluster admin
+deliberately binds a Role. The account is named in the diff the operator
+confirms, in the table, and in the audit sentence for the create — because it is
+the only fact that decides what this feature can do, and it is not visible from
+the pod's name or its image.
+
+**Two gates**, as §8 requires: `ADMIN_ALLOW_MUTATIONS` and `ADMIN_CLI_ENABLED`.
+The second exists so a deployment can have every other write in this console
+without being usable as a kubectl terminal. Unlike §9.1 the *projection* is
+permitted on a read-only console — this manifest is a pod running `sleep`, not a
+recipe for a privileged one — while the feature gate refuses the dry run too,
+because previewing the feature is offering it.
+
+**What it leaks when it is left behind is a credential.** §9.1's leaked pod
+holds a node's filesystem; this one holds a live API token for as long as it
+exists. `ADMIN_CLI_MAX_SECONDS` stops the container at a deadline and the pod
+object remains, so the bound is on the unattended-shell window and not on the
+litter. Removal is a button, for the same reason it is one in §9.1: nothing else
+will do it.
+
+---
+
 ## 10. The Secret reveal
 
 A Secret's values are returned by exactly one code path, and only when **all** of

@@ -40,6 +40,21 @@
 # confirm; unbound but with mutations enabled, every confirm returns a 403 that
 # names the exact missing grant. Both are diagnosable. What is NOT diagnosable is
 # a console that writes because a default did it quietly.
+#
+# Three features carry a THIRD gate of their own, off by default, because RBAC
+# cannot express what makes each one different from an ordinary write:
+#
+#   ADMIN_NODE_DEBUG_ENABLED     §5.5 — `create pods` is identical for an nginx
+#                                pod and for one mounting the node's root
+#                                filesystem.
+#   ADMIN_ROUTER_MANAGE_ENABLED  §14 — the console installing a proxy on the
+#                                cluster's ingress path.
+#   ADMIN_CLI_ENABLED            §15 — a shell running kubectl. The grant is
+#                                ordinary; what is not is that everything typed
+#                                there bypasses preflight, dry run, diff and the
+#                                record of what changed. Its reach is set by
+#                                ADMIN_CLI_SERVICE_ACCOUNT, which this file also
+#                                cannot constrain — see the `create pods` rule.
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -349,8 +364,8 @@ rules:
     resources: ["pods"]
     verbs: ["delete"]
 
-  # §5.5 node debug pods, and §4's "create anything" from the YAML editor. One
-  # rule, because RBAC cannot tell them apart.
+  # §5.5 node debug pods, §15 CLI pods, and §4's "create anything" from the YAML
+  # editor. One rule, because RBAC cannot tell them apart.
   #
   # Read that again before granting it. A SelfSubjectAccessReview answers on
   # verb/group/resource/namespace/name/subresource and has no field-level
@@ -366,6 +381,14 @@ rules:
   # switch this console owns) and the `pod-security.kubernetes.io/enforce` label
   # on the namespace it creates into. Removing this rule withholds node debug
   # pods, and withholds the YAML editor's ability to create anything, together.
+  #
+  # §15's CLI pod is the same rule and adds a second thing RBAC cannot express:
+  # there is no verb covering which ServiceAccount a pod may BIND. Whoever holds
+  # this rule can create a pod bound to any account in the namespace, including
+  # one more privileged than this ClusterRole — and a shell in that pod then has
+  # that account's permissions. The controls that actually apply are
+  # ADMIN_CLI_ENABLED and ADMIN_CLI_SERVICE_ACCOUNT in the deployment, both of
+  # which this file cannot enforce.
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["create"]
@@ -377,6 +400,11 @@ rules:
   # write in every sense that matters) and audits the session on open and close.
   # Remove this rule for a console that can read logs but not type into a
   # container; the terminal button then disables itself with the reason.
+  #
+  # It is also what §15's CLI session runs on — that feature adds no exec route
+  # of its own — so removing this withholds the masthead terminal too, while
+  # leaving the CLI pod creatable. The pair to remove for "no CLI at all" is
+  # ADMIN_CLI_ENABLED in the deployment.
   - apiGroups: [""]
     resources: ["pods/exec"]
     verbs: ["create"]

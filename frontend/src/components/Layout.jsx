@@ -11,7 +11,7 @@
  * navigate away with. The same reasoning puts an ErrorBoundary immediately
  * around the outlet: a page that throws must not take the navigation with it.
  */
-import { Suspense, useMemo, useState } from 'react';
+import { Suspense, lazy, useMemo, useState } from 'react';
 import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import {
   Alert,
@@ -29,6 +29,9 @@ import {
   MenuSearch,
   MenuSearchInput,
   MenuToggle,
+  Modal,
+  ModalBody,
+  ModalHeader,
   Page,
   PageSection,
   PageSidebar,
@@ -47,6 +50,7 @@ import CubeIcon from '@patternfly/react-icons/dist/esm/icons/cube-icon';
 import MoonIcon from '@patternfly/react-icons/dist/esm/icons/moon-icon';
 import PlusIcon from '@patternfly/react-icons/dist/esm/icons/plus-icon';
 import SunIcon from '@patternfly/react-icons/dist/esm/icons/sun-icon';
+import TerminalIcon from '@patternfly/react-icons/dist/esm/icons/terminal-icon';
 import LockIcon from '@patternfly/react-icons/dist/esm/icons/lock-icon';
 import SignOutAltIcon from '@patternfly/react-icons/dist/esm/icons/sign-out-alt-icon';
 import UserIcon from '@patternfly/react-icons/dist/esm/icons/user-icon';
@@ -61,6 +65,19 @@ import { useHealth } from '../contexts/HealthContext';
 import { useNamespace } from '../contexts/NamespaceContext';
 import { useTheme } from '../contexts/ThemeContext';
 import { useAuth } from '../contexts/AuthContext';
+
+/**
+ * §15's panel, and the reason it is `lazy` rather than a plain import.
+ *
+ * It pulls in `PodTerminal`, which pulls in xterm.js and its stylesheet. Every
+ * other user of that component sits behind a route-level lazy boundary, so xterm
+ * has never been in the initial bundle; importing it here — in the shell that
+ * renders on every page — would put it there for every operator who never opens
+ * a terminal. The chunk only exists as a separate file in a production build,
+ * which is exactly why the Playwright suite runs against `vite preview` rather
+ * than the dev server.
+ */
+const CliPanel = lazy(() => import('./CliPanel'));
 
 const STATUS_COLOR = {
   connected: 'var(--pf-t--global--icon--color--status--success--default, #3e8635)',
@@ -292,6 +309,56 @@ function ImportYamlButton() {
   );
 }
 
+/**
+ * The masthead's terminal — the entry point into §15's `CliPanel`.
+ *
+ * Gated on a selected cluster, like the "+" beside it: every CLI pod is created
+ * in one cluster (§1.1), and a click with none active would only produce a
+ * `409 no_cluster_selected`. Disabled with the reason rather than hidden (rule
+ * 11.4).
+ *
+ * The panel is mounted only while the modal is open, so no `/api/cli` read
+ * happens for operators who never press this, and the xterm chunk is not
+ * fetched until then either.
+ */
+function CliButton() {
+  const { activeClusterId } = useCluster();
+  const [open, setOpen] = useState(false);
+  const disabledReason = activeClusterId == null ? 'Select a cluster before opening a terminal' : null;
+
+  return (
+    <>
+      <Tooltip content={disabledReason || 'Open a CLI session (kubectl)'}>
+        <MenuToggle
+          variant="plain"
+          aria-label="Open a CLI session"
+          isAriaDisabled={Boolean(disabledReason)}
+          onClick={disabledReason ? undefined : () => setOpen(true)}
+          data-testid="cli-button"
+        >
+          <TerminalIcon />
+        </MenuToggle>
+      </Tooltip>
+      {open && (
+        <Modal
+          isOpen
+          variant="large"
+          onClose={() => setOpen(false)}
+          aria-label="CLI session"
+          data-testid="cli-modal"
+        >
+          <ModalHeader title="CLI session" />
+          <ModalBody>
+            <Suspense fallback={<LoadingState label="Loading the terminal…" minHeight={280} />}>
+              <CliPanel />
+            </Suspense>
+          </ModalBody>
+        </Modal>
+      )}
+    </>
+  );
+}
+
 function ReadOnlyBadge() {
   const { readOnly, reason } = useHealth();
   if (!readOnly) return null;
@@ -383,6 +450,9 @@ function AppMasthead() {
             <ToolbarGroup align={{ default: 'alignEnd' }}>
               <ToolbarItem>
                 <ReadOnlyBadge />
+              </ToolbarItem>
+              <ToolbarItem>
+                <CliButton />
               </ToolbarItem>
               <ToolbarItem>
                 <ImportYamlButton />
