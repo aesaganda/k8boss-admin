@@ -129,19 +129,55 @@ export function Muted({ children, title }) {
   );
 }
 
-/** Up to `max` chips, then "+n more" with the rest in a tooltip. */
-export function ChipList({ values, max = 3, color = 'grey', emptyText = 'None' }) {
+/**
+ * Up to `max` chips, then "+n more" with the rest in a tooltip.
+ *
+ * `hrefFor` turns a chip into a link. It goes through PatternFly's `render`
+ * prop rather than `Label href`, because `href` builds the anchor itself and
+ * spreads extra props onto the *outer* span — so `target` and `rel` never reach
+ * the `<a>`. Both are load-bearing here: an exposure opens somewhere that is not
+ * this console, so it belongs in its own tab, and `rel="noopener noreferrer"`
+ * is not optional on a link whose target is a cluster workload nobody has
+ * vetted.
+ *
+ * The overflow chip stays plain text on purpose — it is a tooltip trigger, and
+ * a link that swallows its own click is worse than one that is not offered.
+ */
+export function ChipList({ values, max = 3, color = 'grey', emptyText = 'None', hrefFor }) {
   const list = (values ?? []).filter((v) => v != null && v !== '');
   if (!list.length) return <Muted>{emptyText}</Muted>;
   const shown = list.slice(0, max);
   const hidden = list.slice(max);
   return (
     <LabelGroup numLabels={max + 1}>
-      {shown.map((value, i) => (
-        <Label key={`${value}-${i}`} isCompact color={color}>
-          {String(value)}
-        </Label>
-      ))}
+      {shown.map((value, i) => {
+        const href = hrefFor ? hrefFor(value) : null;
+        return href ? (
+          <Label
+            key={`${value}-${i}`}
+            isCompact
+            color={color}
+            isClickable
+            render={({ className, content, componentRef }) => (
+              <a
+                className={className}
+                ref={componentRef}
+                href={href}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                {content}
+              </a>
+            )}
+          >
+            {String(value)}
+          </Label>
+        ) : (
+          <Label key={`${value}-${i}`} isCompact color={color}>
+            {String(value)}
+          </Label>
+        );
+      })}
       {hidden.length > 0 && (
         <Tooltip content={hidden.join(', ')}>
           <Label isCompact color={color} tabIndex={0}>

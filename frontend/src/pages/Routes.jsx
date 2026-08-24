@@ -158,8 +158,15 @@ export default function Routes() {
         value: (row) => (row.hosts ?? []).join(' '),
         cell: (row) =>
           (row.hosts ?? []).length ? (
+            // Linked, because this column is the one thing on the page an
+            // operator wants to *try*. The link is an offer to open it, not a
+            // claim that it answers: whether a controller has admitted the
+            // exposure is the Admitted column's job, and on a cluster with no
+            // wildcard DNS this will not resolve at all. Saying so in the link
+            // would be inventing a verdict the console has not read.
             <ChipList
               values={(row.hosts ?? []).map((h) => `${scheme(row)}://${h}${row.path ?? ''}`)}
+              hrefFor={(url) => url}
               max={2}
             />
           ) : (
