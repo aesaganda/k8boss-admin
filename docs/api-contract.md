@@ -198,6 +198,7 @@ encrypted, never returned.
   "authentication_type": "service_account_token",
   "has_ca_certificate": true,
   "skip_tls_verify": false,
+  "app_domain": "apps.prod-eu.example.com",
   "status": "connected",
   "server_version": "v1.31.4",
   "last_connected": "2026-08-18T09:03:11Z",
@@ -208,12 +209,25 @@ encrypted, never returned.
 
 No field of this object ever contains credential material. Enforced by a test.
 
+`app_domain` is the cluster's wildcard DNS domain, and §13.3.1 builds generated
+exposure hostnames under it. **`null` is a real value and means the console does
+not know of one**, which is not the same as the cluster having none — both
+render as "no hostname is generated", because a hostname under a wildcard that
+does not exist is an exposure that is created, reports Admitted, and routes
+nothing.
+
+Unlike `token` and `ca_certificate` it is not credential material, so it *is*
+returned here and a UI can prefill it. Sending `""` on `PUT` clears it; omitting
+it keeps the stored value. That asymmetry is deliberate — a domain typed wrongly
+has to be removable, not only overwritable.
+
 ### `POST /api/clusters`
 
 ```json
 { "name": "prod-eu", "platform": "kubernetes", "api_server": "https://...",
   "authentication_type": "service_account_token", "token": "eyJ...",
-  "ca_certificate": "-----BEGIN CERTIFICATE-----\n...", "skip_tls_verify": false }
+  "ca_certificate": "-----BEGIN CERTIFICATE-----\n...", "skip_tls_verify": false,
+  "app_domain": "apps.prod-eu.example.com" }
 ```
 → `201` `ClusterPublic`.
 
@@ -222,10 +236,17 @@ No field of this object ever contains credential material. Enforced by a test.
 ### `POST /api/clusters/{id}/test`
 
 Performs a live connection check. Returns
-`{"reachable": true, "server_version": "v1.31.4", "latency_ms": 42, "permissions": [PreflightResult]}`
+`{"reachable": true, "server_version": "v1.31.4", "latency_ms": 42, "permissions": [PreflightResult], "discovered_app_domain": "apps.ocp.example.com"}`
 where `permissions` preflights the console's baseline verb set (see §9) so
 registration surfaces a half-permissioned ServiceAccount immediately rather than
 at first use.
+
+`discovered_app_domain` is what the cluster publishes about *itself* — OpenShift
+at `ingresses.config.openshift.io/cluster`, `null` everywhere else. **Offered,
+never applied**: it is a suggestion beside the field, and the stored
+`app_domain` always wins. Exposing under a CNAME of the cluster wildcard is
+ordinary, and a console that re-corrected it on every connection test would
+overwrite a deliberate choice with a discovered default.
 
 ### `GET /api/clusters/{id}/overview`
 
@@ -1243,6 +1264,50 @@ the reason** (§11.4), so they are contract, not an internal enum.
 
 `GET /api/routes/capabilities` reports **all nine for every backend**, including
 the unsupported ones — an absent key carries no reason, and §11.4 needs one.
+
+### 13.3.1 `appDomain` — the cluster wildcard, and generated hostnames
+
+`GET /api/routes/capabilities` carries one extra top-level key beside the §1.2
+envelope:
+
+```json
+"appDomain": {
+  "value": "apps.prod-eu.example.com",
+  "source": "configured",
+  "stored": "apps.prod-eu.example.com",
+  "discovered": null,
+  "pattern": "<name>-<namespace>.<domain>"
+}
+```
+
+`value` is what a generated hostname is built under and is `stored || discovered`;
+`source` is `configured`, `discovered`, or `null`. Both inputs are reported even
+when they agree — "what you typed differs from what the cluster says" is the only
+place a mistyped domain becomes visible.
+
+**`value: null` means no hostname is generated at all,** and the form asks the
+operator to type one. This is §0.1 applied to a hostname: a suffix under a
+wildcard that does not resolve produces an exposure that is created, reports
+Admitted, and routes nothing — §14's failure with a hostname in place of a
+controller. A field left blank asks a question; a generated hostname answers it,
+and answering it wrongly is worse than not answering.
+
+**The pattern includes the namespace, and that is load-bearing.** Without it a
+Service called `web` in two namespaces generates one hostname twice; most
+controllers admit both and route to whichever won, which is an outage invisible
+in either object.
+
+**Discovery must not make the envelope partial.** `config.openshift.io` is absent
+on every non-OpenShift cluster, so the read raises `unsupported` — which §13.2
+already says does not belong in `unavailable[]`. The same sentence applies here
+for the same reason: a §1.2 banner lit on every plain cluster is a banner nobody
+reads. A discovery read that genuinely *failed* is still recorded, because "not
+OpenShift" and "we could not ask" are different answers.
+
+The client may build the hostname itself to fill the field as the operator
+types. It is a suggestion only: the value travels as an ordinary `host` and is
+compiled and validated server-side like any hostname that was typed, so the
+backend remains the authority on what is accepted.
 
 ### 13.4 `GET /api/routes?namespace=&backend=&limit=`
 

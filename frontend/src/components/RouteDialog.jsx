@@ -63,6 +63,32 @@ import MutationDialog from './MutationDialog';
 import YamlEditor from './YamlEditor';
 import { resources as resourcesApi, routes as routesApi } from '../api/client';
 
+/** One DNS label. Mirrors `_LABEL` in app/services/route_domain.py. */
+const DNS_LABEL = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/;
+
+/**
+ * `<name>-<namespace>.<domain>` — the same rule as `route_domain.generated_host`.
+ *
+ * Deliberately a *suggestion* and nothing more. The value it produces goes into
+ * `spec.host` and is then compiled and validated server-side like any hostname
+ * the operator typed, so this is not a second implementation of a rule the
+ * backend enforces — it is the thing that saves them the typing. The label
+ * check is here only so the form never offers a hostname that is obviously
+ * illegal; the backend remains the authority on whether it is accepted.
+ *
+ * Returns null rather than a partial string, for the same reason the backend
+ * does: a truncated hostname is a different hostname, and one that silently
+ * points somewhere else is worse than the empty box the operator would have
+ * filled in themselves.
+ */
+function generatedHostFor(name, namespace, domain) {
+  if (!domain || !name || !namespace) return null;
+  const left = `${name.trim().toLowerCase()}-${namespace.trim().toLowerCase()}`;
+  if (!DNS_LABEL.test(left)) return null;
+  const host = `${left}.${domain}`;
+  return host.length > 253 ? null : host;
+}
+
 /** Termination modes, in the order the OpenShift console offers them. */
 const TERMINATIONS = [
   { value: '', label: 'None — plain HTTP' },
@@ -195,10 +221,24 @@ export default function RouteDialog({
   const [rendered, setRendered] = useState(null);
   const [renderError, setRenderError] = useState(null);
   const [acknowledged, setAcknowledged] = useState([]);
+  // Whether the operator has taken the hostname over. Once true, nothing
+  // regenerates it under them — a field that rewrites itself while somebody is
+  // typing in it is the worst version of this feature.
+  const [hostTouched, setHostTouched] = useState(false);
 
   const backends = capabilities?.items ?? [];
   const entry = backends.find((b) => b.backend === backend);
   const features = useMemo(() => featureMap(entry), [entry]);
+
+  // The cluster's wildcard domain, or null when the console does not know of
+  // one. Null is a real answer and is rendered as "type a hostname": offering a
+  // suffix under a wildcard that does not exist would produce an exposure that
+  // is created, admitted and resolvable by nobody.
+  const appDomain = capabilities?.appDomain?.value ?? null;
+  const generatedHost = useMemo(
+    () => generatedHostFor(spec.name, spec.namespace, appDomain),
+    [spec.name, spec.namespace, appDomain],
+  );
 
   /* ── Seeding ─────────────────────────────────────────────────────────── */
 
@@ -212,6 +252,11 @@ export default function RouteDialog({
     setRendered(null);
     setRenderError(null);
     setAcknowledged([]);
+    // Editing starts "taken over" so a live exposure's hostname is never
+    // rewritten by this feature. Changing an admitted route's host silently is
+    // a routing outage delivered by a form the operator opened to change
+    // something else.
+    setHostTouched(editing);
     if (editing) {
       const row = existing.route;
       setBackend(row.backend);
@@ -250,11 +295,11 @@ export default function RouteDialog({
 
   /* ── The namespace's Services, for the target picker ─────────────────── */
 
-  // `undefined` while we have not asked, an object once we have, and `null`
-  // when the read failed. Three states, not two, and the third is the reason:
-  // an empty dropdown after a failed list would say "this namespace has no
-  // Services", which sends the operator to go and create one they already
-  // have. On null the control falls back to a free-text box and says why.
+  // `undefined` while we have not asked, an array once we have, and `null` when
+  // the read failed. Three states, not two, and the third is the reason: an
+  // empty dropdown after a failed list would say "this namespace has no
+  // Services", which sends the operator to go and create one they already have.
+  // On null the control falls back to a free-text box and says why.
   const [services, setServices] = useState(undefined);
   const namespaceForServices = spec.namespace?.trim() ?? '';
 
@@ -270,8 +315,8 @@ export default function RouteDialog({
       .then((body) => {
         if (cancelled) return;
         // A partial listing is still a listing, but it is not a complete answer
-        // about what exists — so the shortfall is recorded and shown rather
-        // than letting a short list read as the whole namespace.
+        // about what exists — so the picker keeps its free-text escape hatch
+        // open by recording the shortfall rather than hiding it.
         setServices({
           names: (body?.items ?? [])
             .map((item) => item?.metadata?.name)
@@ -282,7 +327,7 @@ export default function RouteDialog({
               .filter((item) => item?.metadata?.name)
               .map((item) => [
                 item.metadata.name,
-                (item?.spec?.ports ?? []).map((port) => port?.name || String(port?.port)).filter(Boolean),
+                (item?.spec?.ports ?? []).map((p) => p?.name || String(p?.port)).filter(Boolean),
               ]),
           ),
           partial: Boolean(body?.partial),
@@ -295,6 +340,15 @@ export default function RouteDialog({
       cancelled = true;
     };
   }, [isOpen, namespaceForServices]);
+
+  // Fill the hostname in as the operator types the name, and stop the moment
+  // they touch it. Only ever writes the *generated* value: it cannot clobber
+  // anything typed, because hostTouched is set by the field's own onChange.
+  useEffect(() => {
+    if (!isOpen || editing || handEdited || hostTouched) return;
+    const next = generatedHost ?? '';
+    setSpec((s) => (s.host === next ? s : { ...s, host: next }));
+  }, [isOpen, editing, handEdited, hostTouched, generatedHost]);
 
   /* ── Rendering ───────────────────────────────────────────────────────── */
 
@@ -573,14 +627,52 @@ export default function RouteDialog({
                         value={spec.host}
                         isDisabled={handEdited}
                         placeholder={
-                          features['generated-host']
-                            ? 'Leave blank to let the router pick one'
-                            : 'shop.example.com'
+                          appDomain
+                            ? `<name>-<namespace>.${appDomain}`
+                            : features['generated-host']
+                              ? 'Leave blank to let the router pick one'
+                              : 'shop.example.com'
                         }
-                        onChange={(_e, value) => setSpec((s) => ({ ...s, host: value }))}
+                        onChange={(_e, value) => {
+                          // Any keystroke here hands the field to the operator
+                          // for the rest of this dialog. Set before the state
+                          // update so the generating effect cannot race a
+                          // character back out from under them.
+                          setHostTouched(true);
+                          setSpec((s) => ({ ...s, host: value }));
+                        }}
                         data-testid="route-host"
                       />
-                      {!features['generated-host'] && !spec.host && (
+                      {appDomain && !hostTouched && spec.host && (
+                        <FormHelperText>
+                          <HelperText>
+                            <HelperTextItem data-testid="route-host-generated">
+                              Built from the name and namespace under this cluster&apos;s{' '}
+                              <code>{appDomain}</code>. Type over it to use your own.
+                            </HelperTextItem>
+                          </HelperText>
+                        </FormHelperText>
+                      )}
+                      {appDomain && hostTouched && generatedHost && generatedHost !== spec.host && (
+                        <FormHelperText>
+                          <HelperText>
+                            <HelperTextItem>
+                              <Button
+                                variant="link"
+                                isInline
+                                onClick={() => {
+                                  setHostTouched(false);
+                                  setSpec((s) => ({ ...s, host: generatedHost }));
+                                }}
+                                data-testid="route-host-reset"
+                              >
+                                Use {generatedHost}
+                              </Button>
+                            </HelperTextItem>
+                          </HelperText>
+                        </FormHelperText>
+                      )}
+                      {!appDomain && !features['generated-host'] && !spec.host && (
                         <FormHelperText>
                           <HelperText>
                             <HelperTextItem variant="warning" data-testid="route-host-warning">
