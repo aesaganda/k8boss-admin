@@ -54,13 +54,14 @@ from __future__ import annotations
 
 import logging
 import re
-import secrets
 from typing import Any
 
 from kubernetes.client.rest import ApiException
 
 from app.admin.apply import STRATEGIC_MERGE_PATCH, patch_fn, read_object
+from app.admin.images import validate_image_reference
 from app.admin.mutate import mutate
+from app.admin.names import random_suffix
 from app.config import settings
 from app.errors import AdminError, Invalid, Unsupported, from_api_exception
 from app.resources import catalog
@@ -82,12 +83,6 @@ _DISCOVERY_NAME = f"pods/{SUBRESOURCE}"
 #: container was somebody debugging and not part of the workload.
 NAME_PREFIX = "debugger-"
 
-#: Vowel-free and digit-restricted, so a generated name cannot spell a word and
-#: cannot contain the characters most often confused when read aloud during an
-#: incident (``1``/``l``, ``0``/``o``).
-_SUFFIX_ALPHABET = "bcdfghjkmnpqrstvwxz23456789"
-_SUFFIX_LENGTH = 5
-
 #: How many times to re-roll a generated name that collides with a container the
 #: pod already has. With 27^5 suffixes a collision is a fluke; a bounded loop
 #: means a pod that somehow holds them all fails loudly instead of spinning.
@@ -104,12 +99,6 @@ MAX_COMMAND_ARGS = 32
 #: admission error quoting a regex.
 _DNS_LABEL = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
 _MAX_NAME_LENGTH = 63
-
-#: An image reference with whitespace in it is a copy-paste accident, and the
-#: API server's rejection of one names the field rather than the cause.
-_IMAGE_FORBIDDEN = re.compile(r"[\s\x00-\x1f]")
-_MAX_IMAGE_LENGTH = 512
-
 
 # --------------------------------------------------------------------------- #
 # Does this cluster serve ephemeral containers?
@@ -377,30 +366,14 @@ def list_debug_containers(namespace: str, name: str) -> dict[str, Any]:
 
 def _check_image(image: str) -> str:
     """The debug image, or 422 naming what is wrong with it."""
-    value = (image or "").strip()
-    if not value:
-        raise Invalid(
-            "A debug container needs an image.",
-            hint=(
-                "Name an image that has the tools you need — a shell, `ps`, `curl`. "
-                f"This console's configured default is {settings.debug_image!r}."
-            ),
-            context={"parameter": "image"},
-        )
-    if len(value) > _MAX_IMAGE_LENGTH:
-        raise Invalid(
-            f"That image reference is {len(value)} characters long (limit {_MAX_IMAGE_LENGTH}).",
-            context={"parameter": "image", "length": len(value),
-                     "limit": _MAX_IMAGE_LENGTH},
-        )
-    if _IMAGE_FORBIDDEN.search(value):
-        raise Invalid(
-            "An image reference cannot contain whitespace or control characters.",
-            detail=f"received {value!r}",
-            hint="This is usually a line break picked up by a copy and paste.",
-            context={"parameter": "image", "value": value},
-        )
-    return value
+    return validate_image_reference(
+        image,
+        missing_message="A debug container needs an image.",
+        missing_hint=(
+            "Name an image that has the tools you need — a shell, `ps`, `curl`. "
+            f"This console's configured default is {settings.debug_image!r}."
+        ),
+    )
 
 
 def _check_command(command: list[str] | None) -> list[str] | None:
@@ -473,7 +446,7 @@ def _check_name(
         return candidate
 
     for _ in range(_NAME_ATTEMPTS):
-        suffix = "".join(secrets.choice(_SUFFIX_ALPHABET) for _ in range(_SUFFIX_LENGTH))
+        suffix = random_suffix()
         candidate = f"{NAME_PREFIX}{suffix}"
         if candidate not in taken:
             return candidate

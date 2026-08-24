@@ -27,21 +27,17 @@ Job pods has not used ten thousand pod slots; the scheduler counts pods that are
 not ``Succeeded`` or ``Failed`` against ``capacity.pods``, and so does this. The
 requested totals follow the same rule, because a finished pod holds no CPU.
 
-A second quantity parser lives in :mod:`app.resources.shaping` and this is not an
-accidental duplicate. That one answers "how big is this PVC" and returns a float,
-which is right for a single value that gets rendered once. This one accumulates:
-it is summed across every container of every pod on a node, and float error
-accumulates with it, so it carries exact decimals and reports the byte counts the
-way apimachinery's own ``Quantity.Value()`` does — rounded up — so the number
-here equals the number the scheduler used.
+The exact parser lives in :mod:`app.k8s.quantities`, shared with cluster overview
+totals so accumulating code cannot drift into different interpretations of the
+same API value. A separate parser remains in :mod:`app.resources.shaping`: that
+one handles a single rendered value and returns a float, while accumulation uses
+exact decimals and rounds byte counts the way apimachinery does.
 """
 
 from __future__ import annotations
 
 import contextlib
 import decimal
-import logging
-import re
 from decimal import Decimal
 from typing import Any, Iterable, Iterator
 
@@ -49,123 +45,9 @@ from kubernetes.client.rest import ApiException
 
 from app.errors import from_api_exception
 from app.k8s.client import get_core_v1
+from app.k8s.quantities import add_quantities, parse_quantity
 from app.resources import shaping
 from app.resources.envelope import collect, envelope
-
-logger = logging.getLogger(__name__)
-
-
-# --------------------------------------------------------------------------- #
-# Kubernetes quantities
-# --------------------------------------------------------------------------- #
-
-# The grammar from k8s.io/apimachinery/pkg/api/resource:
-#
-#   <quantity>        ::= <signedNumber><suffix>
-#   <suffix>          ::= <binarySI> | <decimalExponent> | <decimalSI>
-#   <binarySI>        ::= Ki | Mi | Gi | Ti | Pi | Ei
-#   <decimalSI>       ::= n | u | m | "" | k | M | G | T | P | E
-#   <decimalExponent> ::= ("e" | "E") <signedNumber>
-#
-# The alternation order matters. ``Ei`` has to be tried before the bare ``E``
-# decimal suffix, and ``e3`` before it too — otherwise ``1e3`` parses as the
-# number 1 with a leftover ``e3`` and is rejected, turning a legal capacity into
-# an em dash.
-_QUANTITY_RE = re.compile(
-    r"""
-    ^
-    (?P<number>[+-]?(?:\d+(?:\.\d*)?|\.\d+))
-    (?:
-        (?P<binary>Ki|Mi|Gi|Ti|Pi|Ei)
-      | (?P<exponent>[eE][+-]?\d+)
-      | (?P<decimal>[numkKMGTPE])
-    )?
-    $
-    """,
-    re.VERBOSE,
-)
-
-# Exact integers, not powers computed at parse time: 1024**6 is 1.15e18 and a
-# Decimal power under the default 28-digit context is *not* guaranteed exact.
-_BINARY_FACTOR: dict[str, Decimal] = {
-    "Ki": Decimal(1024),
-    "Mi": Decimal(1024**2),
-    "Gi": Decimal(1024**3),
-    "Ti": Decimal(1024**4),
-    "Pi": Decimal(1024**5),
-    "Ei": Decimal(1024**6),
-}
-
-# ``K`` is not canonical — SI reserves it for kelvin, apimachinery accepts only
-# lowercase ``k``, and the API server rejects ``500K`` on write, so it cannot
-# reach us from a cluster. It is accepted here because the one place it *can*
-# arrive from is a hand-authored file an operator pasted in, where ``500K`` has
-# exactly one possible reading. ``Ki`` stays strictly binary: the tolerance is
-# for the case with no ambiguity, not for the case where guessing costs 2.4%.
-_DECIMAL_FACTOR: dict[str, Decimal] = {
-    "n": Decimal("1e-9"),
-    "u": Decimal("1e-6"),
-    "m": Decimal("1e-3"),
-    "k": Decimal("1e3"),
-    "K": Decimal("1e3"),
-    "M": Decimal("1e6"),
-    "G": Decimal("1e9"),
-    "T": Decimal("1e12"),
-    "P": Decimal("1e15"),
-    "E": Decimal("1e18"),
-}
-
-# Wide enough that no realistic quantity is rounded. 8Ei is 19 digits, a cluster
-# total of them is 22, and nanocores add nine more; 60 leaves headroom without
-# being so large that a pathological input is expensive to multiply.
-_CONTEXT = decimal.Context(prec=60)
-
-
-def parse_quantity(value: Any) -> Decimal | None:
-    """Parse a Kubernetes resource quantity exactly, or return ``None``.
-
-    ``None`` — never a fallback magnitude — for anything outside the grammar. A
-    capacity the console cannot parse is a capacity it does not know, and the row
-    renders an em dash, which is honest. A zero would describe a 2 TiB node as
-    empty and a ``500m`` request as free.
-
-    Numbers arrive already parsed sometimes (the dynamic client turns a bare
-    ``110`` into an ``int``), so ints and floats pass through. ``bool`` is
-    rejected deliberately: it is an ``int`` subclass in Python, and a ``True``
-    that silently became one core is a bug that would survive review.
-    """
-    if value is None or isinstance(value, bool):
-        return None
-    if isinstance(value, Decimal):
-        return value
-    if isinstance(value, int):
-        return Decimal(value)
-    if isinstance(value, float):
-        # str() first: Decimal(0.1) is 0.1000000000000000055511151231257827,
-        # which then prints back as that in any diff or log line.
-        return Decimal(str(value))
-
-    text = str(value).strip()
-    if not text:
-        return None
-    match = _QUANTITY_RE.match(text)
-    if match is None:
-        logger.debug("Unparseable Kubernetes quantity %r", value)
-        return None
-
-    number = Decimal(match.group("number"))
-    binary = match.group("binary")
-    exponent = match.group("exponent")
-    decimal_suffix = match.group("decimal")
-
-    if binary:
-        return _CONTEXT.multiply(number, _BINARY_FACTOR[binary])
-    if exponent:
-        return _CONTEXT.multiply(number, Decimal(10) ** int(exponent[1:]))
-    if decimal_suffix:
-        return _CONTEXT.multiply(number, _DECIMAL_FACTOR[decimal_suffix])
-    return number
-
 
 def cpu_cores(value: Any) -> float | None:
     """A quantity read as CPU cores. ``15800m`` is 15.8, not 15800."""
@@ -225,8 +107,8 @@ class _Totals:
         self.memory_unknown = False
 
     def add(self, other: "_Totals") -> None:
-        self.cpu = _CONTEXT.add(self.cpu, other.cpu)
-        self.memory = _CONTEXT.add(self.memory, other.memory)
+        self.cpu = add_quantities(self.cpu, other.cpu)
+        self.memory = add_quantities(self.memory, other.memory)
         self.cpu_unknown = self.cpu_unknown or other.cpu_unknown
         self.memory_unknown = self.memory_unknown or other.memory_unknown
 

@@ -66,11 +66,12 @@ from __future__ import annotations
 
 import logging
 import re
-import secrets
 from typing import Any
 
 from app.admin.apply import create_fn, delete_resource
+from app.admin.images import validate_image_reference
 from app.admin.mutate import mutate
+from app.admin.names import random_suffix
 from app.audit import recorder
 from app.config import settings
 from app.errors import (
@@ -107,12 +108,6 @@ NODE_ANNOTATION = "k8boss-admin/debugNode"
 #: to tell at a glance that this is somebody debugging and not a workload.
 NAME_PREFIX = "node-debugger-"
 
-#: Same alphabet as §7.4's: no vowels, so a generated name cannot spell a word,
-#: and none of the characters most often misheard when a name is read aloud
-#: during an incident.
-_SUFFIX_ALPHABET = "bcdfghjkmnpqrstvwxz23456789"
-_SUFFIX_LENGTH = 5
-
 #: How much of the node name to keep in the pod name. A pod name is a DNS-1123
 #: *subdomain* capped at 253 characters and a node name can approach that on its
 #: own, so it cannot simply be concatenated. Forty characters is long enough to
@@ -127,8 +122,6 @@ HOST_VOLUME_NAME = "host-root"
 
 _DNS_SUBDOMAIN = re.compile(r"^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$")
 _UNSAFE_IN_NAME = re.compile(r"[^a-z0-9-]+")
-_MAX_IMAGE_LENGTH = 512
-_IMAGE_FORBIDDEN = re.compile(r"[\s\x00-\x1f]")
 
 
 # --------------------------------------------------------------------------- #
@@ -263,31 +256,14 @@ def _check_node(node: str) -> str:
 
 def _check_image(image: str | None) -> str:
     """The debug image, or 422. Same rules as §7.4's, and the same reasons."""
-    value = (image if image is not None else settings.debug_image or "").strip()
-    if not value:
-        raise Invalid(
-            "A node debug pod needs an image.",
-            hint=(
-                "Name an image with the tools you need. This console's configured "
-                f"default is {settings.debug_image!r}."
-            ),
-            context={"parameter": "image"},
-        )
-    if len(value) > _MAX_IMAGE_LENGTH:
-        raise Invalid(
-            f"That image reference is {len(value)} characters long "
-            f"(limit {_MAX_IMAGE_LENGTH}).",
-            context={"parameter": "image", "length": len(value),
-                     "limit": _MAX_IMAGE_LENGTH},
-        )
-    if _IMAGE_FORBIDDEN.search(value):
-        raise Invalid(
-            "An image reference cannot contain whitespace or control characters.",
-            detail=f"received {value!r}",
-            hint="This is usually a line break picked up by a copy and paste.",
-            context={"parameter": "image", "value": value},
-        )
-    return value
+    return validate_image_reference(
+        image if image is not None else settings.debug_image,
+        missing_message="A node debug pod needs an image.",
+        missing_hint=(
+            "Name an image with the tools you need. This console's configured "
+            f"default is {settings.debug_image!r}."
+        ),
+    )
 
 
 def _pod_name(node: str) -> str:
@@ -302,7 +278,7 @@ def _pod_name(node: str) -> str:
     anyway.
     """
     stem = _UNSAFE_IN_NAME.sub("-", node)[:_NODE_IN_NAME].strip("-")
-    suffix = "".join(secrets.choice(_SUFFIX_ALPHABET) for _ in range(_SUFFIX_LENGTH))
+    suffix = random_suffix()
     # A node name of nothing but dots would sanitise away entirely. The pod still
     # needs a legal name, and `spec.nodeName` is what actually pins it.
     return f"{NAME_PREFIX}{stem}-{suffix}" if stem else f"{NAME_PREFIX}{suffix}"
