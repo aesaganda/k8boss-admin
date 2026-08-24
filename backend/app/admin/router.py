@@ -325,6 +325,40 @@ def _escalation_hint(item: BundleObject, error: AdminError) -> AdminError:
     return error
 
 
+def _immutable_class_hint(item: BundleObject, error: AdminError) -> AdminError:
+    """Say how to get past an IngressClass whose ``spec.controller`` cannot change.
+
+    ``spec.controller`` is immutable, so a cluster carrying a router installed
+    before the controller string was corrected cannot be upgraded in place: the
+    API server refuses the update and the install stops at seven of eight. The
+    verbatim detail names the field, which is accurate and not actionable —
+    "field is immutable" does not tell an operator that the fix is to delete one
+    object and install again, nor what deleting it costs.
+
+    It costs something real, so it is stated rather than glossed: while the class
+    is absent, Ingresses naming it are unclaimed. On a cluster whose router was
+    never admitting them that changes nothing, which is the situation any cluster
+    hitting this message is in — but an operator should hear that from the
+    console rather than have to work it out.
+
+    The code stays ``invalid``: the API server refused the object, and that is
+    what the frontend branches on.
+    """
+    if item.kind != "IngressClass" or "immutable" not in str(error.detail or "").lower():
+        return error
+
+    error.message = (
+        f"The IngressClass {item.name} already exists with a different "
+        f"spec.controller, and that field cannot be changed after creation."
+    )
+    error.hint = (
+        f"Delete it and install again: kubectl delete ingressclass {item.name}. "
+        "Ingresses naming this class are unclaimed until the install recreates "
+        "it — on a router that was not admitting them, that changes nothing."
+    )
+    return error
+
+
 def _dependency_hint(item: BundleObject, error: AdminError, *, failed_kinds: set[str]) -> AdminError:
     """Say the ClusterRoleBinding was not created because its ClusterRole was not.
 
@@ -473,6 +507,7 @@ def install(payload: dict[str, Any], *, dry_run: bool = True) -> dict[str, Any]:
             # the hint stops sending the operator to grant a verb they hold.
             error = _escalation_hint(item, e)
             error = _dependency_hint(item, error, failed_kinds=failed_kinds)
+            error = _immutable_class_hint(item, error)
             failed_kinds.add(item.kind)
             results.append(_outcome(item, verb=verb, result=None, error=error))
             # Keep going. Stopping at the first failure would leave the operator

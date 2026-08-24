@@ -171,7 +171,7 @@ metadata:
     app.kubernetes.io/part-of: k8boss-admin
     app.kubernetes.io/version: 3.2.13
 spec:
-  controller: haproxy.org/ingress-controller
+  controller: haproxy.org/ingress-controller/haproxy
 
 ---
 apiVersion: v1

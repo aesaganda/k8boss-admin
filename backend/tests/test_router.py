@@ -22,7 +22,7 @@ import pytest
 
 from app.admin import router as router_service
 from app.admin import router_bundle
-from app.errors import Conflict, MutationsDisabled, NotFound, RBACDenied
+from app.errors import Conflict, Invalid, MutationsDisabled, NotFound, RBACDenied
 from app.resources import catalog
 from tests.test_routes import stub_discovery as _stub_routes_discovery
 
@@ -117,7 +117,39 @@ def test_the_bundle_creates_an_ingress_class():
     classes = [o for o in objects if o.kind == "IngressClass"]
 
     assert len(classes) == 1
-    assert classes[0].body["spec"]["controller"] == router_bundle.INGRESS_CONTROLLER
+    assert classes[0].body["spec"]["controller"] == router_bundle.INGRESS_CONTROLLER + "/haproxy"
+
+
+@pytest.mark.parametrize("class_name", ["haproxy", "edge", "k8boss-router"])
+def test_the_class_controller_string_agrees_with_the_deployments_ingress_class_flag(
+    class_name,
+):
+    """The two halves of the bundle that have to match, asserted against each other.
+
+    The controller accepts an IngressClass only when its ``spec.controller`` is
+    ``haproxy.org/ingress-controller/<value of --ingress.class>``. Ship the bare
+    string beside the flag and it matches nothing: every Ingress naming the class
+    is dropped, and the router serves no traffic at all while reporting itself
+    installed, Available and Ready.
+
+    Written as an agreement between the two objects rather than against a
+    constant on purpose. The version of this test that compared
+    ``spec.controller`` to ``INGRESS_CONTROLLER`` passed for as long as the
+    defect existed, because the constant *was* the wrong value — a test and a
+    bug that agree with each other prove only that they agree.
+    """
+    options = router_bundle.RouterOptions(ingress_class_name=class_name)
+    objects = router_bundle.build(options)
+
+    controller = next(o for o in objects if o.kind == "IngressClass").body["spec"]["controller"]
+    deployment = next(o for o in objects if o.kind == "Deployment")
+    args = deployment.body["spec"]["template"]["spec"]["containers"][0]["args"]
+    flag = next(a.split("=", 1)[1] for a in args if a.startswith("--ingress.class="))
+
+    assert controller == f"{router_bundle.INGRESS_CONTROLLER}/{flag}", (
+        "The IngressClass controller string and --ingress.class must agree, or "
+        "the router admits nothing while looking perfectly healthy."
+    )
 
 
 def test_the_controller_publishes_its_service_so_ingress_status_gets_an_address():
@@ -1200,3 +1232,49 @@ def test_installing_through_the_api_is_refused_with_the_gate_off(
 
     assert response.status_code == 403
     assert response.json()["error"] == "mutations_disabled"
+
+
+def test_an_ingressclass_that_cannot_be_upgraded_says_what_to_do_about_it():
+    """"field is immutable" is accurate and tells the operator nothing to do.
+
+    A cluster carrying a router installed before the controller string was
+    corrected cannot be upgraded in place — spec.controller cannot change — so
+    the install stops at seven of eight objects, forever, until somebody deletes
+    one object. The verbatim API server detail names the field and not the
+    remedy, and this is the difference between a stuck install and a fixed one.
+    """
+    item = next(
+        o for o in router_bundle.build(router_bundle.RouterOptions())
+        if o.kind == "IngressClass"
+    )
+    error = Invalid(
+        'The cluster rejected update networking.k8s.io/ingressclasses "haproxy".',
+        detail=(
+            'IngressClass.networking.k8s.io "haproxy" is invalid: spec.controller: '
+            'Invalid value: "haproxy.org/ingress-controller/haproxy": field is immutable'
+        ),
+    )
+
+    rewritten = router_service._immutable_class_hint(item, error)
+
+    assert "kubectl delete ingressclass haproxy" in rewritten.hint
+    # Still `invalid`: the API server refused it, and the frontend branches on
+    # the code, not the prose.
+    assert rewritten.code == "invalid"
+
+
+def test_an_unrelated_ingressclass_failure_is_not_given_the_delete_advice():
+    """The hint is for one cause. Told to delete their class over an RBAC denial,
+    an operator would take a working object away for no reason."""
+    item = next(
+        o for o in router_bundle.build(router_bundle.RouterOptions())
+        if o.kind == "IngressClass"
+    )
+    error = Invalid("Rejected by an admission webhook.", detail="policy denied")
+
+    assert router_service._immutable_class_hint(item, error).hint != (
+        "kubectl delete ingressclass haproxy"
+    )
+    assert "delete ingressclass" not in str(
+        router_service._immutable_class_hint(item, error).hint or ""
+    )
