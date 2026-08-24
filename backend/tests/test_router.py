@@ -793,7 +793,7 @@ def _binding(namespace="k8boss-router"):
     }
 
 
-def _deployment(*, version=None, ready=2, desired=2, generation=3, observed=3):
+def _deployment(*, version=None, ready=2, desired=2, generation=3, observed=3, args=None):
     return {
         "apiVersion": "apps/v1",
         "kind": "Deployment",
@@ -803,7 +803,7 @@ def _deployment(*, version=None, ready=2, desired=2, generation=3, observed=3):
             "labels": {router_bundle.VERSION_LABEL: version or router_bundle.ROUTER_VERSION},
         },
         "spec": {"replicas": desired, "template": {"spec": {"containers": [
-            {"image": router_bundle.ROUTER_IMAGE},
+            {"image": router_bundle.ROUTER_IMAGE, "args": args or []},
         ]}}},
         "status": {"readyReplicas": ready, "observedGeneration": observed},
     }
@@ -1291,3 +1291,49 @@ def test_an_unrelated_ingressclass_failure_is_not_given_the_delete_advice():
     assert "delete ingressclass" not in str(
         router_service._immutable_class_hint(item, error).hint or ""
     )
+
+
+def test_status_reports_whether_the_installed_router_has_gateway_api_on(
+    monkeypatch, fake_k8s,
+):
+    """Read off the installed Deployment's own arguments, not remembered.
+
+    The reinstall form seeds itself from this. Without it the form offers the
+    bundle's default — off — over a router installed with it on, and an operator
+    opening Reinstall to take a version bump turns it off by confirming.
+    """
+    _stub_status(monkeypatch, {
+        "clusterrolebindings": _binding(),
+        "deployments": _deployment(args=[
+            "--configmap=k8boss-router/k8boss-admin-router",
+            "--gateway-controller-name=haproxy.org/gateway-controller",
+        ]),
+    })
+
+    assert router_service.status()["deployment"]["gatewayApi"] is True
+
+
+def test_status_reports_gateway_api_off_when_the_flag_is_absent(monkeypatch, fake_k8s):
+    _stub_status(monkeypatch, {
+        "clusterrolebindings": _binding(),
+        "deployments": _deployment(args=["--configmap=k8boss-router/k8boss-admin-router"]),
+    })
+
+    assert router_service.status()["deployment"]["gatewayApi"] is False
+
+
+def test_gateway_api_is_unknown_rather_than_off_when_the_deployment_is_unreadable(
+    monkeypatch, fake_k8s,
+):
+    """`false` here is a claim about someone's router that nobody could check.
+
+    It seeds a form that writes to the cluster on confirm, so "we could not look"
+    has to stay distinguishable from "it is off" — otherwise a failed read turns
+    Gateway API off on the next reinstall.
+    """
+    _stub_status(monkeypatch, {
+        "clusterrolebindings": _binding(),
+        "deployments": RBACDenied("deployments is forbidden", context={}),
+    })
+
+    assert router_service.status()["deployment"]["gatewayApi"] is None
