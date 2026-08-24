@@ -749,6 +749,9 @@ def _deployment_state(
             "desiredReplicas": None,
             "readyReplicas": None,
             "image": None,
+            # Null, not false. This seeds a form that writes on confirm, so
+            # "we could not look" must not arrive there as "it is off".
+            "gatewayApi": None,
             "detail": (
                 "The router Deployment could not be read, so whether it is there "
                 "is unknown — not absent."
@@ -775,6 +778,20 @@ def _deployment_state(
             None if stale else get_field(deployment, "status", "readyReplicas", default=0)
         ),
         "image": get_field(containers[0], "image") if containers else None,
+        # Which optional features the *installed* router was given, read back off
+        # its own arguments rather than remembered. The reinstall form seeds
+        # itself from these: without them it offers the bundle's defaults over a
+        # router installed with different ones, and an operator taking a version
+        # bump silently turns off whatever they had switched on. `defaultClass`
+        # is not here because it is already visible as `ingressClass.default`,
+        # which is the object that actually carries it.
+        "gatewayApi": (
+            any(
+                str(a).startswith("--gateway-controller-name=")
+                for a in (get_field(containers[0], "args", default=[]) or [])
+            )
+            if containers else None
+        ),
         "detail": (
             "The Deployment controller has not yet reported on the current "
             f"generation ({observed} of {generation}), so how many replicas are "

@@ -803,7 +803,7 @@ export const FIXTURES = {
     shippedVersion: '3.2.13',
     installedVersion: null,
     upgradeAvailable: null,
-    deployment: { present: false, version: null, desiredReplicas: null, readyReplicas: null, image: null, detail: null },
+    deployment: { present: false, version: null, desiredReplicas: null, readyReplicas: null, image: null, gatewayApi: null, detail: null },
     service: { present: false, type: null, addresses: [], nodePorts: [], detail: null },
     ingressClass: { present: false, name: 'haproxy', default: null, controller: null },
     serves: [
@@ -826,6 +826,43 @@ export const FIXTURES = {
   },
 
   /**
+   * §14 — a router installed with options that are NOT the bundle's defaults.
+   *
+   * The reinstall form has to come up showing these rather than
+   * `blankOptions()`. An operator who opens Reinstall to take a version bump
+   * and finds "make this the default class" unchecked will turn it off by
+   * confirming, and the only warning is a line in an eight-object diff.
+   */
+  routerInstalledCustom: {
+    enabled: true,
+    enabledDetail: 'Router management is enabled on this deployment.',
+    installed: true,
+    namespace: 'edge-proxy',
+    namespaceDiscovered: true,
+    shippedVersion: '3.2.13',
+    installedVersion: '3.2.13',
+    versionMatches: true,
+    upgradeAvailable: false,
+    deployment: {
+      present: true, version: '3.2.13', desiredReplicas: 3, readyReplicas: 3,
+      image: 'docker.io/haproxytech/kubernetes-ingress:3.2.13',
+      gatewayApi: true, detail: null,
+    },
+    service: { present: true, type: 'NodePort', addresses: [], nodePorts: [], detail: null },
+    ingressClass: {
+      present: true, name: 'edge', default: true,
+      controller: 'haproxy.org/ingress-controller/edge',
+    },
+    otherClasses: [],
+    serves: [
+      { backend: 'ingress', served: true, detail: 'The shipped router is an Ingress controller.' },
+    ],
+    image: 'docker.io/haproxytech/kubernetes-ingress:3.2.13',
+    partial: false,
+    unavailable: [],
+  },
+
+  /**
    * §14 — the read failed. `installed: null`, and the page must not render that
    * as "not installed": installing then would put a second proxy on the
    * cluster's ingress path.
@@ -839,7 +876,7 @@ export const FIXTURES = {
     shippedVersion: '3.2.13',
     installedVersion: null,
     upgradeAvailable: null,
-    deployment: { present: false, version: null, desiredReplicas: null, readyReplicas: null, image: null, detail: null },
+    deployment: { present: false, version: null, desiredReplicas: null, readyReplicas: null, image: null, gatewayApi: null, detail: null },
     service: { present: false, type: null, addresses: [], nodePorts: [], detail: null },
     ingressClass: { present: false, name: 'haproxy', default: null, controller: null },
     serves: [

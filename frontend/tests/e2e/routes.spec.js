@@ -594,6 +594,54 @@ test.describe('the shipped router', () => {
     await expect(page.getByTestId('mutation-confirm')).toBeDisabled();
   });
 
+  test('reinstall opens showing what is installed, not the bundle defaults', async ({
+    page,
+  }) => {
+    // The failure this prevents: an operator opens Reinstall to take a version
+    // bump, the form shows "make this the default class" and Gateway API
+    // unchecked because that is what a fresh install defaults to, and
+    // confirming turns both off. The write is honest — the diff carries it —
+    // but a changed checkbox nobody touched is not what anyone reads an
+    // eight-object diff for.
+    await mockApi(page, {
+      preflight: ALLOW_ALL,
+      routerStatus: FIXTURES.routerInstalledCustom,
+    });
+    await openRoutes(page);
+
+    await page.getByTestId('router-panel').getByRole('button', { name: /Reinstall|Install/ }).click();
+
+    await expect(page.getByTestId('router-namespace')).toHaveValue('edge-proxy');
+    await expect(page.getByTestId('router-class')).toHaveValue('edge');
+    await expect(page.getByTestId('router-replicas')).toHaveValue('3');
+    await expect(page.getByTestId('router-service-type')).toHaveValue('NodePort');
+    await expect(page.getByTestId('router-default-class')).toBeChecked();
+    await expect(page.getByTestId('router-gateway-api')).toBeChecked();
+  });
+
+  test('a reinstall over an unreadable router does not silently switch things off', async ({
+    page,
+  }) => {
+    // `gatewayApi: null` is "we could not look". Seeding the checkbox from it as
+    // false would let a failed read turn the feature off on the next confirm,
+    // which is the tri-state rule applied to a form that writes.
+    await mockApi(page, {
+      preflight: ALLOW_ALL,
+      routerStatus: {
+        ...FIXTURES.routerInstalledCustom,
+        deployment: { ...FIXTURES.routerInstalledCustom.deployment, gatewayApi: null },
+      },
+    });
+    await openRoutes(page);
+
+    await page.getByTestId('router-panel').getByRole('button', { name: /Reinstall|Install/ }).click();
+
+    // Falls back to the form's own default rather than inventing `true`.
+    await expect(page.getByTestId('router-gateway-api')).not.toBeChecked();
+    // Everything the cluster could answer for is still seeded.
+    await expect(page.getByTestId('router-class')).toHaveValue('edge');
+  });
+
   test('a partial install is reported as partial, not as success', async ({ page }) => {
     await mockApi(page, {
       preflight: ALLOW_ALL,

@@ -26,7 +26,7 @@
  * eight objects, so it is eight passes through the funnel and eight audit rows;
  * `installed` in the response is true only when every one of them landed.
  */
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Alert,
   Button,
@@ -114,6 +114,34 @@ export default function RouterPanel({ gate, onChanged }) {
   const { data: status, loading, error, reload } = useAsync(() => routerApi.status(), {
     key: 'router-status',
   });
+
+  // Seed the form from the router that is actually installed, once, when the
+  // dialog opens over one.
+  //
+  // Without this the form offers `blankOptions()` — the bundle's defaults — no
+  // matter what is on the cluster, so an operator who installed with "make this
+  // the default class" and Gateway API on, and later opens Reinstall to take a
+  // version bump, is shown both boxes unchecked. Confirming turns their choices
+  // off. The write itself is honest about it — the diff shows the Deployment
+  // args and the removed annotation — but a diff across eight objects is a thin
+  // place to be told that a control you never touched has changed meaning, and
+  // it reads as noise from an upgrade rather than as a change of behaviour.
+  //
+  // Only fields the cluster can actually answer for are taken. Anything status
+  // reports as null is left at the form's default rather than guessed, because
+  // a guess here is written to the cluster on confirm.
+  useEffect(() => {
+    if (!installOpen || !status?.installed) return;
+    setOptions((current) => ({
+      ...current,
+      namespace: status.namespace ?? current.namespace,
+      serviceType: status.service?.type ?? current.serviceType,
+      replicas: status.deployment?.desiredReplicas ?? current.replicas,
+      ingressClassName: status.ingressClass?.name ?? current.ingressClassName,
+      defaultClass: status.ingressClass?.default ?? current.defaultClass,
+      gatewayApi: status.deployment?.gatewayApi ?? current.gatewayApi,
+    }));
+  }, [installOpen, status]);
 
   const { data: plan } = useAsync(
     () => routerApi.plan({ ...options, replicas: Number(options.replicas) }),

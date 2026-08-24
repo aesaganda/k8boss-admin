@@ -1523,6 +1523,15 @@ tri-state for the same reason one level down.
 reported on the current generation — the §6 staleness rule applied to the one
 workload whose health decides whether the cluster is reachable at all.
 
+`deployment.gatewayApi` reports whether the **installed** router carries
+`--gateway-controller-name`, read off its own arguments rather than remembered,
+and is `null` — never `false` — when the Deployment could not be read. It exists
+because §14.4's install options are not otherwise recoverable from the cluster,
+and the reinstall form seeds itself from them: offered the bundle's defaults over
+a router installed with different ones, an operator taking a version bump turns
+their own choices off by confirming. `defaultClass` needs no equivalent — it is
+already visible as `ingressClass.default`, on the object that carries it.
+
 `otherClasses[]` lists every IngressClass on the cluster with
 `{name, controller, default, managedByUs, retired}`, and is `null` — never `[]` —
 when the listing failed: "nothing else is serving Ingresses here" is a real
