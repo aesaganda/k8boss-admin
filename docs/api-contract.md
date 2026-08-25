@@ -107,6 +107,7 @@ Stable `error` codes:
 | `mutations_disabled` | 403 | the deployment is running read-only |
 | `unsupported` | 501 | the API resource is not served by this cluster |
 | `upstream_error` | 502 | any other API server failure |
+| `internal_error` | 500 | the console itself failed and nothing mapped the cause. Distinct from `upstream_error`, which blames the cluster; the message is fixed and carries no exception text, and the detail is in the log beside the request's correlation id |
 
 ### 1.4 Group-version-resource in URLs
 

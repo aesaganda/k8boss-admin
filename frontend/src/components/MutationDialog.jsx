@@ -144,6 +144,17 @@ const ERROR_FRAMING = {
     // an operator deciding which component to go and look at.
     lead: 'The console is up; it could not reach this cluster’s API server. Whether the write landed is unknown.',
   },
+  internal_error: {
+    variant: 'danger',
+    title: 'The console failed while handling this',
+    // The one thing an operator needs here is the thing the code cannot tell
+    // them. `cluster_unreachable` at least says the request never arrived;
+    // this one means the console broke somewhere between sending and
+    // answering, so the write may have landed and may not have. Saying
+    // "nothing was written" would be a guess, and it is the guess that gets a
+    // change applied twice.
+    lead: 'Whether the cluster changed is unknown — check the object before retrying. The audit trail records every write that reached the cluster, including the ones that failed.',
+  },
   network_unreachable: {
     variant: 'danger',
     title: 'The console backend could not be reached',

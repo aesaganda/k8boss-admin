@@ -29,8 +29,9 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.errors import ServerErrorMiddleware
 
-from app.api.exception_handlers import register_exception_handlers
+from app.api.exception_handlers import register_exception_handlers, unhandled_error_handler
 from app.config import settings
 from app.database import create_tables
 from app.k8s.client import manager as cluster_manager
@@ -118,6 +119,18 @@ app = FastAPI(
 app.add_middleware(ClusterContextMiddleware)
 app.add_middleware(AuthenticationMiddleware)
 app.add_middleware(RequestLoggingMiddleware)
+# The floor under the handlers registered below, and it has to be a middleware
+# rather than another entry in `register_exception_handlers`. Starlette's own
+# ServerErrorMiddleware is the outermost layer of the stack by construction, so
+# an exception nothing maps is rendered *outside* the CORS layer added next: the
+# 500 carries no Access-Control-Allow-Origin, the browser refuses to read it,
+# and `fetch()` rejects with `TypeError: Failed to fetch`. The operator sees a
+# network error and the real reason is never delivered — which is the same
+# failure `app/api/exception_handlers.py` exists to prevent, arriving through
+# the one door that module cannot close. A second ServerErrorMiddleware here
+# catches it first, one layer *inside* CORS, so the envelope reaches the browser
+# with the headers that let it be read.
+app.add_middleware(ServerErrorMiddleware, handler=unhandled_error_handler)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origin_list,
