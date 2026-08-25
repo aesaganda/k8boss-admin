@@ -60,9 +60,10 @@ this use:
    and the console's Routes screen writes exactly that. The suffix is not
    decoration: because the Deployment passes ``--ingress.class``, the controller
    matches only ``haproxy.org/ingress-controller/<that value>``. The bare string
-   is the other half of the *other* valid pairing — the one where the flag is
-   absent — and mixing the two halves is what this bundle shipped for its first
-   releases, which admitted nothing at all while reporting itself healthy.
+   is the other half of the pairing upstream documents for a flag-less
+   controller — a pairing 3.2.13 does not actually honour — and mixing the two
+   halves is what this bundle shipped for its first releases, which admitted
+   nothing at all while reporting itself healthy.
    Getting this pair wrong is silent; see :func:`ingress_controller_for`. **If you
    are re-deriving this bundle against a newer upstream release, check this pair
    first.**
@@ -120,10 +121,26 @@ def ingress_controller_for(ingress_class_name: str) -> str:
     routes nothing while looking created", produced by the very thing installed
     to prevent it.
 
-    There are two valid pairings, not one. Dropping ``--ingress.class`` and
-    keeping the bare string works exactly as upstream documents it — verified on
-    a live cluster, picked up within twelve seconds of the Ingress appearing.
-    What does not work is a *mismatched* pair, which is what this bundle shipped.
+    Upstream documents two valid pairings. On 3.2.13 only one of them works, and
+    it is the one this bundle uses. Dropping ``--ingress.class`` and keeping the
+    bare string is documented, and it does work on 3.1.17 — but on 3.2.13 the
+    same objects are never matched. Established with only the image tag changing:
+    a flag-less controller with an IngressClass carrying the bare string serves
+    its Ingress within ten seconds on 3.1.17, and 404s for three minutes on
+    3.2.13. Deleting and recreating the Ingress against the upgraded controller
+    does not recover it, so this is not a stale-object effect that a fresh write
+    clears. Upstream is tracking it as
+    https://github.com/haproxytech/kubernetes-ingress/issues/824 and
+    https://github.com/haproxytech/kubernetes-ingress/issues/839; a maintainer
+    has confirmed the second and says a fix is on the way.
+
+    An earlier revision of this docstring claimed the flag-less pairing was
+    verified working on 3.2.13. That claim did not survive a controlled retest
+    and has been withdrawn rather than softened: a "verified" that nobody can
+    reproduce is the defect standard with a signature on it.
+
+    What is certain either way is that a *mismatched* pair never works, and that
+    is what this bundle shipped.
 
     The rule has a second half that upstream's ``ingressclass.md`` does not
     state: **the IngressClass's name must equal the flag value as well.** A class
