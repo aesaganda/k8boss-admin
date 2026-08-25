@@ -254,8 +254,43 @@ class UpstreamError(AdminError):
     default_message = "The cluster API server returned an error."
 
 
+class InternalError(AdminError):
+    """The console itself failed, in a way nothing below mapped to a code.
+
+    500, and deliberately not ``upstream_error``: that one says the cluster's
+    API server returned something bad, which sends an operator to look at their
+    cluster. This one says the console broke, and pointing them at a healthy
+    cluster during an incident costs them the time they had.
+
+    It exists because the alternative is worse than a bad label. An exception no
+    handler maps escapes to Starlette's ``ServerErrorMiddleware``, which sits
+    *outside* ``CORSMiddleware``, so the 500 carries no
+    ``Access-Control-Allow-Origin`` header at all. The browser then blocks the
+    response and ``fetch()`` rejects with ``TypeError: Failed to fetch`` — the
+    operator sees a network error, and whatever actually went wrong is never
+    delivered. A rendered 500 that says "the console failed" is a worse answer
+    than a mapped error and a far better one than no answer.
+
+    The message is fixed and carries nothing from the exception. A traceback
+    reaching a browser is how internal paths, library versions and occasionally
+    a credential leave the process; the detail belongs in the log beside the
+    correlation id, which is what the operator quotes.
+    """
+
+    code = "internal_error"
+    http_status = 500
+    default_message = "The console failed to handle this request."
+
+
 # Error code -> §1.2 unavailable reason. Kept next to the classes so adding a
 # class without deciding how a partial read reports it is visible here.
+#
+# ``internal_error`` is deliberately absent. It is raised by the outermost
+# middleware, never inside a ``collect()`` block, so it cannot reach an
+# ``unavailable[]`` entry — and the fallback below would label it
+# ``unreachable``, which would send an operator to check a cluster that answered
+# every question it was asked. If that ever stops being true, the fix is a new
+# reason in ``UNAVAILABLE_REASONS``, which is a contract change.
 _UNAVAILABLE_REASON: dict[str, str] = {
     "rbac_denied": "forbidden",
     "not_found": "not_found",

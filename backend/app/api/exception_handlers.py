@@ -10,7 +10,14 @@ then sees a network error instead of "the cluster is unreachable" or "you are
 missing `patch` on `apps/deployments`" — the exact class of confidently useless
 answer this project is built against.
 
-Three handlers, covering everything a route can raise:
+The handlers below cover everything a route is *expected* to raise. They do not
+cover everything it *can*: a bug raises something nothing maps, and that escapes
+to ``ServerErrorMiddleware`` exactly as described above. :func:`unhandled_error_handler`
+is the floor under that — see :mod:`app.main` for where it is mounted, which is
+the part that matters, because a handler for ``Exception`` registered here would
+render outside the CORS layer and change nothing.
+
+Handlers, in the order they are consulted:
 
 * :class:`app.errors.AdminError` and every subclass — rendered as the §1.3
   envelope with the subclass's own status code.
@@ -32,7 +39,7 @@ from fastapi.responses import JSONResponse
 from kubernetes.client.rest import ApiException
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app.errors import AdminError, Invalid, from_api_exception
+from app.errors import AdminError, InternalError, Invalid, from_api_exception
 from app.k8s.auth import AuthError
 
 logger = logging.getLogger(__name__)
@@ -162,3 +169,25 @@ def register_exception_handlers(app: FastAPI) -> None:
     app.add_exception_handler(AuthError, auth_error_handler)
     app.add_exception_handler(RequestValidationError, validation_error_handler)
     app.add_exception_handler(StarletteHTTPException, http_exception_handler)
+
+
+async def unhandled_error_handler(request, exc: Exception) -> JSONResponse:
+    """Render anything nothing else mapped as ``internal_error``, inside CORS.
+
+    Mounted as the handler of a second ``ServerErrorMiddleware`` placed *inside*
+    ``CORSMiddleware`` (see :mod:`app.main`). That placement is the whole point
+    and it is the reason this is not simply ``add_exception_handler(Exception,
+    ...)``: Starlette's own ``ServerErrorMiddleware`` is the outermost layer of
+    the stack by construction, so a handler registered on the app renders a 500
+    the browser is then not allowed to read.
+
+    ERROR with the traceback, because unlike an ``rbac_denied`` this one is
+    always a defect in this application. The response deliberately carries none
+    of it: the operator gets the correlation id, and the id is what joins their
+    report to the log line that has the detail.
+    """
+    logger.exception(
+        "Unhandled exception on %s", request.url.path,
+        extra={"error_code": InternalError.code},
+    )
+    return _render(InternalError())

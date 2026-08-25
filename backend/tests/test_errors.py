@@ -267,3 +267,80 @@ def test_errors_translate_into_the_partial_read_vocabulary(exc, reason):
     """§1.2 reasons are a closed set, and this is the single join between them
     and the error classes — so a new class cannot quietly become the catch-all."""
     assert exc.unavailable_reason == reason
+
+
+# --------------------------------------------------------------------------- #
+# The floor: what happens to an exception nothing maps.
+#
+# These assert on a header, which looks like testing Starlette rather than this
+# application. It is not. The rule the header stands for is that an error the
+# console cannot classify still has to *arrive*: rendered outside the CORS layer,
+# a 500 is refused by the browser and `fetch()` rejects with `TypeError: Failed
+# to fetch`, so the operator is shown a network problem and the real reason is
+# never delivered. Before this floor existed, a bare `RuntimeError` in any
+# handler did exactly that, and the whole suite passed.
+
+
+def _app_with_a_bug():
+    """A minimal app wired the way `app.main` wires the real one."""
+    from starlette.middleware.cors import CORSMiddleware
+    from starlette.middleware.errors import ServerErrorMiddleware
+
+    from app.api.exception_handlers import unhandled_error_handler
+
+    app = FastAPI()
+
+    @app.get("/boom")
+    def boom():
+        raise RuntimeError("a defect, not a mapped condition")
+
+    @app.get("/mapped")
+    def mapped():
+        raise NotFound("No such object.")
+
+    app.add_middleware(ServerErrorMiddleware, handler=unhandled_error_handler)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["http://localhost:5174"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    register_exception_handlers(app)
+    return app
+
+
+def test_an_unmapped_exception_is_rendered_as_internal_error():
+    client = TestClient(_app_with_a_bug(), raise_server_exceptions=False)
+    response = client.get("/boom", headers={"Origin": "http://localhost:5174"})
+
+    assert response.status_code == 500
+    assert response.json()["error"] == "internal_error"
+
+
+def test_an_unmapped_exception_reaches_the_browser():
+    """The 500 carries CORS headers, so `fetch()` can read it at all."""
+    client = TestClient(_app_with_a_bug(), raise_server_exceptions=False)
+    response = client.get("/boom", headers={"Origin": "http://localhost:5174"})
+
+    assert response.headers.get("access-control-allow-origin") == "http://localhost:5174"
+
+
+def test_an_unmapped_exception_tells_the_browser_nothing_about_the_defect():
+    """No traceback, no exception text: that is how internals leave the process."""
+    client = TestClient(_app_with_a_bug(), raise_server_exceptions=False)
+    body = client.get("/boom", headers={"Origin": "http://localhost:5174"}).text
+
+    assert "a defect, not a mapped condition" not in body
+    assert "RuntimeError" not in body
+    assert "Traceback" not in body
+
+
+def test_the_floor_does_not_swallow_a_mapped_error():
+    """A NotFound still renders as 404 `not_found`, not as a 500."""
+    client = TestClient(_app_with_a_bug(), raise_server_exceptions=False)
+    response = client.get("/mapped", headers={"Origin": "http://localhost:5174"})
+
+    assert response.status_code == 404
+    assert response.json()["error"] == "not_found"
+    assert response.headers.get("access-control-allow-origin") == "http://localhost:5174"
