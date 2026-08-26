@@ -327,6 +327,68 @@ def test_records_written_before_chaining_are_counted_never_claimed(db_engine):
     assert report["first_break"] is None
 
 
+def test_a_trail_with_nothing_chained_yet_is_partial_not_intact(db_engine):
+    """The moment after an upgrade, before the first chained record is written.
+
+    The table is full of pre-chain rows and the chain has nothing in it. The
+    previous test covers the same property once a chained record exists; this
+    one covers the window before that, which is a different branch — `verify`
+    returns early when there are no chained rows at all — and it is the branch
+    a freshly upgraded deployment is actually in.
+
+    `intact` here would be the ADR-0003 inversion at its purest: a verifier
+    reporting a pass over a table it has not checked a single row of. Nothing
+    is broken, and nothing is verified either, and only one of those three
+    words is honest about it.
+    """
+    db = database.SessionLocal()
+    try:
+        for index in range(3):
+            db.execute(
+                AuditRecord.__table__.insert().values(
+                    ts=recorder.utcnow(),
+                    category="cluster",
+                    actor="legacy",
+                    verb="patch",
+                    target=dict(TARGET),
+                    dry_run=False,
+                    outcome="applied",
+                    detail=f"pre-chain record {index}",
+                )
+            )
+        db.commit()
+    finally:
+        db.close()
+
+    report = verify()
+
+    assert report["status"] == integrity.STATUS_PARTIAL
+    assert report["verified"] == 0
+    assert report["unchained"] == 3
+    assert report["total"] == 3
+    assert report["first_break"] is None
+    # Nothing was walked, so there is no tip to report. A tip here would imply
+    # a chain the trail does not have.
+    assert report["tip"] is None
+    assert report["window"]["oldest_unchained_id"] is not None
+
+
+def test_an_empty_trail_stays_intact_when_nothing_is_unchained(db_engine):
+    """The neighbouring branch, pinned so the fix above cannot overreach.
+
+    Same early return, no records at all. `partial` would be wrong here for the
+    opposite reason: there are no records this verifier cannot speak for, so
+    withholding the verdict would light §11.1's banner on every fresh install
+    and teach an operator to ignore it.
+    """
+    report = verify()
+
+    assert report["status"] == integrity.STATUS_INTACT
+    assert report["verified"] == 0
+    assert report["unchained"] == 0
+    assert report["total"] == 0
+
+
 def test_a_windowed_verification_never_claims_intact(db_engine):
     """A window is a real check and an incomplete one, and says which.
 
