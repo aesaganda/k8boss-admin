@@ -24,6 +24,7 @@ from __future__ import annotations
 import logging
 import time
 from contextlib import contextmanager
+from decimal import Decimal
 
 from fastapi import APIRouter, Depends, Response
 from pydantic import BaseModel, Field
@@ -36,6 +37,7 @@ from app.errors import AdminError, Conflict, Invalid, NotFound, UpstreamError, f
 from app.k8s.auth import TOKEN_AUTH_TYPES
 from app.k8s.client import manager
 from app.k8s.context import reset_current_cluster_id, set_current_cluster_id
+from app.k8s.quantities import add_quantities, parse_quantity
 from app.models import Cluster, utcnow
 from app.services import route_domain
 
@@ -179,48 +181,19 @@ def _cluster_context(cluster_id: int):
         reset_current_cluster_id(token)
 
 
-# Kubernetes quantity suffixes. Binary first: "Mi" must not be read as "M".
-_BINARY_SUFFIX = {"Ki": 2 ** 10, "Mi": 2 ** 20, "Gi": 2 ** 30,
-                  "Ti": 2 ** 40, "Pi": 2 ** 50, "Ei": 2 ** 60}
-_DECIMAL_SUFFIX = {"n": 1e-9, "u": 1e-6, "m": 1e-3, "k": 1e3, "M": 1e6,
-                   "G": 1e9, "T": 1e12, "P": 1e15, "E": 1e18}
-
-
-def _parse_quantity(value) -> float:
-    """Parse a Kubernetes resource quantity ("16", "1500m", "64Gi", "1.5e3").
-
-    Raises ``ValueError`` on anything it does not understand, and the callers
-    turn that into an ``unavailable`` entry rather than a partial sum. A total
-    that silently skipped the quantities it could not read is a number an
-    operator will use to make a capacity decision, and it would be wrong with no
-    indication that it was — worse than showing them nothing.
-
-    Case matters: ``m`` is milli and ``M`` is mega, so a case-insensitive lookup
-    would report a 500m-CPU request as 500 million cores.
-    """
-    text = str(value).strip()
-    if not text:
-        raise ValueError("empty quantity")
-    if len(text) > 2 and text[-2:] in _BINARY_SUFFIX:
-        return float(text[:-2]) * _BINARY_SUFFIX[text[-2:]]
-    if len(text) > 1 and text[-1] in _DECIMAL_SUFFIX:
-        return float(text[:-1]) * _DECIMAL_SUFFIX[text[-1]]
-    return float(text)
-
-
-def _sum_quantities(values: list, *, what: str) -> float:
+def _sum_quantities(values: list, *, what: str) -> Decimal:
     """Sum quantities, converting a parse failure into a reportable error."""
-    total = 0.0
+    total = Decimal(0)
     for value in values:
-        try:
-            total += _parse_quantity(value)
-        except (TypeError, ValueError) as e:
+        parsed = parse_quantity(value)
+        if parsed is None:
             raise UpstreamError(
                 f"The cluster reported a {what} value this console could not parse.",
-                detail=f"{value!r}: {e}",
+                detail=repr(value),
                 hint="The totals are withheld rather than reported partially summed.",
                 context={"resource": "nodes" if "capacit" in what else "pods"},
-            ) from e
+            )
+        total = add_quantities(total, parsed)
     return total
 
 
@@ -559,7 +532,7 @@ def _collect_nodes() -> tuple[dict, dict]:
 
     counts = {"total": len(nodes), "ready": ready, "unschedulable": unschedulable}
     capacity_totals = {
-        "cpu_cores": round(_sum_quantities(cpu, what="node capacity cpu"), 3),
+        "cpu_cores": float(round(_sum_quantities(cpu, what="node capacity cpu"), 3)),
         "memory_bytes": int(_sum_quantities(memory, what="node capacity memory")),
         "pods": int(_sum_quantities(pods, what="node capacity pods")),
     }
@@ -624,7 +597,7 @@ def _collect_pods() -> tuple[dict, dict]:
                 memory.append(requests["memory"])
 
     requested = {
-        "cpu_cores": round(_sum_quantities(cpu, what="pod requested cpu"), 3),
+        "cpu_cores": float(round(_sum_quantities(cpu, what="pod requested cpu"), 3)),
         "memory_bytes": int(_sum_quantities(memory, what="pod requested memory")),
     }
     return phases, requested

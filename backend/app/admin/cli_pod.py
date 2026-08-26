@@ -72,12 +72,12 @@ action through the same funnel.
 from __future__ import annotations
 
 import logging
-import re
-import secrets
 from typing import Any
 
 from app.admin.apply import create_fn, delete_resource
+from app.admin.images import validate_image_reference
 from app.admin.mutate import mutate
+from app.admin.names import random_suffix
 from app.audit import recorder
 from app.config import settings
 from app.errors import (
@@ -112,15 +112,6 @@ NAME_PREFIX = "k8boss-cli-"
 #: letting the terminal pick, and a one-container pod has nothing to choose
 #: between anyway.
 CONTAINER_NAME = "cli"
-
-#: Same alphabet as §5.5's and §7.4's: no vowels, so a generated name cannot
-#: spell a word, and none of the characters most often misheard when a name is
-#: read aloud during an incident.
-_SUFFIX_ALPHABET = "bcdfghjkmnpqrstvwxz23456789"
-_SUFFIX_LENGTH = 5
-
-_MAX_IMAGE_LENGTH = 512
-_IMAGE_FORBIDDEN = re.compile(r"[\s\x00-\x1f]")
 
 #: Upper bound on how many of this console's CLI pods a listing reports. There
 #: should be one; a namespace holding more than this has a leak worth seeing in
@@ -244,31 +235,14 @@ def _check_image(image: str | None) -> str:
     legible is a stray newline from a paste turning into an API server
     validation error about a field nobody typed.
     """
-    value = (image if image is not None else settings.cli_image or "").strip()
-    if not value:
-        raise Invalid(
-            "A CLI pod needs an image.",
-            hint=(
-                "Name an image with kubectl (or oc) on its PATH. This console's "
-                f"configured default is {settings.cli_image!r}."
-            ),
-            context={"parameter": "image"},
-        )
-    if len(value) > _MAX_IMAGE_LENGTH:
-        raise Invalid(
-            f"That image reference is {len(value)} characters long "
-            f"(limit {_MAX_IMAGE_LENGTH}).",
-            context={"parameter": "image", "length": len(value),
-                     "limit": _MAX_IMAGE_LENGTH},
-        )
-    if _IMAGE_FORBIDDEN.search(value):
-        raise Invalid(
-            "An image reference cannot contain whitespace or control characters.",
-            detail=f"received {value!r}",
-            hint="This is usually a line break picked up by a copy and paste.",
-            context={"parameter": "image", "value": value},
-        )
-    return value
+    return validate_image_reference(
+        image if image is not None else settings.cli_image,
+        missing_message="A CLI pod needs an image.",
+        missing_hint=(
+            "Name an image with kubectl (or oc) on its PATH. This console's "
+            f"configured default is {settings.cli_image!r}."
+        ),
+    )
 
 
 def _pod_name() -> str:
@@ -278,7 +252,7 @@ def _pod_name() -> str:
     node — because a CLI pod is not *about* anything. A random suffix keeps two
     operators starting a session in the same second from colliding on a name.
     """
-    suffix = "".join(secrets.choice(_SUFFIX_ALPHABET) for _ in range(_SUFFIX_LENGTH))
+    suffix = random_suffix()
     return f"{NAME_PREFIX}{suffix}"
 
 

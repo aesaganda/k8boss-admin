@@ -26,11 +26,11 @@ from decimal import Decimal
 
 import pytest
 
+from app.k8s.quantities import parse_quantity
 from app.services.nodes import (
     cpu_cores,
     memory_bytes,
     node_usage,
-    parse_quantity,
     pod_capacity,
 )
 
