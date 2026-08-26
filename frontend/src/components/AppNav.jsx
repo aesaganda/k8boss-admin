@@ -117,6 +117,13 @@ export default function AppNav() {
           <RouterNavItem to="/access">Roles and bindings</RouterNavItem>
         </NavSection>
 
+        {/* §16. Above Custom Resources, not inside it: an operator is the
+            thing that installs the CRDs that section browses, so the order on
+            screen is the order of the work — install the operator, then look at
+            what it added. It is also a write surface, and the section below it
+            is a browser. */}
+        <RouterNavItem to="/portal">Operator portal</RouterNavItem>
+
         <NavSection id="explorer" title="Custom Resources" routes={['/explorer', '/custom-resources']}>
           <RouterNavItem to="/custom-resources">Instances</RouterNavItem>
           <RouterNavItem to="/explorer">API explorer</RouterNavItem>

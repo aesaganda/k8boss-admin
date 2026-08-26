@@ -41,7 +41,7 @@
 # names the exact missing grant. Both are diagnosable. What is NOT diagnosable is
 # a console that writes because a default did it quietly.
 #
-# Three features carry a THIRD gate of their own, off by default, because RBAC
+# Four features carry a THIRD gate of their own, off by default, because RBAC
 # cannot express what makes each one different from an ordinary write:
 #
 #   ADMIN_NODE_DEBUG_ENABLED     §5.5 — `create pods` is identical for an nginx
@@ -55,6 +55,14 @@
 #                                record of what changed. Its reach is set by
 #                                ADMIN_CLI_SERVICE_ACCOUNT, which this file also
 #                                cannot constrain — see the `create pods` rule.
+#   ADMIN_PORTAL_INSTALL_ENABLED §16 — the console creating one OLM
+#                                Subscription. The grant is a single `create` of
+#                                a nine-line object; what it starts is Operator
+#                                Lifecycle Manager installing somebody else's
+#                                operator and granting it whatever its bundle
+#                                asks for — with OLM's permissions, not this
+#                                ServiceAccount's, so no rule in this file
+#                                bounds it.
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -275,6 +283,42 @@ rules:
   - apiGroups: ["gateway.networking.k8s.io"]
     resources: ["gateways", "gatewayclasses", "httproutes", "grpcroutes", "referencegrants", "backendtlspolicies"]
     verbs: ["get", "list", "watch"]
+
+  # §16 the operator portal, read half. Two API groups because OLM serves two:
+  # `packages.operators.coreos.com` is an aggregated APIService run by the OLM
+  # package server — it answers 503 when OLM is degraded rather than vanishing
+  # from discovery — and `operators.coreos.com` is a set of ordinary CRDs.
+  #
+  # `get,list` and no `watch`: every §16 read is a one-shot live listing, and a
+  # verb no code path issues is a grant with no feature behind it.
+  #
+  # A cluster that does not run OLM serves neither group, and that is an ordinary
+  # fact: every source resolves to `unsupported`, the portal says so in a calm
+  # notice and nothing is coloured red. WITHHOLDING these rules on a cluster that
+  # DOES serve them is different and worse — discovery is refused, the source
+  # resolves to `unknown`, and §16 refuses to report that as absence. The catalog
+  # is then not empty, it is unanswerable, and the page says so with a partial
+  # banner rather than reading "this cluster offers no operators", which would
+  # send somebody to add a CatalogSource that is already there.
+  - apiGroups: ["packages.operators.coreos.com"]
+    resources: ["packagemanifests"]
+    verbs: ["get", "list"]
+
+  # `subscriptions` is what fills the catalog's `installed` column, and that
+  # column is tri-state: without this rule it is null for every package, never
+  # false, because "not installed" for an operator that IS installed is how you
+  # get a second Subscription and two resolutions competing for the same CRDs.
+  # `clusterserviceversions` and `installplans` answer whether OLM actually did
+  # anything about a Subscription — withheld, each row's `phase` is null with the
+  # reason, never `Failed`, which would report a healthy operator as broken.
+  # `catalogsources` says where the packages came from and whether that registry
+  # is answering. `operatorgroups` is what the subscribe plan reads to decide
+  # whether OLM can install into the target namespace at all: withheld,
+  # `target.ready` is null and the plan warns that it could not check, rather
+  # than claiming a namespace has no OperatorGroup.
+  - apiGroups: ["operators.coreos.com"]
+    resources: ["subscriptions", "clusterserviceversions", "installplans", "catalogsources", "operatorgroups"]
+    verbs: ["get", "list"]
 
   # §4 generic browse. The resource browser reaches anything the cluster serves,
   # including CRDs the console has never heard of, so it needs to enumerate the
@@ -512,6 +556,32 @@ rules:
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["clusterroles", "clusterrolebindings"]
     verbs: ["bind"]
+
+  # §16 the operator portal — THE ONE WRITE IT MAKES, and the whole grant is
+  # this line. No `update`, no `delete`, and no verb over anything OLM creates
+  # from it.
+  #
+  # Read what it reaches, because this file cannot say it in a rule. The console
+  # creates one Subscription; Operator Lifecycle Manager then resolves it and
+  # installs the operator — its InstallPlan, its ClusterServiceVersion, its
+  # ServiceAccount, and the Roles and ClusterRoles its bundle asks for. OLM does
+  # that with ITS OWN permissions, so nothing here narrows what the installed
+  # operator ends up holding, and no SelfSubjectAccessReview can preview it. The
+  # plan names the custom resources the operator will own before the write, which
+  # is the most this console can honestly show.
+  #
+  # There is deliberately no delete verb to grant: deleting a Subscription does
+  # not uninstall an operator — the ClusterServiceVersion and everything it owns
+  # stay — so a Remove button here would report an uninstall that did not happen.
+  # Both deletions are §4's, each with its own diff and its own audit row.
+  #
+  # DELETE THIS RULE to keep the console out of installing other people's
+  # software. What degrades: the Subscribe button is disabled with the reason
+  # (§11.4), the plan stays readable — it is a pure read — and the catalog and
+  # Installed views keep working from the reader rules above.
+  - apiGroups: ["operators.coreos.com"]
+    resources: ["subscriptions"]
+    verbs: ["create"]
 
   # §4 generic write over ANYTHING the cluster serves — CRDs included.
   #

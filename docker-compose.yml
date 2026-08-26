@@ -58,6 +58,7 @@ services:
       # the symptom is a feature that stays refused after the operator turned
       # it on and restarted the stack, with nothing to show them why.
       - ADMIN_ROUTER_MANAGE_ENABLED=${ADMIN_ROUTER_MANAGE_ENABLED:-false}
+      - ADMIN_PORTAL_INSTALL_ENABLED=${ADMIN_PORTAL_INSTALL_ENABLED:-false}
       - ADMIN_ROUTER_NAMESPACE=${ADMIN_ROUTER_NAMESPACE:-k8boss-router}
       - ADMIN_NODE_DEBUG_ENABLED=${ADMIN_NODE_DEBUG_ENABLED:-false}
       - ADMIN_NODE_DEBUG_NAMESPACE=${ADMIN_NODE_DEBUG_NAMESPACE:-default}

@@ -67,6 +67,58 @@ export function objectYaml({
   ].join('\n');
 }
 
+/**
+ * §16 `ChannelPayload`, as `channel_payload` in backend/app/services/portal.py
+ * emits it.
+ *
+ * Hoisted because the plan fixture needs it three times over — in `channels[]`,
+ * as `selected`, and as the older channel built by spreading it — and three
+ * hand-copied literals is how one of them ends up with `installModes: []` where
+ * the others have `null`. Those two are the tri-state this whole feature turns
+ * on: `[]` is a catalog that published modes and supports none, `null` is a
+ * catalog that published none at all.
+ */
+const PORTAL_BETA_CHANNEL = {
+  name: 'beta',
+  currentCSV: 'prometheusoperator.0.71.2',
+  version: '0.71.2',
+  displayName: 'Prometheus Operator',
+  summary: 'Run and configure Prometheus, Alertmanager and their rules as Kubernetes objects.',
+  description:
+    'The Prometheus Operator creates, configures and manages Prometheus clusters.\n\n' +
+    'It introduces the Prometheus, Alertmanager and ServiceMonitor kinds and keeps the ' +
+    'generated configuration in step with them.',
+  installModes: [
+    { type: 'OwnNamespace', supported: true },
+    { type: 'SingleNamespace', supported: true },
+    // Not filtered out: rule 11.4 needs the reason a mode is unavailable on
+    // screen, and an absent row carries none.
+    { type: 'MultiNamespace', supported: false },
+    { type: 'AllNamespaces', supported: true },
+  ],
+  minKubeVersion: '1.21.0',
+  ownedCustomResources: [
+    {
+      kind: 'Prometheus',
+      name: 'prometheuses.monitoring.coreos.com',
+      version: 'v1',
+      description: 'A running Prometheus instance and the objects it scrapes.',
+    },
+    {
+      kind: 'Alertmanager',
+      name: 'alertmanagers.monitoring.coreos.com',
+      version: 'v1',
+      description: 'An Alertmanager cluster.',
+    },
+  ],
+  containerImage: 'quay.io/prometheus-operator/prometheus-operator:v0.71.2',
+  repository: 'https://github.com/prometheus-operator/prometheus-operator',
+  capabilityLevel: 'Deep Insights',
+  certified: false,
+  categories: ['Monitoring', 'Logging & Tracing'],
+  provider: 'Red Hat',
+};
+
 export const FIXTURES = {
   authConfig: {
     enabled: false,
@@ -923,6 +975,334 @@ export const FIXTURES = {
     ],
   },
 
+  /**
+   * §16 the operator catalog.
+   *
+   * `enabled: true` — a deployment that has switched `ADMIN_PORTAL_INSTALL_ENABLED`
+   * on. The backend default is off, and §14's `routerAbsent` models that case for
+   * the router; here the on state is the default because every catalog assertion
+   * below is about the *rows*, and a page whose only action is greyed out is a
+   * worse default fixture than one where the Subscribe path is reachable.
+   *
+   * `sources` carries three entries, not six: `catalog()` resolves only
+   * PackageManifests, Subscriptions and CatalogSources — the installed view
+   * resolves its own three.
+   *
+   * Every row's `installed` is a real boolean here because the Subscription
+   * listing succeeded. The `null` case is a property of the *listing*, not of a
+   * row, so specs that want it map the whole set — mixing `null` and `false`
+   * would be a shape `package_row` cannot produce.
+   */
+  portalCatalog: {
+    items: [
+      {
+        id: 'olm/community-operators/prometheus',
+        name: 'prometheus',
+        displayName: 'Prometheus Operator',
+        provider: 'Red Hat',
+        providerUrl: 'https://prometheus-operator.dev',
+        catalog: 'community-operators',
+        catalogNamespace: 'olm',
+        catalogDisplayName: 'Community Operators',
+        defaultChannel: 'beta',
+        channels: ['beta', 'stable'],
+        version: '0.71.2',
+        summary: 'Run and configure Prometheus as Kubernetes objects.',
+        categories: ['Monitoring', 'Logging & Tracing'],
+        capabilityLevel: 'Deep Insights',
+        certified: false,
+        installModes: ['OwnNamespace', 'SingleNamespace', 'AllNamespaces'],
+        installed: false,
+        installations: [],
+      },
+      {
+        id: 'olm/community-operators/grafana-operator',
+        name: 'grafana-operator',
+        displayName: 'Grafana Operator',
+        provider: 'Grafana Labs',
+        providerUrl: null,
+        catalog: 'community-operators',
+        catalogNamespace: 'olm',
+        catalogDisplayName: 'Community Operators',
+        defaultChannel: 'v5',
+        channels: ['v5'],
+        // Null, not "0": this catalog entry publishes no CSV description for its
+        // default channel, which is ordinary for a pruned catalog.
+        version: null,
+        summary: 'Manage Grafana instances and dashboards.',
+        categories: ['Monitoring'],
+        capabilityLevel: null,
+        certified: null,
+        installModes: null,
+        installed: true,
+        installations: [
+          {
+            id: 'kube-system/grafana-operator',
+            name: 'grafana-operator',
+            namespace: 'kube-system',
+            channel: 'v5',
+          },
+        ],
+      },
+    ],
+    continue: null,
+    remaining: null,
+    partial: false,
+    unavailable: [],
+    sources: [
+      {
+        api: 'packages',
+        kind: 'PackageManifest',
+        group: 'packages.operators.coreos.com',
+        version: 'v1',
+        plural: 'packagemanifests',
+        label: 'Catalog contents',
+        required: true,
+        state: 'available',
+        detail: 'This cluster serves packages.operators.coreos.com/v1 packagemanifests.',
+      },
+      {
+        api: 'subscriptions',
+        kind: 'Subscription',
+        group: 'operators.coreos.com',
+        version: 'v1alpha1',
+        plural: 'subscriptions',
+        label: 'Subscriptions',
+        required: true,
+        state: 'available',
+        detail: 'This cluster serves operators.coreos.com/v1alpha1 subscriptions.',
+      },
+      {
+        api: 'catalogsources',
+        kind: 'CatalogSource',
+        group: 'operators.coreos.com',
+        version: 'v1alpha1',
+        plural: 'catalogsources',
+        label: 'Catalogs',
+        required: false,
+        state: 'available',
+        detail: 'This cluster serves operators.coreos.com/v1alpha1 catalogsources.',
+      },
+    ],
+    catalogs: [
+      {
+        id: 'olm/community-operators',
+        name: 'community-operators',
+        namespace: 'olm',
+        displayName: 'Community Operators',
+        publisher: 'OperatorHub.io',
+        sourceType: 'grpc',
+        image: 'quay.io/operatorhubio/catalog:latest',
+        state: 'READY',
+        healthy: true,
+        detail: "The catalog's last observed connection state is READY.",
+        age_seconds: 864000,
+      },
+      {
+        id: 'olm/private-mirror',
+        name: 'private-mirror',
+        namespace: 'olm',
+        displayName: 'Private mirror',
+        publisher: 'Platform team',
+        sourceType: 'grpc',
+        image: 'registry.example:5000/catalog:2026-08',
+        // Null, not false: this CatalogSource was created moments ago and the
+        // catalog operator has published no connection state for it. Calling
+        // that unhealthy sends somebody to debug a registry that is starting.
+        state: null,
+        healthy: null,
+        detail: 'This catalog has published no connection state yet.',
+        age_seconds: 30,
+      },
+    ],
+    truncated: [],
+    enabled: true,
+    enabledDetail: 'This deployment permits subscribing to catalog operators.',
+  },
+
+  /**
+   * §16 installed operators. Two rows, and the second is why the page exists.
+   *
+   * `prometheus` is installed and running. `grafana-operator` has
+   * `installedCSV: null` and `phase: null` at once — OLM has been asked and has
+   * done nothing yet, because its InstallPlan is waiting for approval. Neither
+   * null may render as `Failed` and neither may render as blank: `phaseDetail`
+   * is the sentence that says which of the two nulls this is.
+   */
+  portalInstalled: {
+    items: [
+      {
+        id: 'monitoring/prometheus',
+        name: 'prometheus',
+        namespace: 'monitoring',
+        package: 'prometheus',
+        channel: 'beta',
+        catalog: 'community-operators',
+        catalogNamespace: 'olm',
+        installPlanApproval: 'Automatic',
+        startingCSV: null,
+        installedCSV: 'prometheusoperator.0.71.2',
+        currentCSV: 'prometheusoperator.0.71.2',
+        state: 'AtLatestKnown',
+        phase: 'Succeeded',
+        phaseDetail: 'install strategy completed with no errors',
+        approvalRequired: false,
+        installPlanDetail: 'InstallPlan install-abc12 is Complete.',
+        installPlan: 'install-abc12',
+        conditions: [],
+        age_seconds: 864000,
+      },
+      {
+        id: 'kube-system/grafana-operator',
+        name: 'grafana-operator',
+        namespace: 'kube-system',
+        package: 'grafana-operator',
+        // Null: this Subscription names no channel, so OLM follows the
+        // package's default — which can change under it.
+        channel: null,
+        catalog: 'community-operators',
+        catalogNamespace: 'olm',
+        installPlanApproval: 'Manual',
+        startingCSV: null,
+        // OLM has installed nothing. Not a failed install, and not a failed
+        // read — the two are distinguished by `phaseDetail`, never by the
+        // phase degrading to something that renders red.
+        installedCSV: null,
+        currentCSV: 'grafana-operator.v5.6.0',
+        state: 'UpgradePending',
+        phase: null,
+        phaseDetail:
+          'OLM has not installed anything for this Subscription yet — it publishes no ' +
+          'installedCSV. Resolution may be pending, an InstallPlan may be waiting for ' +
+          'approval, or the namespace may have no OperatorGroup.',
+        approvalRequired: true,
+        installPlanDetail:
+          'This install is waiting for somebody to approve its InstallPlan; nothing is ' +
+          'installed until they do.',
+        installPlan: 'install-xyz98',
+        // Only conditions the API server reported `status: "True"` reach a row —
+        // `_subscription_conditions` drops the rest — so this is the one that
+        // answers "I subscribed and nothing happened".
+        conditions: [
+          {
+            type: 'InstallPlanPending',
+            status: 'True',
+            reason: 'RequiresApproval',
+            message: 'an InstallPlan for grafana-operator.v5.6.0 is waiting for approval',
+          },
+        ],
+        age_seconds: 3600,
+      },
+    ],
+    continue: null,
+    remaining: null,
+    partial: false,
+    unavailable: [],
+    sources: [
+      {
+        api: 'subscriptions',
+        kind: 'Subscription',
+        group: 'operators.coreos.com',
+        version: 'v1alpha1',
+        plural: 'subscriptions',
+        label: 'Subscriptions',
+        required: true,
+        state: 'available',
+        detail: 'This cluster serves operators.coreos.com/v1alpha1 subscriptions.',
+      },
+      {
+        api: 'clusterserviceversions',
+        kind: 'ClusterServiceVersion',
+        group: 'operators.coreos.com',
+        version: 'v1alpha1',
+        plural: 'clusterserviceversions',
+        label: 'Installed operators',
+        required: false,
+        state: 'available',
+        detail: 'This cluster serves operators.coreos.com/v1alpha1 clusterserviceversions.',
+      },
+      {
+        api: 'installplans',
+        kind: 'InstallPlan',
+        group: 'operators.coreos.com',
+        version: 'v1alpha1',
+        plural: 'installplans',
+        label: 'Install plans',
+        required: false,
+        state: 'available',
+        detail: 'This cluster serves operators.coreos.com/v1alpha1 installplans.',
+      },
+    ],
+    truncated: [],
+    enabled: true,
+    enabledDetail: 'This deployment permits subscribing to catalog operators.',
+  },
+
+  /**
+   * §16 `POST /portal/subscriptions/plan`. Writes nothing.
+   *
+   * `consequences: []` and `target.ready: true` — the namespace has exactly one
+   * OperatorGroup and this channel supports the mode it demands, which is the
+   * only combination that earns a `true`. Specs that need a blocked write
+   * replace `consequences`, because the acknowledgement handshake is keyed on
+   * the codes and nothing else.
+   */
+  portalPlan: {
+    package: 'prometheus',
+    namespace: 'monitoring',
+    channel: 'beta',
+    catalog: 'community-operators',
+    catalogNamespace: 'olm',
+    installPlanApproval: 'Automatic',
+    // The *catalog's* display name, not the package's — `plan()` reads
+    // `status.catalogSourceDisplayName` into this key.
+    displayName: 'Community Operators',
+    provider: 'Red Hat',
+    defaultChannel: 'beta',
+    channels: [
+      PORTAL_BETA_CHANNEL,
+      { ...PORTAL_BETA_CHANNEL, name: 'stable', currentCSV: 'prometheusoperator.0.68.0', version: '0.68.0' },
+    ],
+    selected: PORTAL_BETA_CHANNEL,
+    target: {
+      namespace: 'monitoring',
+      operatorGroups: [
+        {
+          name: 'monitoring-operators',
+          namespace: 'monitoring',
+          targetNamespaces: ['monitoring'],
+          publishedNamespaces: ['monitoring'],
+          selector: false,
+          allNamespaces: false,
+        },
+      ],
+      requiredInstallMode: 'OwnNamespace',
+      ready: true,
+      detail:
+        'OperatorGroup monitoring-operators requires OwnNamespace, which this channel supports.',
+    },
+    existing: [],
+    consequences: [],
+    document: [
+      'apiVersion: operators.coreos.com/v1alpha1',
+      'kind: Subscription',
+      'metadata:',
+      '  name: prometheus',
+      '  namespace: monitoring',
+      'spec:',
+      '  name: prometheus',
+      '  channel: beta',
+      '  source: community-operators',
+      '  sourceNamespace: olm',
+      '  installPlanApproval: Automatic',
+      '',
+    ].join('\n'),
+    partial: false,
+    unavailable: [],
+    enabled: true,
+    enabledDetail: 'This deployment permits subscribing to catalog operators.',
+  },
+
   emptyList: { items: [], continue: null, remaining: null, partial: false, unavailable: [] },
 
   // §13. What the exposure dialog's Service picker reads. `checkout` is
@@ -998,6 +1378,10 @@ export async function mockApi(
     routeDetail = null,
     routerStatus = null,
     routerInstall = null,
+    portalCatalog = null,
+    portalInstalled = null,
+    portalPlan = null,
+    portalSubscribe = null,
   } = {},
 ) {
   // Counted so a spec can hand back a different manifest on the second read —
@@ -1375,6 +1759,78 @@ export async function mockApi(
         });
       }
       return json(routerStatus ?? FIXTURES.routerAbsent);
+    }
+
+    /* ── §16 the operator portal ───────────────────────────────────────── */
+
+    if (path === '/portal/catalog') return json(portalCatalog ?? FIXTURES.portalCatalog);
+    // Ordered before `/portal/subscriptions`: the plan lives under it, and a
+    // router that matched the listing first would answer a plan with a table.
+    if (path === '/portal/subscriptions/plan') {
+      const body = JSON.parse(route.request().postData() || '{}');
+      return json(
+        portalPlan
+          ? portalPlan(body)
+          : {
+              ...FIXTURES.portalPlan,
+              // The request echoed back, because a plan *is* the caller's own
+              // request rendered against the catalog. `consequences` is the one
+              // thing never echoed — it is derived from the cluster, and a mock
+              // that returned whatever the client asked for would let a UI that
+              // never reads them pass.
+              package: body.package,
+              namespace: body.namespace,
+              channel: body.channel || FIXTURES.portalPlan.channel,
+              installPlanApproval: body.installPlanApproval,
+              target: { ...FIXTURES.portalPlan.target, namespace: body.namespace },
+            },
+      );
+    }
+    if (path === '/portal/subscriptions') {
+      if (route.request().method() === 'POST') {
+        const body = JSON.parse(route.request().postData() || '{}');
+        return json(
+          portalSubscribe
+            ? portalSubscribe(body)
+            : {
+                dryRun: body.dryRun !== false,
+                // Derived, never echoed: §1.5 makes `applied` the only evidence
+                // a cluster changed — and here it is evidence that one
+                // Subscription object exists, never that an operator installed.
+                applied: body.dryRun === false,
+                verb: 'create',
+                diff: {
+                  before: '',
+                  after: FIXTURES.portalPlan.document,
+                  unified:
+                    '--- live\n+++ projected\n@@ -0,0 +1,11 @@\n' +
+                    FIXTURES.portalPlan.document.replace(/^(?!$)/gm, '+'),
+                  changed: true,
+                },
+                resourceVersion: '77201',
+                // §1.5's own key, left alone: it carries the API server's
+                // Warning: headers for this create, which is a different thing
+                // from the plan's consequences below.
+                warnings: [],
+                auditId: 8100,
+                package: body.package,
+                channel: body.channel,
+                catalog: body.catalog,
+                installPlanApproval: body.installPlanApproval,
+                // What OLM is *expected* to install. Not a claim that it did.
+                expectedCSV: FIXTURES.portalPlan.selected.currentCSV,
+                expectedVersion: FIXTURES.portalPlan.selected.version,
+                // The namespace verdict, under its own key: §1.5's `target`
+                // above is the group-version-resource this write addressed and
+                // is left alone.
+                installTarget: { ...FIXTURES.portalPlan.target, namespace: body.namespace },
+                consequences: [],
+                partial: false,
+                unavailable: [],
+              },
+        );
+      }
+      return json(portalInstalled ?? FIXTURES.portalInstalled);
     }
 
     // Everything else: a well-formed, complete, empty listing. Complete on

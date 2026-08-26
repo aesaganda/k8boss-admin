@@ -274,6 +274,28 @@ class Settings(BaseSettings):
         ),
     )
 
+    # -- the operator portal (§16) -----------------------------------------
+    portal_install_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "ADMIN_PORTAL_INSTALL_ENABLED", "portal_install_enabled"
+        ),
+        description=(
+            "Allows this console to create Operator Lifecycle Manager "
+            "Subscriptions from the operator portal (§16). Its own gate on top "
+            "of admin_allow_mutations, and the reason is what a Subscription "
+            "hands over: OLM installs software this console did not review, "
+            "under whatever RBAC that operator's ClusterServiceVersion asks for "
+            "— routinely cluster-wide, and granted by OLM rather than by the "
+            "caller. An operator may reasonably want every other write in this "
+            "console without wanting it to be the place third-party software "
+            "enters their cluster. Off does not hide the portal: the catalog, "
+            "the rendered Subscription and its diff all still render, because "
+            "reading what would be created is a read, and deciding whether to "
+            "turn this on requires it."
+        ),
+    )
+
     # -- console authentication ------------------------------------------
     auth_enabled: bool = Field(
         default=False,

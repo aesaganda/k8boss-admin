@@ -1760,3 +1760,566 @@ a friendlier URL.
 
 Note what a pod left behind here holds: a live API credential for as long as it
 exists. §5.5's leaked pod holds a node's filesystem; this one holds a token.
+
+---
+
+## 16. The operator portal
+
+What this cluster's own catalogs offer, what somebody already subscribed to, and
+the one object this console writes to add to that list: a `Subscription`.
+
+**The console ships no catalog.** Every package in §16 comes from a
+`CatalogSource` the cluster already runs. There is no bundled index, no curated
+list, and no network call to anywhere but the API server. A cluster with no
+catalogs has an empty portal, which is the true answer; a cluster with a private
+mirror gets its own contents with no configuration here.
+
+**And the console installs nothing.** It creates one `Subscription`. Operator
+Lifecycle Manager — the cluster's software, not this console's — resolves it,
+creates an `InstallPlan`, and installs a `ClusterServiceVersion`, on its own
+schedule and only if the namespace and the approval strategy let it. §14 is a
+departure from *not a deployment engine*; §16 is not a second one. It writes one
+object into an API the cluster already serves, exactly as §4's YAML editor could,
+with discovery and a pre-write check in front of it.
+`docs/adr-0005-operator-portal.md` records the argument on both sides, including
+what it costs.
+
+### 16.1 What it is, and what it is not
+
+| It does | It does not |
+|---|---|
+| Read PackageManifests and render what a channel would install | Ship, mirror or curate a catalog |
+| Create one `Subscription`, through the funnel | Install an operator — OLM does that |
+| Report whether OLM *can* install into the target namespace | Create the OperatorGroup that would let it |
+| Report an outstanding InstallPlan and that it is holding the install | Approve one |
+| Say what removing an operator actually takes | Uninstall one (§16.9) |
+
+`applied: true` on §16.7 means one object was created. Nothing in that response
+may be read as evidence that an operator is running. This is §0.3's rule about
+dry runs pointed one API further out: the write succeeded, and the thing the
+operator wanted has not happened yet.
+
+### 16.2 The six OLM APIs, and three-valued source state
+
+Two API groups, six resources. Every one is resolved through discovery and never
+assumed: these are CRDs (and, for `packagemanifests`, an aggregated APIService),
+and which version a cluster serves depends on which release of OLM it installed.
+
+| `api` | Kind | Group | Versions tried | `required` | Without it |
+|---|---|---|---|---|---|
+| `packages` | `PackageManifest` | `packages.operators.coreos.com` | `v1` | **yes** | There is no catalog to browse |
+| `subscriptions` | `Subscription` | `operators.coreos.com` | `v1alpha1` | **yes** | There is nothing to list and nothing to write |
+| `clusterserviceversions` | `ClusterServiceVersion` | `operators.coreos.com` | `v1alpha1` | no | Every row's `phase` is `null` (§16.4) |
+| `installplans` | `InstallPlan` | `operators.coreos.com` | `v1alpha1` | no | `approvalRequired` is `null` |
+| `catalogsources` | `CatalogSource` | `operators.coreos.com` | `v1alpha1` | no | `catalogs` is `null`, never `[]` |
+| `operatorgroups` | `OperatorGroup` | `operators.coreos.com` | `v1`, then `v1alpha2` | no | `target.ready` is `null` (§16.5) |
+
+`operatorgroups` is tried at two versions because `v1alpha2` is what pre-0.17 OLM
+served and long-lived clusters still do. Pinning `v1` 404s there, and a 404 reads
+as "this namespace has no OperatorGroup" — the single most consequential wrong
+answer this section can give, because it is the reason a subscription installs
+nothing.
+
+`sources[]` is reported on §16.3 and §16.4, one entry per API, **including the
+ones that are fine**, because rule 11.4 needs a reason to put on a disabled
+control and an absent key carries none:
+
+```json
+{"api": "packages", "kind": "PackageManifest",
+ "group": "packages.operators.coreos.com", "version": "v1",
+ "plural": "packagemanifests", "label": "Catalog contents", "required": true,
+ "state": "available",
+ "detail": "This cluster serves packages.operators.coreos.com/v1 packagemanifests."}
+```
+
+State is three-valued, exactly as §13.2's backends are, and the third is not a
+variant of the second:
+
+- `available` — discovery lists the resource. `version` names the one served.
+- `unsupported` — discovery answered and it is not there. **OLM is not installed
+  here. An ordinary fact**, rendered as a calm empty state and never as an error
+  (§11.7).
+- `unknown` — discovery could not answer. **We do not know** whether this cluster
+  serves it. `version` is `null` rather than the first candidate: naming a version
+  nobody confirmed is served lets a caller build a URL out of it.
+
+**Only `unknown` makes the envelope partial**, and only `unknown` produces an
+`unavailable[]` entry. A cluster without OLM is not a cluster whose operators we
+failed to read; raising the §1.2 banner on every one of them is the banner nobody
+reads. The `reason` token on the entry is the failure discovery actually raised —
+`forbidden` when the read was refused, `unreachable` when the package server did
+not answer — because those two send somebody to two different places.
+
+A single `unknown` outranks any number of `unsupported` misses across the
+candidate versions. Failing to read `v1` does not entitle the console to conclude
+from the `v1alpha2` miss that the cluster has no OperatorGroups.
+
+### 16.3 `GET /api/portal/catalog?limit=`
+
+Every package this cluster's catalogs offer. The §1.2 envelope plus `sources[]`
+(§16.2), `catalogs`, `truncated[]` and the §16.8 gate:
+
+```json
+{
+  "items": [ PackageRow ],
+  "continue": null, "remaining": null, "partial": false, "unavailable": [],
+  "sources": [ SourceRow ],
+  "catalogs": [ CatalogRow ],
+  "truncated": [ {"kind": "PackageManifest", "shown": 500, "remaining": null,
+                  "detail": "More packages are in the cluster's catalogs than are shown."} ],
+  "enabled": false,
+  "enabledDetail": "Subscribing is switched off on this deployment: ADMIN_PORTAL_INSTALL_ENABLED is not set. …"
+}
+```
+
+Read **cluster-wide**, never per namespace. PackageManifests are namespaced
+objects served by an aggregated API server, and listing them in one namespace
+returns the global catalogs plus that namespace's local ones — so a
+namespace-scoped read would silently omit another team's private catalog from a
+page whose whole purpose is *what can this cluster install*.
+
+`continue` is deliberately **not** propagated, for §13.4's reason with a second
+one on top: three independent listings cannot share one cursor, and the package
+server does not implement continuation at all, so a token handed back here would
+be one this endpoint could not honour. What a bound left out is reported in
+`truncated[]` instead of behind a paging control that lies.
+
+A `PackageRow`:
+
+```json
+{
+  "id": "olm/community-operators/prometheus",
+  "name": "prometheus",
+  "displayName": "Prometheus Operator",
+  "provider": "Red Hat", "providerUrl": "https://…",
+  "catalog": "community-operators", "catalogNamespace": "olm",
+  "catalogDisplayName": "Community Operators",
+  "defaultChannel": "beta", "channels": ["beta", "stable"],
+  "version": "0.79.0",
+  "summary": "Manages Prometheus and Alertmanager…",
+  "categories": ["Monitoring", "Logging & Tracing"],
+  "capabilityLevel": "Deep Insights",
+  "certified": null,
+  "installModes": ["OwnNamespace", "SingleNamespace", "AllNamespaces"],
+  "installed": true,
+  "installations": [ SubscriptionRow ]
+}
+```
+
+- `version`, `summary`, `categories`, `capabilityLevel`, `certified` and
+  `installModes` are read off the **default channel's** CSV description. All are
+  `null` (or `[]` for `categories`) when the catalog published none for it — a
+  real state for a pruned catalog, and not the same as version zero.
+- `certified` and `capabilityLevel` are the **publisher's own claims**, carried
+  verbatim from CSV annotations because this console has no way to verify either.
+  `certified` is tri-state: `null` for absent *and* for an annotation that is
+  neither spelling of a boolean. Guessing `false` from a parse failure would
+  render "not certified" for an operator whose publisher wrote `True` — a claim
+  about somebody else's software made from a string this console failed to read.
+- `installModes` here is the *supported* mode names only, and is `null` — never
+  `[]` — when the catalog published no `installModes` block. An empty list would
+  read as "this operator supports no install mode", which is a claim no
+  PackageManifest makes.
+- `installations` is every Subscription on the cluster naming this package, keyed
+  on `spec.name` alone rather than on the catalog triple: an operator installed
+  from a mirror is still installed.
+
+**`installed` is tri-state, and `false` is a claim.**
+
+- `true` — the Subscription listing succeeded and matched.
+- `false` — the listing succeeded and matched nothing.
+- `null` — **the Subscription listing did not happen**, because OLM's
+  Subscription API was `unknown` or the read failed. `installations` is `null`
+  with it.
+
+A client must never render `null` as "not installed". This is not a cosmetic
+error here: the operator subscribes again, and a second Subscription for the same
+package is how two ClusterServiceVersions end up racing to own the same CRDs. The
+same reasoning is why a truncated Subscription listing produces a `truncated[]`
+entry saying, in as many words, that a package shown as not installed may be
+installed by one that was not seen.
+
+`catalogs` is `null` — **never `[]`** — when the CatalogSource listing did not
+happen, because "this cluster has no catalogs" is a real claim and an unreadable
+listing does not support it. A `CatalogRow`:
+
+```json
+{"id": "olm/community-operators", "name": "community-operators",
+ "namespace": "olm", "displayName": "Community Operators",
+ "publisher": "Red Hat", "sourceType": "grpc", "image": "quay.io/…",
+ "state": "READY", "healthy": true,
+ "detail": "The catalog's last observed connection state is READY.",
+ "age_seconds": 86400}
+```
+
+`healthy` is `null` until the catalog operator publishes a connection state. A
+freshly created CatalogSource has no status at all, and reporting that as
+unhealthy sends somebody to debug a registry that is merely still starting.
+
+### 16.4 `GET /api/portal/subscriptions?namespace=&limit=`
+
+What somebody already installed. The §1.2 envelope plus `sources[]`,
+`truncated[]` and the §16.8 gate. Omit `namespace` to read every namespace this
+deployment may read.
+
+Each Subscription is joined to the ClusterServiceVersion it names and to its
+outstanding InstallPlan. The join is by **`(namespace, name)`**, not by name: OLM
+copies a CSV owned by an all-namespaces OperatorGroup into every other namespace,
+and a copy in `kube-system` is not the installation a Subscription in
+`monitoring` is waiting for.
+
+A `SubscriptionRow`:
+
+```json
+{
+  "id": "monitoring/prometheus", "name": "prometheus", "namespace": "monitoring",
+  "package": "prometheus", "channel": "beta",
+  "catalog": "community-operators", "catalogNamespace": "olm",
+  "installPlanApproval": "Automatic", "startingCSV": null,
+  "installedCSV": "prometheusoperator.0.79.0",
+  "currentCSV": "prometheusoperator.0.79.0",
+  "state": "AtLatestKnown",
+  "phase": "Succeeded", "phaseDetail": "install strategy completed with no errors",
+  "approvalRequired": false,
+  "installPlanDetail": "InstallPlan install-x7kd2 is Complete.",
+  "installPlan": "install-x7kd2",
+  "conditions": [{"type": "CatalogSourcesUnhealthy", "status": "True",
+                  "reason": "…", "message": "…"}],
+  "age_seconds": 86400
+}
+```
+
+**`spec` and `status` are kept apart on purpose.** `channel`,
+`installPlanApproval` and `startingCSV` are what somebody asked for.
+`installedCSV` is the only evidence anything was installed. A row that merged
+them would report an operator as installed the moment somebody typed its name —
+the §1.5 rule that a successful dry run is not a write, one API further out.
+
+**`installedCSV: null` means OLM has installed nothing for this Subscription
+yet.** It is not a failed read, and it is not a failed install.
+
+**`phase` is tri-state, and there are two different reasons it is `null`.**
+`phaseDetail` always carries the sentence saying which:
+
+| `phase` | When | `phaseDetail` says |
+|---|---|---|
+| a CSV phase (`Succeeded`, `Installing`, `Failed`, …) | The CSV was read | the CSV's own `status.message` or `reason` |
+| `null` | **The CSV listing failed or was truncated** | that the read did not happen, and that this is not a failed install |
+| `null` | **OLM has published no `installedCSV`** | that resolution may be pending, an InstallPlan may be waiting for approval, or the namespace may have no OperatorGroup |
+| `null` | The Subscription names a CSV that is not in the namespace | which CSV, and which namespace it is missing from |
+
+A client renders `phase` through the tri-state cell with
+`reason={row.phaseDetail}`. It must **never** default it to `Failed` or to a
+blank: reporting a healthy operator as broken during an API outage is the defect
+standard aimed at the one column an operator reads to decide whether to
+reinstall.
+
+A truncated CSV or InstallPlan listing is treated as *did not read* for the whole
+join, not just for the rows that fell outside the page, and says so in
+`truncated[]`. A Subscription whose CSV was on page two reports an unknown phase
+rather than a missing installation.
+
+`approvalRequired` is tri-state for the same reason one field over: `null` when
+the InstallPlan listing did not happen, or when the Subscription names an
+InstallPlan that is not in the listing. `true` means the install is stopped dead
+until somebody approves it — which this console does not do (§16.9).
+
+`conditions[]` carries the Subscription conditions that are currently `True`,
+verbatim rather than collapsed into a boolean. `ResolutionFailed` and
+`CatalogSourcesUnhealthy` are the two that answer *I subscribed and nothing
+happened*.
+
+### 16.5 `POST /api/portal/subscriptions/plan`
+
+The Subscription that would be created, and what will stop it.
+
+```json
+{"package": "prometheus", "namespace": "monitoring",
+ "channel": null, "catalog": null, "catalogNamespace": null,
+ "installPlanApproval": "Automatic", "startingCSV": null}
+```
+
+`channel` defaults to the package's `status.defaultChannel`. Naming a channel the
+package does not publish is `422 invalid` listing the ones it does — rather than
+silently subscribing to the default and installing something nobody chose.
+`catalog` is optional and required in one case: when two catalogs offer a package
+of the same name, the plan refuses to guess. They are different software with
+different publishers, and picking the first would subscribe to whichever one the
+API server happened to list first.
+
+**Ungated and it writes nothing** — no preflight, no audit row, and it renders on
+a console where `ADMIN_PORTAL_INSTALL_ENABLED` is off (§16.8). It is a `POST`
+only because its body is a request, not a resource path; a client's method for it
+must be retryable the way §13.5's render and §14.3's plan are, or a transient
+`503` makes the operator refill the form.
+
+The response:
+
+```json
+{
+  "package": "prometheus", "namespace": "monitoring", "channel": "beta",
+  "catalog": "community-operators", "catalogNamespace": "olm",
+  "installPlanApproval": "Automatic",
+  "displayName": "Community Operators", "provider": "Red Hat",
+  "defaultChannel": "beta",
+  "channels": [ ChannelPayload ], "selected": ChannelPayload,
+  "target": { … },
+  "existing": [ SubscriptionRow ],
+  "consequences": [ … ],
+  "document": "apiVersion: operators.coreos.com/v1alpha1\nkind: Subscription\n…",
+  "partial": false, "unavailable": [],
+  "enabled": false, "enabledDetail": "…"
+}
+```
+
+A `ChannelPayload` is one channel in full —
+`{name, currentCSV, version, displayName, summary, description, installModes,
+minKubeVersion, ownedCustomResources, containerImage, repository,
+capabilityLevel, certified, categories, provider}`. `installModes` here is the
+full `[{type, supported}]` list, `null` when the catalog published none.
+`ownedCustomResources` is `[{kind, name, version, description}]` — the CRDs the
+channel's CSV declares it owns, and the visible half of what installing this
+operator does to a cluster, listed before the write rather than discovered
+afterwards in the API explorer. `description` is the catalog's long-form text,
+carried on the channel rather than on a §16.3 row because it is routinely tens of
+kilobytes and a listing of three hundred packages carrying it is a response
+nobody can use. It is the publisher's copy and is rendered as text (§16.9).
+
+`document` is the object that would be created, rendered as YAML: named after the
+package, with the caller's channel, catalog, approval strategy and optional
+`startingCSV`, and **nothing else**. No labels of this console's own, no
+annotations, no `config` block. An operator reading the diff sees exactly the
+fields they filled in, and this console leaves no fingerprint on an object OLM
+will go on to manage. Naming it after the package is what OLM's own tooling does,
+so a Subscription created here and one created with `kubectl` collide rather than
+quietly coexisting — and a collision is a `409` the operator can read.
+
+**The target namespace verdict.** OLM installs an operator only into a namespace
+governed by **exactly one** OperatorGroup whose scope the operator supports.
+Getting either wrong produces a Subscription that is created and installs
+nothing — §14's failure with a namespace in place of a controller. `target`
+reports it before the write:
+
+```json
+"target": {
+  "namespace": "monitoring",
+  "operatorGroups": [ {"name": "monitoring-og", "namespace": "monitoring",
+                       "targetNamespaces": ["monitoring"],
+                       "publishedNamespaces": ["monitoring"],
+                       "selector": false, "allNamespaces": false} ],
+  "requiredInstallMode": "OwnNamespace",
+  "ready": true,
+  "detail": "OperatorGroup monitoring-og requires OwnNamespace, which this channel supports."
+}
+```
+
+**`ready` is tri-state and `null` is the common third state.** It is `true` only
+when every check actually ran and passed:
+
+- `false` — the namespace has no OperatorGroup, or more than one, or the required
+  install mode is one this channel does not declare.
+- `null` — the OperatorGroup listing could not be read, or the group selects its
+  namespaces **by label** (which this console does not evaluate, so
+  `requiredInstallMode` is `null` too), or the catalog published no install modes
+  to check against.
+
+`operatorGroups` is `null` when the listing did not happen and `[]` when the
+namespace genuinely has none. Those are the two answers that must never be
+confused: `[]` means OLM will refuse to install, `null` means we do not know, and
+reporting the second as the first puts a blocking warning in front of a namespace
+that is perfectly configured. An `OperatorGroupRow`'s `allNamespaces` is `null`
+for a selector-based group for the same reason — an empty target list reported as
+"all namespaces" is a different group.
+
+`existing` is the Subscriptions in the target namespace already naming this
+package, or `null` when that listing did not happen.
+
+**The consequence codes.** A closed set — the frontend renders one control per
+entry and §16.7 refuses unless every code is acknowledged by name, so a new code
+is a contract change rather than a new string:
+
+| `code` | Raised when | What it means for the install |
+|---|---|---|
+| `no_operator_group` | The namespace has zero OperatorGroups | The Subscription is created; OLM marks the CSV `Failed` with `NoOperatorGroup`. **Nothing installs, and the operator keeps looking subscribed.** |
+| `too_many_operator_groups` | The namespace has more than one | `TooManyOperatorGroups`, nothing installs — and **every operator already in that namespace is affected too**, not only this one |
+| `operator_group_unknown` | The OperatorGroup listing could not be read | Unknown. The Subscription is created either way; if the namespace has none, it fails as above |
+| `install_mode_unsupported` | The group's scope requires a mode this channel does not declare | `UnsupportedOperatorGroup`, nothing installs |
+| `install_modes_unknown` | The catalog published no install modes, **or** the group selects namespaces by label | The scope check could not run. If the operator does not support the scope, `UnsupportedOperatorGroup` |
+| `already_subscribed` | A Subscription for this package already exists in the namespace | The create is refused with a conflict. Written under another name, two Subscriptions would resolve the same package independently |
+| `subscriptions_unknown` | That listing could not be read | Unknown. If one already exists, a second leaves two resolutions competing for the same custom resources |
+| `manual_approval` | `installPlanApproval: "Manual"` | OLM creates an InstallPlan and stops. **Nothing installs, and nothing upgrades later,** until it is approved — which this console does not do |
+
+Every entry carries `{code, label, consequence, mitigation}` and answers *what
+happens to my cluster* before *what to do instead*, in that order (§13.6). Note
+that three of the eight — the `_unknown` codes — report a check that **could not
+run** rather than one that failed, and they are acknowledgeable on exactly the
+same terms as the rest. Letting a check that did not happen pass silently is the
+swallowed `[]` of §0.1 wearing a different shape, and a silent `null` here is a
+Subscription that installs nothing.
+
+The plan's own reads fail independently. An unreadable OperatorGroup listing
+costs `target.ready` and adds an `unavailable[]` entry; the rendered document is
+returned regardless. `partial` and `unavailable` are the §1.2 fields on an object
+rather than a collection.
+
+### 16.6 `consequences[]`, and the acknowledgement that gates a write
+
+**§16.7 is refused with `422 invalid` unless `acknowledgeConsequences` names
+every code the plan returned.** `context.unacknowledged` lists the missing ones
+and the `hint` names them.
+
+The key is `consequences`, not `warnings`, and the name is load-bearing rather
+than cosmetic: §1.5 already owns `warnings` for the API server's own `Warning:`
+headers on this create. A §16 list written into that key would drop a
+deprecation notice about the very object being created, which is the one place
+an operator would actually want to read one.
+
+This copies §13.6's `acknowledgeLossy` deliberately, and for the same reason:
+consenting to a consequence is a separate act from requesting the change. The
+list is per-code, not a boolean, so a caller that acknowledged one set and then
+changed the namespace has to read the new one. Extra codes are accepted; missing
+ones are not.
+
+**The plan is recomputed inside the write**, never trusted from the caller. A
+client that read a plan, edited the namespace and posted the old acknowledgements
+would otherwise be consenting to consequences that no longer describe the write.
+
+### 16.7 `POST /api/portal/subscriptions`
+
+The §16.5 body plus `acknowledgeConsequences[]` and `dryRun` (default `true`).
+Returns the §1.5 mutation response — `{dryRun, applied, verb, target, diff,
+resourceVersion, warnings, auditId}` — with §16's own fields riding along:
+
+```json
+{
+  "dryRun": false, "applied": true, "verb": "create",
+  "diff": {"before": null, "after": "apiVersion: …", "unified": "…", "changed": true},
+  "resourceVersion": "40219",
+  "warnings": [],
+  "auditId": 8817,
+  "package": "prometheus", "channel": "beta", "catalog": "community-operators",
+  "installPlanApproval": "Automatic",
+  "expectedCSV": "prometheusoperator.0.79.0", "expectedVersion": "0.79.0",
+  "target": {"group": "operators.coreos.com", "version": "v1alpha1",
+             "resource": "subscriptions", "namespace": "monitoring",
+             "name": "prometheus"},
+  "installTarget": { "namespace": "monitoring", "operatorGroups": [ … ],
+                     "requiredInstallMode": "OwnNamespace", "ready": true, "detail": "…" },
+  "consequences": [ … ],
+  "partial": false, "unavailable": []
+}
+```
+
+**Nothing here overwrites a §1.5 key, and the two near-misses are named on
+purpose.** `target` is §1.5's own — the group-version-resource this write
+addressed, and what the audit row is filed under. §16.5's namespace verdict
+rides alongside it as `installTarget`, recomputed at write time. `warnings` is
+likewise §1.5's own, carrying the API server's `Warning:` headers for this
+create; §16's list is `consequences` (§16.6), in §16.5's shape.
+
+Both were briefly the same key during development, and both were wrong for the
+same reason: a response that reuses a §1.5 name for a different value is one a
+generic mutation client reads without noticing, and the value it silently loses
+here would be a deprecation notice about the very object being created.
+
+`diff.before` is `null`, so the diff is the whole Subscription as an addition —
+which is the disclosure mechanism: the catalog, the channel and the approval
+strategy are on screen before the confirming call.
+
+It delegates to `app.admin.apply.create_from_yaml`, which is what routes it
+through the single funnel — one gate, one preflight on `create subscriptions` in
+the target namespace, one `dryRun=All` projection, one diff, one audit row. There
+is no §16-specific write path. What §16 adds is the audit *sentence*:
+`subscribe to prometheus channel beta from catalog community-operators (Automatic
+approval)`, because the question the trail is asked is who put third-party
+software on this cluster, and `create Subscription prometheus` does not answer
+it.
+
+> **`applied: true` means the Subscription object exists. That is all it means.**
+>
+> It is not a claim that an operator is installed, that a ClusterServiceVersion
+> was created, that anything is running, or that anything will be. OLM resolves
+> the Subscription afterwards, on its own schedule, and only if the namespace has
+> exactly one OperatorGroup of a scope the operator supports, the catalog is
+> reachable, the CSV's dependencies resolve, and — under `Manual` approval —
+> somebody approves the InstallPlan. `expectedCSV` and `expectedVersion` are what
+> OLM is *expected* to install, carried so a client can say what to look for
+> next; neither is evidence that it did. §16.4 is where that question is actually
+> answered, and a client must send the operator there rather than letting a green
+> toast imply an installation.
+
+### 16.8 The gates
+
+Two, both required for a real write: `ADMIN_ALLOW_MUTATIONS` and
+`ADMIN_PORTAL_INSTALL_ENABLED` (off by default). Refusals are
+`403 mutations_disabled` — never `rbac_denied`, because the operator's
+permissions are not what is stopping this and telling them otherwise sends them
+to edit a ClusterRole that is already correct — and they are **audited** as
+`outcome: "denied"`, written directly because `mutate()` is never reached and a
+refusal that left no row is a hole in the trail at exactly the moment somebody
+asks who tried.
+
+The gate is checked **before the catalog is read**, the way §14's install gates
+before it builds: a caller whose deployment forbids this gets
+`mutations_disabled` rather than a `404` about a package they were never going to
+be allowed to subscribe to.
+
+Both gates are answered together as `enabled` / `enabledDetail` on §16.3, §16.4
+and §16.5, in §14's shape, so a client can disable the Subscribe control **with
+the reason** from the first paint (§11.4) rather than offering it and taking a
+403.
+
+The second gate exists on its own because of what a Subscription hands over. OLM
+grants the operator's ClusterServiceVersion whatever RBAC it asks for — routinely
+cluster-wide — and that grant is made by OLM, not by the caller. An operator may
+reasonably want every other write in this console without wanting it to be the
+place third-party software enters their cluster.
+
+**Dry runs are permitted with the feature gate off**, and so is §16.5's plan.
+This is §14.6's departure from §5.5, for §14.6's reason: what the projection *is*
+decides it. A node debug pod's projected manifest is a working recipe for a
+privileged pod on a deployment that switched that feature off. A Subscription's
+projection is the caller's own request rendered as an object, plus the contents
+of a catalog the cluster already publishes — nothing privileged, and an operator
+deciding whether to set `ADMIN_PORTAL_INSTALL_ENABLED` has to be able to read
+what it would let the console create.
+
+### 16.9 What §16 does not do
+
+**No uninstall.** Deleting a Subscription does not remove an operator: the
+ClusterServiceVersion it created stays, and so does everything that CSV owns —
+the Deployment, the CRDs, the cluster-wide RBAC. A Remove button that deleted
+only the Subscription would report an uninstall that did not happen, which is the
+one thing this project's defect standard refuses. §16 says what removing actually
+takes and leaves both deletions to §4, where each is its own diff and its own
+audit row. The asymmetry is real: it is easier to add an operator here than to
+remove one.
+
+**No InstallPlan approval.** An outstanding one is reported (§16.4's
+`approvalRequired`) and warned about before the write (`manual_approval`), and
+approving it is an ordinary §4 write in the API explorer. Approving an InstallPlan
+is consenting to a specific resolved set of ClusterServiceVersions, and a
+one-click button on a row would be that consent given without the diff.
+
+**No OperatorGroup creation.** §16.5 reports that the namespace has none and what
+that costs; it does not create one. An OperatorGroup decides which namespaces
+every operator in that namespace may act on, including ones already installed —
+it is a scope decision about the namespace, not a step in subscribing to one
+package.
+
+**No catalog of its own.** No bundled index, no curation, no upstream fetch, no
+ranking. `certified`, `capabilityLevel` and `provider` are the publisher's own
+claims rendered verbatim (§16.3), and no badge, score or ordering of this
+console's own is layered over them.
+
+**No markdown.** A client renders `ChannelPayload.description` as **text**, never
+as markdown or HTML. It is third-party content displayed inside an authenticated
+administration console, reachable by anyone who can get a package into a catalog
+the cluster trusts — and formatted text is more persuasive than plain text at
+exactly the moment persuasion is the risk.
+
+**No OLM v1.** This section speaks OLM v0 — `operators.coreos.com` Subscriptions
+and `packages.operators.coreos.com` PackageManifests. OLM v1's
+`olm.operatorframework.io` `ClusterExtension` is a different API with a different
+model, and a cluster running only it gets `state: "unsupported"` across §16.2 and
+a calm empty portal. That is the correct answer today and a gap that will grow.

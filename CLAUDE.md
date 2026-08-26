@@ -8,15 +8,29 @@ happened — including what failed.
 **What it is not.** Not a monitoring system, not a GitOps controller, and not a
 security-posture product. It holds no cluster state: every page is a live read.
 
-Not a deployment engine **with one stated exception**: it ships a pinned HAProxy
-ingress controller and can install it (§14), because an exposure written into a
-cluster with no controller is an object that routes nothing while looking
-created. It installs one bundle of eight objects through the ordinary write
-funnel and nothing else, ever — no reconcile loop, no desired state, no watch,
-and its status is a live read. Off by default behind
+Not a deployment engine. Two things qualify that, and they are different acts —
+do not merge them in your head or in a docstring.
+
+**It ships one bundle and installs it (§14):** a pinned HAProxy ingress
+controller, because an exposure written into a cluster with no controller is an
+object that routes nothing while looking created. One bundle of eight objects
+through the ordinary write funnel and **nothing else, ever** — no reconcile loop,
+no desired state, no watch, and its status is a live read. Off by default behind
 `ADMIN_ROUTER_MANAGE_ENABLED`. `docs/adr-0004-shipped-router.md` records the
-boundary and what crossing it costs; if you are about to add a second thing this
-console installs, read it first. Optional local, LDAP or OpenID Connect authentication
+boundary and what crossing it costs; if you are about to add a second bundle this
+console ships, read it first.
+
+**It can also create one OLM Subscription (§16)**, which is not that. It ships no
+catalog, pins no image and installs nothing: it writes one object into an API the
+cluster already serves — exactly as the §4 YAML editor could — and Operator
+Lifecycle Manager, the cluster's own software, does the installing afterwards.
+`applied: true` there means one Subscription exists and never that an operator is
+running. Off by default behind `ADMIN_PORTAL_INSTALL_ENABLED`.
+`docs/adr-0005-operator-portal.md` records the argument on both sides and what it
+costs; read it before adding anything else that writes into somebody else's
+controller.
+
+Optional local, LDAP or OpenID Connect authentication
 protects the console; legacy proxy mode remains available when it is disabled. It was split out
 of [K8Boss](https://github.com/aesaganda/k8boss) and shares no code with it —
 `docs/adr-0002-lineage.md` says what came across and what deliberately did not.
@@ -28,8 +42,8 @@ of [K8Boss](https://github.com/aesaganda/k8boss) and shares no code with it —
 | `backend/app/api/` | FastAPI routers. Thin: parse, call, envelope | Logic belongs below this layer |
 | `backend/app/k8s/` | Per-request cluster context, auth strategy, client manager | `docs/architecture.md` §2 |
 | `backend/app/resources/` | Catalog (discovery), reader (generic list/get/YAML), shaping (rows), envelope | `docs/api-contract.md` §1.2, §4, §8 |
-| `backend/app/services/` | Typed read models: the unified workload row, node rows, the unified route row | `docs/api-contract.md` §5, §6, §13 |
-| `backend/app/admin/` | **Every write.** The funnel, preflight, diff, apply, scale, rollout, node drain, debug containers, route compilation, the shipped router | `docs/safety-model.md` |
+| `backend/app/services/` | Typed read models: the unified workload row, node rows, the unified route row, the operator catalog (`portal.py`) | `docs/api-contract.md` §5, §6, §13, §16 |
+| `backend/app/admin/` | **Every write.** The funnel, preflight, diff, apply, scale, rollout, node drain, debug containers, route compilation, the shipped router, the one operator Subscription (`portal.py`) | `docs/safety-model.md` |
 | `backend/app/audit/` | Append-only, hash-chained trail: `record()`, `query()`, `verify()`, export | `docs/api-contract.md` §10 |
 | `backend/app/identity/` | Local password hashing, opaque sessions, LDAP search-and-bind, OIDC single sign-on, sign-in throttling | `docs/api-contract.md` §12 |
 | `backend/tests/` | pytest on SQLite. The fake Kubernetes client **raises** on an unstubbed call | — |
@@ -345,6 +359,7 @@ serving a request — and SQLite could not reproduce it.
 | `docs/adr-0002-lineage.md` | What came from K8Boss, what did not, why the two stay separate |
 | `docs/adr-0003-audit-hash-chain.md` | Tamper *evidence* vs tamper prevention, and why pre-chain records are never back-filled |
 | `docs/adr-0004-shipped-router.md` | Why the console installs a router at all, why HAProxy, what it does not serve, and the boundary that keeps "not a deployment engine" true of everything else |
+| `docs/adr-0005-operator-portal.md` | Why creating an OLM Subscription is not a second thing this console installs, and where that line is |
 | `deploy/router.yaml` | The shipped router bundle, applicable by hand. **Generated** — `make router-manifest`, enforced by a test |
 | `deploy/rbac.yaml` | The shipped roles. Each rule is annotated with the contract section it serves |
 | `README.md` | The front door: quickstart, feature list, every environment variable |
