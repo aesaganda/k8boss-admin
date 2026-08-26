@@ -291,6 +291,49 @@ def test_detail_assembles_pods_conditions_services_and_rollout(client, fake_k8s)
     assert body["unavailable"] == []
 
 
+def test_detail_restarts_are_null_when_the_pods_could_not_be_listed(client, fake_k8s):
+    """The detail endpoint derives `restarts_24h` itself, and had no test for it.
+
+    The list endpoint's version of this is covered. This is the other half: a
+    separate derivation, in a different function, off a different pod listing.
+    Coercing it to `0` passed the whole suite.
+
+    `0` here says the workload has not restarted in 24 hours. That is the row an
+    operator scrolls past while looking for the thing that is wrong, and the
+    read that would have told them otherwise is the one that just failed.
+    """
+    fake_k8s.apps_v1.returns("read_namespaced_deployment", _deployment())
+    fake_k8s.core_v1.raises("list_namespaced_pod",
+                            ApiException(status=403, reason="Forbidden"))
+    fake_k8s.core_v1.returns("list_namespaced_service", obj(items=[]))
+
+    body = client.get("/api/workloads/deployments/prod/checkout").json()
+
+    assert body["workload"]["restarts_24h"] is None
+    # Not blind: the endpoint says which read it could not make.
+    assert body["partial"] is True
+    assert ("", "pods", "forbidden") in [
+        (entry["group"], entry["resource"], entry["reason"]) for entry in body["unavailable"]
+    ]
+    # `pods` is [] here rather than null, and that is deliberate: the detail
+    # payload pairs it with `partial` and the `unavailable` entry above, which
+    # is what §1.1 requires the empty list to be accompanied by. The banner is
+    # the signal, not the list's type.
+    assert body["pods"] == []
+
+
+def test_detail_restarts_are_zero_when_the_pods_were_read_and_none_restarted(
+    client, fake_k8s,
+):
+    """The real zero, so the null above cannot be satisfied by always-null."""
+    _stub_detail(fake_k8s, pods=[_pod(restarts=0)], services=[])
+
+    body = client.get("/api/workloads/deployments/prod/checkout").json()
+
+    assert body["workload"]["restarts_24h"] == 0
+    assert body["partial"] is False
+
+
 def test_detail_lists_pods_with_a_server_side_label_selector(client, fake_k8s):
     _stub_detail(fake_k8s, pods=[_pod()], services=[])
 
