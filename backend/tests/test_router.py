@@ -885,6 +885,52 @@ def test_upgrade_available_is_null_when_the_installed_version_is_unknown(
     assert result["upgradeAvailable"] is None
 
 
+def test_version_matches_is_null_when_the_installed_version_is_unknown(
+    monkeypatch, fake_k8s,
+):
+    """The sibling of the test above, and the one that was missing.
+
+    `upgradeAvailable` was pinned; `versionMatches` was not, and it is derived
+    from the same unreadable value one line away. Coerced to a boolean it
+    becomes `False` — "the installed version is not the one this console ships"
+    — which §14.2 renders as a version difference and an offer to reinstall.
+
+    That offer is not free. `IngressClass.spec.controller` is immutable, so
+    reinstalling over a router whose version could not be read is a
+    delete-and-recreate of the class, and every Ingress naming it stops being
+    served until the new one is admitted. Asking an operator to accept that on
+    the strength of a read that failed is the §0 defect with an action attached.
+
+    The two fields must also agree: `versionMatches: false` beside
+    `upgradeAvailable: null` is a payload that contradicts itself, and the UI
+    branches on both.
+    """
+    _stub_status(monkeypatch, {"clusterrolebindings": _binding()})
+
+    result = router_service.status()
+
+    assert result["installedVersion"] is None
+    assert result["versionMatches"] is None
+    assert result["upgradeAvailable"] is None
+
+
+def test_version_matches_is_a_real_boolean_when_the_version_was_read(
+    monkeypatch, fake_k8s,
+):
+    """Both real answers, so the null above cannot be satisfied by always-null."""
+    _stub_status(monkeypatch, {
+        "clusterrolebindings": _binding(),
+        "deployments": _deployment(),
+    })
+    assert router_service.status()["versionMatches"] is True
+
+    _stub_status(monkeypatch, {
+        "clusterrolebindings": _binding(),
+        "deployments": _deployment(version="3.1.0"),
+    })
+    assert router_service.status()["versionMatches"] is False
+
+
 def test_a_loadbalancer_with_no_address_says_what_that_means(monkeypatch, fake_k8s):
     _stub_status(monkeypatch, {
         "clusterrolebindings": _binding(),
