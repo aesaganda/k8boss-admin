@@ -101,6 +101,18 @@ spec:
             - name: ADMIN_ROUTER_MANAGE_ENABLED
               value: "false"
 
+            # §16. OFF. The gate is not about what this console creates — one
+            # Subscription, through the ordinary funnel — but about what OLM
+            # does with it afterwards: it installs software nobody here
+            # reviewed, under whatever RBAC that operator's
+            # ClusterServiceVersion asks for, granted by OLM rather than by the
+            # caller. Browsing the catalog and reading the rendered Subscription
+            # stay available with this off, because deciding whether to turn it
+            # on means reading what it would write.
+            # See adr-0005-operator-portal.md.
+            - name: ADMIN_PORTAL_INSTALL_ENABLED
+              value: "false"
+
             # §15. OFF, and this gate is about what the feature REMOVES rather
             # than what it creates. A CLI pod is an ordinary pod; the shell into
             # it is not an ordinary write. Everything typed there bypasses the

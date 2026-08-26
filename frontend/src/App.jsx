@@ -73,6 +73,7 @@ const Access = lazyPage('Access', () => import('./pages/Access'));
 const Events = lazyPage('Events', () => import('./pages/Events'));
 const Explorer = lazyPage('Explorer', () => import('./pages/Explorer'));
 const CustomResources = lazyPage('CustomResources', () => import('./pages/CustomResources'));
+const Portal = lazyPage('Operator portal', () => import('./pages/Portal'));
 const Clusters = lazyPage('Clusters', () => import('./pages/Clusters'));
 const Audit = lazyPage('Audit', () => import('./pages/Audit'));
 const Users = lazyPage('Users', () => import('./pages/Users'));
@@ -129,6 +130,11 @@ function ConsoleRoutes() {
                   installed", where the explorer stays the raw, everything
                   browser. */}
               <Route path="custom-resources" element={<CustomResources />} />
+
+              {/* §16. The operator portal sits beside Custom Resources rather
+                  than inside it: subscribing is what *installs* the CRDs that
+                  page browses, and it is a write, not a browser. */}
+              <Route path="portal" element={<Portal />} />
 
               <Route path="clusters" element={<Clusters />} />
               <Route path="audit" element={<Audit />} />

@@ -25,6 +25,14 @@ clusters, built on the assumption that the dangerous part is not reading.
   other page. It is off by default behind `ADMIN_ROUTER_MANAGE_ENABLED`.
   [`docs/adr-0004-shipped-router.md`](docs/adr-0004-shipped-router.md) records
   the boundary and what it costs.
+
+  The operator portal (§16) is a different act, not a second exception: it ships
+  no catalog and installs nothing. It creates **one** OLM `Subscription` in an API
+  your cluster already serves — exactly what the YAML editor could — and Operator
+  Lifecycle Manager, which is your cluster's software, does the installing.
+  Off by default behind `ADMIN_PORTAL_INSTALL_ENABLED`;
+  [`docs/adr-0005-operator-portal.md`](docs/adr-0005-operator-portal.md) records
+  why that line is where it is.
 * **Not a security posture product.** No network policy analysis, no service mesh
   awareness, no runtime process intelligence, no attack paths. That is
   [K8Boss](https://github.com/aesaganda/k8boss), which this console was split out
@@ -451,6 +459,33 @@ It says what it does **not** serve, before you write something it will never
 accept: the HAProxy controller implements Gateway API for TCPRoute only — never
 HTTPRoute — and OpenShift Routes are served by OpenShift's own router.
 
+### The operator portal
+
+What **your** cluster's catalogs offer, and what somebody already subscribed to.
+k8boss-admin ships no catalog and curates no list: every package comes from a
+`CatalogSource` the cluster already runs, so a private mirror shows its own
+contents with nothing to configure, and a cluster without OLM says so in a calm
+notice rather than an error.
+
+Subscribing writes **one object** — an OLM `Subscription` — through the same
+preflight, dry run, diff and audit row as every other write. Off by default
+behind `ADMIN_PORTAL_INSTALL_ENABLED`; the plan is readable with it off, because
+deciding whether to turn it on requires reading what it would create.
+
+**A Subscription is not an installation, and the console will not say it is.**
+Creating one means one object exists; Operator Lifecycle Manager does the
+installing afterwards, on its own schedule, and only if the namespace and the
+approval strategy let it. Three things stop it and all three are checked before
+the write — a namespace with no OperatorGroup or with two, an install mode the
+operator does not support, and a `Manual` approval strategy that holds the
+install until somebody approves the InstallPlan. Each is a named consequence you
+have to acknowledge by code before the write is accepted, the same shape as
+`force` on a drain.
+
+`Installed` is tri-state: a catalog row whose Subscription listing failed is
+`Unknown`, never "not installed" — which is how you would end up subscribing
+twice to an operator you already run.
+
 ## Architecture
 
 ```mermaid
@@ -532,6 +567,7 @@ means read-only.
 | `ADMIN_CLI_NAMESPACE` | `default` | Namespace CLI pods are created in, and where `ADMIN_CLI_SERVICE_ACCOUNT` is looked for. It decides both which Pod Security level admits the pod and which accounts are bindable to it, so pinning the console to one namespace keeps both in a place an administrator chose |
 | `ADMIN_CLI_IMAGE` | `alpine/k8s:1.34.9` | Image a CLI pod runs. It needs `kubectl` (or `oc`) on its PATH **and a `/bin/sh`** — the pod runs a shell loop, because a kubectl image's own entrypoint *is* kubectl and would exit immediately. The console cannot check either and does not pretend to: an image without them starts fine and answers `command not found`. Pick a kubectl within one minor version of your cluster — Kubernetes' own supported skew, which this default will drift out of. Set an image carrying `oc` for OpenShift, and one in your own registry for an air-gapped cluster, where the default cannot be pulled |
 | `ADMIN_CLI_MAX_SECONDS` | `3600` | Wall-clock limit on a CLI pod's container, as `spec.activeDeadlineSeconds`; 0 means unbounded. It bounds the window in which an unattended shell holding a live API token is possible. It does **not** clean up: the kubelet stops the container at the deadline and marks the pod Failed, and the pod object stays until somebody removes it |
+| `ADMIN_PORTAL_INSTALL_ENABLED` | `false` | **A sixth gate.** Allows the operator portal (§16) to create an OLM `Subscription` — the one write it makes. Separate from `ADMIN_ALLOW_MUTATIONS` because of what follows the write rather than what is in it: the object is nine lines, and Operator Lifecycle Manager then installs somebody else's operator and grants it whatever its bundle asks for — with OLM's permissions, not the console's, so neither RBAC here nor any preflight bounds it. Like the router and unlike node debug pods, the **dry run is permitted with this off**: the plan is your own request rendered as a Subscription plus the contents of a catalog your cluster already publishes, and deciding whether to turn this on requires reading it. With it off, a real write returns `403 mutations_disabled` and the refusal is audited |
 | `AUTH_ENABLED` | `false` | Requires a managed local, LDAP or single sign-on session for every API and WebSocket request except health, login and the two OIDC handshake routes |
 | `AUTH_SESSION_TTL_HOURS` | `12` | Lifetime of the revocable HttpOnly session cookie, from 1 to 168 hours |
 | `AUTH_COOKIE_NAME` | `k8boss_admin_session` | Session cookie name |

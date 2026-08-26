@@ -661,6 +661,59 @@ export const routerApi = {
   uninstall: (params) => api.del('/router', params),
 };
 
+/* ── §16 The operator portal ────────────────────────────────────────────── */
+
+export const portal = {
+  /**
+   * Every package this cluster's catalogs offer.
+   *
+   * `installed` on a row is a tri-state: `null` means the Subscription listing
+   * did not answer, and it must never be rendered as "not installed" — that
+   * invites a second Subscription for an operator that already has one.
+   *
+   * params: { limit }
+   */
+  catalog: (params) => api.get('/portal/catalog', params),
+
+  /**
+   * Subscriptions joined to what OLM actually installed for each. `phase` is
+   * null both when the CSV could not be read and when OLM has installed nothing
+   * yet; `phaseDetail` is the sentence that says which.
+   *
+   * params: { namespace, limit }
+   */
+  installed: (params) => api.get('/portal/subscriptions', params),
+
+  /**
+   * The Subscription that would be created, and what will stop it. **Writes
+   * nothing** and is ungated, like §14's router plan: deciding whether to set
+   * `ADMIN_PORTAL_INSTALL_ENABLED` means reading what it would let the console
+   * create.
+   *
+   * `retry: true` for the reason `routes.render` sets it — this is a POST, so
+   * `isReplaySafe` refuses to replay it by default, replaying a pure plan costs
+   * nothing, and a transient 503 would otherwise make the operator fill the
+   * form in again.
+   *
+   * body: { package, namespace, channel, catalog, catalogNamespace,
+   *         installPlanApproval, startingCSV }
+   */
+  plan: (body) => request('/portal/subscriptions/plan', { method: 'POST', body, retry: true }),
+
+  /**
+   * Create one Subscription. `applied: true` means that object exists — it is
+   * NOT a claim that an operator is installed; OLM does that afterwards, and
+   * only if the namespace and the approval strategy let it.
+   *
+   * `acknowledgeConsequences` must name every code the plan returned or the
+   * write is refused with `422 invalid`, and `context.unacknowledged` lists the
+   * codes that were missing.
+   *
+   * body: the plan body + { acknowledgeConsequences, dryRun }
+   */
+  subscribe: (body) => api.post('/portal/subscriptions', body),
+};
+
 /* ── §9 Access preflight ────────────────────────────────────────────────── */
 
 // `group` is translated to its wire spelling only when the caller supplied one.

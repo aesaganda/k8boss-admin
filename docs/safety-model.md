@@ -768,7 +768,117 @@ Withholding it would be asking somebody to enable a feature sight unseen.
 
 ---
 
-## 12. What this model does not claim
+## 12. The operator portal, and the install this console does not perform
+
+§16 browses the catalogs a cluster already runs and writes **one object**: an OLM
+`Subscription`. Everything that happens after that write belongs to Operator
+Lifecycle Manager — the cluster's own software, running with its own permissions.
+That division is what makes the feature defensible, and §12.5 is where it stops.
+
+### 12.1 `applied: true` is one object, not an operator
+
+A Subscription is a request. `status.installedCSV` is the only evidence anything
+was installed, and it stays empty for as long as resolution is pending, an
+InstallPlan waits for approval, or the namespace lacks the OperatorGroup OLM
+needs. §16 keeps the two apart in every shape it returns: the write response
+carries `expectedCSV` — *expected*, never a claim — and the Installed view is
+where the question is actually answered. `phase` is `null` rather than `Failed`
+whenever the ClusterServiceVersion could not be read, with `phaseDetail` saying
+which of "we did not look" and "OLM has not acted yet" it is.
+
+This is §11.1 aimed at somebody else's deployment engine. An exposure written
+into a cluster with no controller is an object that routes nothing while looking
+created; a Subscription written into a namespace with no OperatorGroup is an
+object that installs nothing while looking created.
+
+### 12.2 Three things stop an install, and all three are knowable first
+
+The plan reads them before anything is written:
+
+* **The namespace needs exactly one OperatorGroup.** None gives
+  `NoOperatorGroup`, two give `TooManyOperatorGroups`, and either way the CSV
+  fails and nothing installs.
+* **The OperatorGroup's scope has to be one the operator supports**, or OLM
+  answers `UnsupportedOperatorGroup`.
+* **`Manual` approval stops the install dead** until somebody approves the
+  InstallPlan — which this console does not do.
+
+`target.ready` is a tri-state and `null` is the ordinary third value: an
+unreadable OperatorGroup listing, a group that selects its namespaces by a label
+selector this console does not evaluate, or a catalog that published no install
+modes all leave us unable to say. `true` is returned only when every check
+actually ran and passed.
+
+### 12.3 The acknowledgement handshake
+
+Each of those becomes a `consequences[]` entry — `code`, `label`,
+`consequence`, `mitigation` — and the write is refused `422 invalid` unless
+`acknowledgeConsequences` names **every** code the plan returned;
+`context.unacknowledged` lists the missing ones.
+
+The list is *not* called `warnings`, and that is deliberate rather than
+cosmetic: §1.5's mutation response already owns a `warnings` key carrying the
+API server's own `Warning:` headers for the object being created. Overwriting it
+would drop a deprecation notice about the very Subscription being written, which
+is the one place an operator would most want to read one.
+
+Named codes rather than a boolean, the same shape as §11.2's lossy exposure and
+`force` on a drain, for the same reason: **consenting to a consequence is a
+separate act from requesting the change.** A boolean is satisfied by a tick that
+predates the consequence — a caller who acknowledged one namespace's consequences,
+changed the namespace and posted the old flag would have consented to nothing.
+The plan is recomputed inside the write rather than trusted from the caller, so
+what is checked is the consequence list that describes *this* write.
+
+The two "unknown" codes are acknowledgeable on the same terms as the rest, on
+purpose. `operator_group_unknown` and `subscriptions_unknown` say that a read did
+not happen, and letting a failed read pass silently is the swallowed `[]` this
+whole document exists to refuse.
+
+### 12.4 Two gates, and the same departure §14 made
+
+`ADMIN_ALLOW_MUTATIONS` and `ADMIN_PORTAL_INSTALL_ENABLED`, both required for a
+real write. The refusal is `mutations_disabled`, never `rbac_denied` — the
+operator's permissions are not what stopped it, and saying otherwise sends them
+to edit a ClusterRole that is already correct — and it is audited by
+`app/admin/portal.py` directly, because the funnel that audits everything else is
+never reached.
+
+**The dry run is permitted with the feature gate off**, as in §11.6 and unlike
+§9.1's node debug pods. The difference is what the projection *is*. A node debug
+pod's manifest is a working recipe for a privileged pod on a deployment that
+deliberately switched that feature off. The §16 plan is the caller's own request
+rendered as a Subscription plus the contents of a catalog the cluster already
+publishes to anyone who can read it. Nothing in it is privileged, and an operator
+deciding whether to open the gate has to be able to read what it would let the
+console create. Withholding it would be asking somebody to enable a feature sight
+unseen.
+
+### 12.5 The honest limit: what OLM grants afterwards
+
+This console preflights the write it makes — `create
+operators.coreos.com/subscriptions` on that exact namespace and name, like every
+other write in this document. **That is the only permission it can speak about.**
+
+What installs the operator is OLM, using OLM's permissions, and what OLM grants
+the operator is whatever its bundle asks for: its own ServiceAccount, Roles, and
+routinely ClusterRoles over resources this console never named. No
+`SelfSubjectAccessReview` can preview that — a review answers about *this*
+identity's verb on a resource, and the identity doing the granting is not this
+one. Nothing in `deploy/rbac.yaml` bounds it either: withholding every other rule
+in that file does not narrow what an installed operator ends up holding.
+
+So the plan shows what can honestly be shown — the channel, the CSV it resolves
+to, the install modes it declares and the custom resources it says it owns, which
+is the visible half of what installing it does to a cluster — and claims nothing
+about the rest. A page that implied it had checked the RBAC would be the defect
+standard with a signature attached.
+[`adr-0005-operator-portal.md`](adr-0005-operator-portal.md) records the argument
+on both sides.
+
+---
+
+## 13. What this model does not claim
 
 Being honest about the edges is part of the model:
 
@@ -786,6 +896,12 @@ Being honest about the edges is part of the model:
   that fills between the preview and the confirm can still make the real write
   behave differently. The window is seconds; it is not zero.
 * **`force` on a drain does not defeat a PodDisruptionBudget.** See §6.
+* **Nothing here bounds an operator OLM installs.** §16 preflights the
+  Subscription it writes and can say nothing about the RBAC OLM then grants the
+  operator; see §12.5. Nor does §16 uninstall anything — deleting a Subscription
+  leaves the ClusterServiceVersion and everything it owns in place, so there is
+  no Remove button that would report an uninstall that did not happen. Both
+  deletions are ordinary §4 writes, each with its own diff and audit row.
 * **Exec bypasses everything here.** A shell inside a container can do whatever
   that container's own ServiceAccount can, and no diff is possible for a
   keystroke. It is gated on `ADMIN_ALLOW_MUTATIONS` *and* a preflight on
