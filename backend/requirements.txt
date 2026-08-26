@@ -1,5 +1,13 @@
 # Runtime
-fastapi==0.115.6
+fastapi==0.141.1
+# Starlette is FastAPI's own dependency, pinned here anyway: FastAPI's floor
+# (starlette>=0.46.0) still resolves to releases carrying the Host-header URL
+# reconstruction advisories, the ignored `max_fields`/`max_part_size` limits on
+# urlencoded bodies, and the quadratic Range-header parse. This app's auth
+# middleware reads the raw `scope` path rather than `request.url`, so the first
+# was never exploitable here; the pin keeps a fresh resolve from reintroducing
+# any of them. Bump together with fastapi.
+starlette==1.6.0
 uvicorn[standard]==0.34.0
 kubernetes==31.0.0
 cryptography==50.0.0
@@ -21,7 +29,15 @@ ldap3==2.9.1
 # rejected: the failure modes (algorithm confusion, an unchecked audience, a
 # missing exp) are silent, and each one turns the login flow into an open door
 # that works perfectly in testing.
-pyjwt[crypto]==2.10.1
+#
+# 2.13.0 and not 2.10.1: the older release skips the `crit` header check RFC 7515
+# §4.1.11 makes mandatory, verifies with the algorithm bound to a PyJWK rather
+# than the one the allowlist approved, and hands an attacker-supplied `jku` to
+# urllib with `file://` and `ftp://` still registered. Only the first reaches
+# this code (the JWKS URI comes from the configured issuer's discovery document
+# and `jwt.decode` is given a raw key, not a PyJWK), but this is the one
+# dependency on the path that decides who is signed in.
+pyjwt[crypto]==2.13.0
 
 # Postgres driver. Unpinned minor on purpose: the wheel is platform-specific and
 # the console never touches psycopg2-specific APIs — SQLAlchemy is the only
