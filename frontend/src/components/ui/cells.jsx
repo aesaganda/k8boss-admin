@@ -155,6 +155,14 @@ function deriveHref({ kind, name, namespace, plural, group, version }) {
   if (!name) return null;
   if (kind === 'Node' || plural === 'nodes') return `/nodes/${encodeURIComponent(name)}`;
 
+  // Pods have their own page (§7.5) rather than a row in the generic explorer:
+  // it is where the logs, the terminal, the environment and the metrics live,
+  // and every pod link in the console — the pod table, a node's pod list, a
+  // workload's — should land on the same place.
+  if ((kind === 'Pod' || plural === 'pods') && namespace) {
+    return `/pods/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}`;
+  }
+
   const resolvedPlural = plural || KIND_TO_PLURAL[kind] || null;
   if (resolvedPlural && WORKLOAD_PLURALS.has(resolvedPlural) && namespace) {
     return `/workloads/${resolvedPlural}/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}`;

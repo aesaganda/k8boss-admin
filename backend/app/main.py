@@ -50,6 +50,7 @@ from app.api.health import router as health_router
 from app.api.logs import router as logs_router
 from app.api.namespaces import router as namespaces_router
 from app.api.nodes import router as nodes_router
+from app.api.pods import router as pods_router
 from app.api.portal import router as portal_router
 from app.api.resources import router as resources_router
 from app.api.routes import router as routes_router
@@ -158,6 +159,7 @@ app.include_router(portal_router)
 app.include_router(nodes_router)
 app.include_router(access_router)
 app.include_router(audit_router)
+app.include_router(pods_router)
 app.include_router(logs_router)
 app.include_router(debug_router)
 app.include_router(exec_ws_router)

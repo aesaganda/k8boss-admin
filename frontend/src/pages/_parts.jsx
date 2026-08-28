@@ -582,12 +582,20 @@ export function EditYamlDialog({ isOpen, group, version, plural, name, namespace
 /**
  * Logs, YAML and exec for one pod, in one modal.
  *
+ * **This is the in-context peek, not the pod's page.** `/pods/{ns}/{name}`
+ * (§7.5) is where a pod's whole story lives — details, metrics, environment,
+ * events, and these same panels — and the pod table links there. This modal
+ * survives because the node detail and workload detail pages are places an
+ * operator is *deciding something else*: reading one pod's logs mid-drain
+ * should not cost them the plan they were looking at. Where the two overlap
+ * they render the same components, so there is one Logs viewer and one
+ * terminal, in two frames.
+ *
  * `LogViewer` and `PodTerminal` are inline panels rather than dialogs — they are
  * embeddable anywhere, and neither takes `isOpen` or `onClose` — so the modal,
- * the tab strip and the close button belong to whoever opens them. Every pod
- * table in this lane opens the same one, so they live side by side: the
- * overwhelmingly common sequence is to read the logs, fail to find the answer,
- * and go in with a shell.
+ * the tab strip and the close button belong to whoever opens them. The pod
+ * tables that open this one put them side by side: the overwhelmingly common
+ * sequence is to read the logs, fail to find the answer, and go in with a shell.
  *
  * **YAML is a tab here rather than a page of its own.** A pod is the one kind
  * an operator opens by clicking a row rather than by browsing to it, and until

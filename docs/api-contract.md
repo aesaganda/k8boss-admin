@@ -574,7 +574,7 @@ template vs. the historical one.
 
 ---
 
-## 7. Pod logs, exec and debug containers
+## 7. One pod — its detail, its logs, its shell, its environment and its usage
 
 ### `GET /api/pods/{namespace}/{name}/logs`
 Query `container`, `tailLines` (default 500, max 10000), `previous`,
@@ -698,6 +698,168 @@ omit it.
 > a client must not offer one — a control the API server will always refuse is
 > the defect standard applied to a button. Restarting the workload is what
 > removes it.
+
+### 7.5 `GET /api/pods/{namespace}/{name}`
+
+The §6 `PodRow` for one pod, plus the fields a table has no room for. `unavailable`
+is present and empty: this endpoint makes exactly one read, and a pod that could
+not be read is a §1.3 error, never an empty shell with a name at the top of it.
+
+Added to the row:
+
+```jsonc
+{
+  "...": "every §6 PodRow field",
+  "init_containers": [ /* the container shape below, kind: "init" */ ],
+  "conditions": [{"type","status","reason","message","last_transition"}],
+  "volumes":    [{"name","kind","source"}],
+  "uid": "...", "resource_version": "884213",
+  "created_at": "...", "deleted_at": null, "start_time": "...",
+  "labels": {}, "annotations": {},
+  "service_account": "checkout", "restart_policy": "Always",
+  "priority_class": null, "node_selector": {}, "host_network": false,
+  "host_ip": "10.0.1.4",
+  "status_reason": null, "status_message": null,
+  "unavailable": [], "partial": false
+}
+```
+
+Every entry of `containers` (and of `init_containers`) additionally carries
+`image_id`, `container_id`, `started_at`, `ports:[{name,container_port,protocol,host_port}]`,
+`requests`, `limits`, `command`, `args` and:
+
+```jsonc
+"last_terminated": {"reason": "OOMKilled", "exit_code": 137, "signal": null,
+                    "started_at": "...", "finished_at": "...", "message": null}
+```
+
+That field is why this endpoint exists. "Restarted 14 times" is a symptom;
+`OOMKilled` is the answer, and §6's row has nowhere to put it.
+
+Three rules the shape encodes:
+
+- **`requests` and `limits` are `null`, never `{}`, for a container that declares
+  none.** A BestEffort container is first in line to be evicted; `cpu: 0` would
+  describe it as one that asked for nothing and got it.
+- **`init_containers` is a separate list.** A `Terminated` init container with
+  exit code 0 is a success and the same two words on an app container are an
+  outage. Merged, every healthy pod that has ever run a migration gets a red row.
+- **`conditions[].status` stays the tri-state string** `"True"`/`"False"`/`"Unknown"`.
+  Coerced to a boolean, "the kubelet has not said" becomes "no" — and a pod whose
+  `Ready` condition is `Unknown` is a pod on a node that stopped reporting.
+
+The row's `ready` fraction and `restarts` total still exclude ephemeral
+containers, exactly as §6 specifies: this endpoint *enriches* the shaper's
+entries rather than rebuilding them.
+
+### 7.6 `GET /api/pods/{namespace}/{name}/environment`
+
+The §1.2 envelope, one item per container, with the variables that container
+will see in the order the kubelet builds them (`envFrom` first, then `env`).
+
+```jsonc
+{
+  "items": [{
+    "container": "app",
+    "kind": "container" | "init" | "ephemeral",
+    "variables": [{
+      "name": "DB_PASSWORD",
+      "value": null,
+      "value_state": "withheld",
+      "source": {"kind": "secretKeyRef", "name": "checkout-db",
+                 "key": "password", "optional": null},
+      "all_keys": false,
+      "overridden": false
+    }]
+  }],
+  "unavailable": [], "partial": false
+}
+```
+
+`value_state` is a closed vocabulary and clients **branch on it**, because four
+of the six states render as a blank value and they are four different facts:
+
+| `value_state` | What it means |
+|---|---|
+| `literal` | Written in the pod spec. The blank you see is what the container sees |
+| `resolved` | Read out of a ConfigMap |
+| `withheld` | It comes from a Secret. **This endpoint never returns Secret values**, under any setting |
+| `absent` | The ConfigMap was read and has no such key. Unless the reference is `optional` the kubelet refuses to start the container — a finding, and not the same as either blank below |
+| `unreadable` | The ConfigMap or Secret could not be read. Named in `unavailable[]`; the variable is **not** known to be unset |
+| `runtime` | A `fieldRef` or `resourceFieldRef`. The kubelet computes it at start and the API server never stores the result |
+
+`source.kind` is the spec spelling — `configMapKeyRef`, `secretKeyRef`,
+`configMapRef`, `secretRef`, `fieldRef`, `resourceFieldRef` — so a client can
+name the object a variable comes from without parsing prose.
+
+Two further rules:
+
+- **`all_keys: true` with `name: null`** is the one row that stands in for an
+  `envFrom` import whose object could not be read. Variables are coming from it
+  and we cannot name them; reporting zero of them would be §0.1's failure hidden
+  inside a container's environment, where nobody would look for it.
+- **`overridden: true`** marks a variable a later entry in the same container
+  redefines. The losing row is kept, because "this ConfigMap sets `DATABASE_URL`
+  and something else is overriding it" is an answer people spend an afternoon on.
+
+A `secretKeyRef` is answered **without reading the Secret**: the key is already in
+the pod spec and the value is never returned, so there is nothing a read would
+add — which is also why this endpoint renders in full on a console with no
+`get secrets` grant. A `secretRef` in `envFrom` does read the Secret, for its key
+names only.
+
+### 7.7 `GET /api/pods/{namespace}/{name}/metrics`
+
+The §1.2 envelope, one item per container, plus the pod totals and the sample
+window.
+
+```jsonc
+{
+  "items": [{
+    "container": "app",
+    "kind": "container" | "init",
+    "usage": {"cpu_cores": 0.12, "memory_bytes": 188743680} | null,
+    "sample_expected": true,
+    "requests": {"cpu": "250m", "memory": "256Mi"} | null,
+    "limits":   {"cpu": "1",    "memory": "512Mi"} | null
+  }],
+  "pod": {"cpu_cores": null, "memory_bytes": null},
+  "window_seconds": 30,
+  "timestamp": "2026-08-19T09:04:00Z",
+  "unavailable": [], "partial": false
+}
+```
+
+**The pod is the primary read and the sample is a secondary one.** That is the
+whole design. A cluster with no `metrics.k8s.io` is an ordinary fact — §1.2's
+`unsupported`, which §1.3 says a client renders as "not present on this cluster"
+and deliberately not in red — and a pod that started ten seconds ago has no
+sample on a cluster that is working perfectly. Both answer **200** with every
+`usage` at `null` and an entry in `unavailable[]` naming the group; `requests`
+and `limits` still render, because they come from the pod.
+
+- **A number we did not measure is `null`, never `0`.** A pod drawn at zero cores
+  reads as idle, and idle is what gets something turned off. That includes a
+  quantity the API server spelled in a way this console cannot parse.
+- **`pod.cpu_cores` and `pod.memory_bytes` are `null` when any container we
+  expected a sample for is missing from it.** Summing the parts we have
+  understates the pod by however much the unmeasured container is using, with
+  nothing in the response to say a container is missing from the arithmetic.
+- **`sample_expected` is what keeps the two kinds of `usage: null` apart.** It is
+  `true` for every app container and for a *running* init container — a
+  `restartPolicy: Always` sidecar, which runs for the life of the pod and uses
+  real resources. It is `false` for a terminated init container: metrics-server
+  does not report one, it holds nothing, and requiring it would make every pod
+  that has ever run a migration report unknown usage forever. Only a missing
+  `sample_expected: true` container nulls the totals.
+- **The served version comes from discovery**, not from a pinned `v1beta1`: a
+  cluster that has moved on is read rather than refused. A discovery that could
+  not be *enumerated* is `forbidden`/`unreachable` in `unavailable[]` and never
+  `unsupported` — "this cluster has no metrics" and "we could not find out" send
+  an operator to two different places, and only one of them is an install.
+- **A 404 from the metrics API is translated.** The pod was read a moment ago, so
+  relaying "not found" beside its own name would read as "this pod is gone". The
+  `unavailable` entry says the sample is missing and why.
 
 ---
 
@@ -1018,6 +1180,13 @@ trace.
    a CRD-backed resource (Gateway API, VerticalPodAutoscaler,
    VolumeAttributesClass) is routine on a cluster that doesn't have the CRD
    installed, and rendering that red trains operators to stop trusting red.
+8. A detail view with tabs **fetches only the visible tab**, and the active tab
+   lives in the URL. Mounting all of them at once is one read per tab on
+   arrival — most of them for a panel nobody is looking at — and on the pod page
+   (§7.5) two of the tabs open a websocket, so a Terminal that connected behind
+   an unopened tab would start an audited exec session nobody asked for. The URL
+   half is not cosmetic: a panel an operator cannot link to is a panel they have
+   to describe over the phone.
 
 ---
 

@@ -311,6 +311,32 @@ version being that there is no undo for a deleted StatefulSet.
   have not reported on the current generation.
 * **Pods** — with `phase_detail` for the cases where the phase lies: a `Running`
   pod whose container is in `CrashLoopBackOff` is not reported as Running.
+* **A page per pod**, at `/pods/{namespace}/{name}`, with eight tabs and the
+  active one in the URL so every tab is a link: **Details**, **Metrics**,
+  **YAML**, **Environment**, **Logs**, **Events**, **Terminal** and **Debug**.
+  Only the visible tab fetches — two of them open a websocket, and a terminal
+  that connected behind an unopened tab would start an audited exec session
+  nobody asked for. Three things it is careful about:
+  * **Details** carries what a table has no room for — per-container ports,
+    requests, limits and `lastState.terminated`, which is what turns "restarted
+    14 times" into `OOMKilled`. A container that declares no resources says so
+    rather than showing `cpu 0`; init containers are their own list, because a
+    `Terminated` init container is a success and the same two words on an app
+    container are an outage; and a condition the kubelet has said nothing about
+    stays `Unknown` rather than becoming `False`.
+  * **Environment** shows every variable each container will see and where it
+    comes from — including the ones that are references rather than values.
+    **Secret values are never shown here**, under any setting, and the kinds of
+    blank stay apart: *withheld* (it is a Secret), *could not be read* (the
+    ConfigMap was refused — the variable is not known to be unset), *key not
+    present* (the ConfigMap was read and has no such key, so the container will
+    not start), *set by the kubelet* (a `fieldRef`, computed at start and never
+    stored), and an actual empty string.
+  * **Metrics** reads `metrics.k8s.io` for live CPU and memory against what each
+    container asked for. A cluster with no metrics-server is an ordinary fact
+    stated calmly, not a red panel — and an unmeasured pod is drawn as unknown,
+    never at zero, because a pod at zero cores reads as idle and idle is what
+    gets something turned off.
 * **Namespaces, Events, Network, Config, Storage, Access** — Services, Ingresses,
   ConfigMaps, Secrets (key names and byte lengths only), PVCs, PVs,
   StorageClasses, ServiceAccounts, Roles and Bindings.

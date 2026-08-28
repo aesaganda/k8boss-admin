@@ -33,18 +33,16 @@ import { FIXTURES, expectPageRendered, mockApi } from './fixtures.js';
  */
 
 /**
- * Open the pod console on a tab from the pods table.
+ * Open the pod page's Debug tab.
  *
- * Clicked on the QoS cell rather than the Name cell: the name is a
- * `ResourceLink` into the API explorer, so clicking it navigates instead of
- * opening the row's console.
+ * Straight to the URL rather than through the pods table: §7.5 puts the tab in
+ * the query string precisely so it is addressable, and a helper that clicked
+ * its way there would be testing the table's row menu in every case in this
+ * file rather than the panel each one is about.
  */
 async function openDebugTab(page) {
-  await page.goto('/pods');
-  await expectPageRendered(page, 'Pods');
-  await page.getByRole('gridcell', { name: 'Burstable', exact: true }).first().click();
-  await expect(page.getByTestId('pod-console')).toBeVisible();
-  await page.getByRole('tab', { name: 'Debug', exact: true }).click();
+  await page.goto('/pods/prod/checkout-7d9f8b6c4-hk2xv?tab=debug');
+  await expectPageRendered(page, 'checkout-7d9f8b6c4-hk2xv');
   await expect(page.getByTestId('debug-panel')).toBeVisible();
 }
 
@@ -137,7 +135,11 @@ test.describe('the Debug tab', () => {
     // §1.3: `unsupported` is an ordinary fact, not an error. No danger alert,
     // and no error state.
     await expect(page.getByTestId('error-state')).toHaveCount(0);
-    await expect(page.locator('.pf-m-danger')).toHaveCount(0);
+    // Scoped to the panel: the pod page's header carries a genuinely
+    // destructive Delete button, and a page-wide locator would be asserting
+    // that the page has no dangerous actions rather than that this fact is not
+    // rendered as a failure.
+    await expect(page.getByTestId('debug-panel').locator('.pf-m-danger')).toHaveCount(0);
     // And the action is not offered, because there is nothing to offer it
     // against. Asserted through the accessible name rather than a test id:
     // `ActionButton` sets its own `data-testid`, so a `debug-attach` locator
@@ -328,26 +330,26 @@ test.describe('the Debug tab', () => {
   }) => {
     await mockApi(page, {
       preflight: ALLOW_ALL,
-      // One application container plus one attached debug container — the §6
-      // row now carries both, tagged by `kind`.
-      pods: {
-        ...FIXTURES.pods,
-        items: [
+      // One application container plus one attached debug container — the §7.5
+      // detail carries both, tagged by `kind`.
+      podDetail: {
+        ...FIXTURES.podDetail,
+        containers: [
+          { ...FIXTURES.podDetail.containers[0] },
           {
-            ...FIXTURES.pods.items[0],
-            containers: [
-              { name: 'app', image: 'registry.example:5000/checkout:1.4.2', ready: true, restart_count: 0, kind: 'container' },
-              { name: 'debugger-x4k2p', image: 'busybox:1.36', ready: false, restart_count: 0, kind: 'ephemeral' },
-            ],
+            ...FIXTURES.podDetail.containers[0],
+            name: 'debugger-x4k2p',
+            image: 'busybox:1.36',
+            ready: false,
+            restarts: 0,
+            kind: 'ephemeral',
+            last_terminated: null,
           },
-          FIXTURES.pods.items[1],
         ],
       },
     });
-    await page.goto('/pods');
-    await expectPageRendered(page, 'Pods');
-    await page.getByRole('gridcell', { name: 'Burstable', exact: true }).first().click();
-    await expect(page.getByTestId('pod-console')).toBeVisible();
+    await page.goto('/pods/prod/checkout-7d9f8b6c4-hk2xv?tab=logs');
+    await expectPageRendered(page, 'checkout-7d9f8b6c4-hk2xv');
 
     // Logs: the API server still defaults the container, because it counts
     // `spec.containers` only. A viewer that started refusing here would have

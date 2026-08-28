@@ -451,6 +451,308 @@ export const FIXTURES = {
     unavailable: [],
   },
 
+  // §7.5 the pod detail: the §6 row plus what a table has no room for. The
+  // container carries `last_terminated` because that is the whole reason this
+  // endpoint exists — "restarted 3 times" is the symptom and `OOMKilled` is the
+  // answer — and `envoy` declares no resources at all, which must render as a
+  // named absence rather than as `cpu 0`.
+  podDetail: {
+    name: 'checkout-7d9f8b6c4-hk2xv',
+    namespace: 'prod',
+    node: 'ip-10-0-1-4',
+    phase: 'Running',
+    phase_detail: null,
+    ready: '1/2',
+    restarts: 3,
+    age_seconds: 86400,
+    ip: '10.128.4.17',
+    host_ip: '10.0.1.4',
+    qos_class: 'Burstable',
+    owner: { kind: 'ReplicaSet', name: 'checkout-7d9f8b6c4' },
+    containers: [
+      {
+        name: 'app',
+        image: 'registry.example:5000/checkout:1.4.2',
+        ready: true,
+        restarts: 3,
+        state: 'Running',
+        reason: null,
+        kind: 'container',
+        image_id: 'docker-pullable://registry.example:5000/checkout@sha256:aaa',
+        container_id: 'containerd://f1e2d3',
+        started_at: '2026-08-18T09:00:20Z',
+        last_terminated: {
+          reason: 'OOMKilled',
+          exit_code: 137,
+          signal: null,
+          started_at: '2026-08-18T08:59:00Z',
+          finished_at: '2026-08-18T09:00:18Z',
+          message: null,
+        },
+        ports: [{ name: 'http', container_port: 8080, protocol: 'TCP', host_port: null }],
+        requests: { cpu: '250m', memory: '256Mi' },
+        limits: { cpu: '1', memory: '512Mi' },
+        command: null,
+        args: null,
+      },
+      {
+        name: 'envoy',
+        image: 'envoyproxy/envoy:v1.29',
+        ready: false,
+        restarts: 0,
+        state: 'Waiting',
+        reason: 'CrashLoopBackOff',
+        kind: 'container',
+        image_id: null,
+        container_id: null,
+        started_at: null,
+        last_terminated: null,
+        ports: [],
+        // Null, not `{}`: this container declares nothing, and `cpu 0` would
+        // describe a BestEffort container as one that asked for nothing and got
+        // it — when what actually happens is that it is evicted first.
+        requests: null,
+        limits: null,
+        command: null,
+        args: null,
+      },
+    ],
+    init_containers: [
+      {
+        name: 'migrate',
+        image: 'registry.example:5000/migrate:1.4.2',
+        ready: true,
+        restarts: 0,
+        // Terminated with exit 0 is a *success* for an init container, which is
+        // why they are a separate list from the app containers.
+        state: 'Terminated',
+        reason: 'Completed',
+        kind: 'init',
+        image_id: null,
+        container_id: null,
+        started_at: null,
+        last_terminated: null,
+        ports: [],
+        requests: null,
+        limits: null,
+        command: null,
+        args: null,
+      },
+    ],
+    conditions: [
+      {
+        type: 'Ready',
+        // Not `False`. The kubelet has said nothing, which is what a node that
+        // stopped reporting looks like — and it must not render as "no".
+        status: 'Unknown',
+        reason: null,
+        message: 'kubelet stopped posting node status',
+        last_transition: '2026-08-19T08:00:00Z',
+      },
+      {
+        type: 'Initialized',
+        status: 'True',
+        reason: null,
+        message: null,
+        last_transition: '2026-08-18T09:00:10Z',
+      },
+    ],
+    volumes: [
+      { name: 'config', kind: 'configMap', source: 'checkout-config' },
+      { name: 'data', kind: 'persistentVolumeClaim', source: 'checkout-data' },
+    ],
+    uid: '5b1f7c0e-0f0a-4c1b-9a2e-b1d2c3e4f5a6',
+    resource_version: '884213',
+    created_at: '2026-08-18T09:00:00Z',
+    deleted_at: null,
+    labels: { app: 'checkout' },
+    annotations: { 'kubectl.kubernetes.io/default-container': 'app' },
+    service_account: 'checkout',
+    restart_policy: 'Always',
+    priority_class: null,
+    node_selector: { 'kubernetes.io/os': 'linux' },
+    host_network: false,
+    start_time: '2026-08-18T09:00:04Z',
+    status_reason: null,
+    status_message: null,
+    unavailable: [],
+    partial: false,
+  },
+
+  // §7.6 the environment. One of each `value_state`, because the whole point of
+  // the tab is that those four blanks are four different facts and must not
+  // render as one empty cell.
+  podEnvironment: {
+    items: [
+      {
+        container: 'app',
+        kind: 'container',
+        variables: [
+          {
+            name: 'TIMEOUT',
+            value: '30s',
+            value_state: 'resolved',
+            source: { kind: 'configMapRef', name: 'checkout-config', key: 'TIMEOUT', optional: null },
+            all_keys: false,
+            // Redefined below by an explicit `env` entry, so this is not what
+            // the container sees — and a row shown as though it were in force
+            // would be the wrong answer.
+            overridden: true,
+          },
+          {
+            name: 'LOG_LEVEL',
+            value: 'info',
+            value_state: 'literal',
+            source: null,
+            all_keys: false,
+            overridden: false,
+          },
+          {
+            name: 'TIMEOUT',
+            value: '5s',
+            value_state: 'literal',
+            source: null,
+            all_keys: false,
+            overridden: false,
+          },
+          {
+            name: 'DB_PASSWORD',
+            // Never a value: this endpoint does not return Secret material,
+            // whatever the console allows elsewhere.
+            value: null,
+            value_state: 'withheld',
+            source: { kind: 'secretKeyRef', name: 'checkout-db', key: 'password', optional: null },
+            all_keys: false,
+            overridden: false,
+          },
+          {
+            name: 'POD_IP',
+            value: null,
+            value_state: 'runtime',
+            source: { kind: 'fieldRef', name: 'status.podIP', key: null, optional: null },
+            all_keys: false,
+            overridden: false,
+          },
+          {
+            name: 'FEATURE_FLAGS',
+            // Unknown, not empty. The ConfigMap was refused, which is named in
+            // `unavailable` below.
+            value: null,
+            value_state: 'unreadable',
+            source: { kind: 'configMapKeyRef', name: 'checkout-flags', key: 'flags', optional: null },
+            all_keys: false,
+            overridden: false,
+          },
+          {
+            name: 'REGION',
+            // A third kind of blank: the ConfigMap WAS read and has no such
+            // key, so unless the reference is optional this container will not
+            // start. A finding, not a missing reading.
+            value: null,
+            value_state: 'absent',
+            source: { kind: 'configMapKeyRef', name: 'checkout-config', key: 'region', optional: null },
+            all_keys: false,
+            overridden: false,
+          },
+          {
+            // The stand-in for a wholesale import whose object could not be
+            // read: variables are coming from it and we cannot name them.
+            name: null,
+            value: null,
+            value_state: 'unreadable',
+            source: { kind: 'configMapRef', name: 'checkout-flags', key: null, optional: null },
+            all_keys: true,
+            overridden: false,
+          },
+        ],
+      },
+      { container: 'envoy', kind: 'container', variables: [] },
+    ],
+    continue: null,
+    remaining: null,
+    partial: true,
+    unavailable: [
+      {
+        group: '',
+        resource: 'configmaps',
+        namespace: 'prod',
+        reason: 'forbidden',
+        detail: 'configmaps "checkout-flags" is forbidden: cannot get resource "configmaps" in namespace "prod"',
+      },
+    ],
+  },
+
+  // §7.7 the metrics, sampled. `envoy` is an app container missing from the
+  // sample, which makes the pod total unknown rather than an understatement
+  // presented as a fact; `migrate` has finished, so its missing sample is an
+  // ordinary absence and is skipped by the arithmetic instead.
+  podMetrics: {
+    items: [
+      {
+        container: 'migrate',
+        kind: 'init',
+        usage: null,
+        sample_expected: false,
+        requests: null,
+        limits: null,
+      },
+      {
+        container: 'app',
+        kind: 'container',
+        usage: { cpu_cores: 0.12, memory_bytes: 188743680 },
+        sample_expected: true,
+        requests: { cpu: '250m', memory: '256Mi' },
+        limits: { cpu: '1', memory: '512Mi' },
+      },
+      {
+        container: 'envoy',
+        kind: 'container',
+        usage: null,
+        sample_expected: true,
+        requests: null,
+        limits: null,
+      },
+    ],
+    continue: null,
+    remaining: null,
+    partial: false,
+    unavailable: [],
+    pod: { cpu_cores: null, memory_bytes: null },
+    window_seconds: 30,
+    timestamp: '2026-08-19T09:04:00Z',
+  },
+
+  // The same endpoint on a cluster with no metrics-server. A 200 with every
+  // usage at null and an `unsupported` entry — §1.2's "not present on this
+  // cluster", which the UI renders calmly and never as a zero.
+  podMetricsUnsupported: {
+    items: [
+      {
+        container: 'app',
+        kind: 'container',
+        usage: null,
+        sample_expected: true,
+        requests: { cpu: '250m', memory: '256Mi' },
+        limits: { cpu: '1', memory: '512Mi' },
+      },
+    ],
+    continue: null,
+    remaining: null,
+    partial: true,
+    unavailable: [
+      {
+        group: 'metrics.k8s.io',
+        resource: 'pods',
+        namespace: 'prod',
+        reason: 'unsupported',
+        detail: 'This cluster does not serve metrics.k8s.io/v1beta1.',
+      },
+    ],
+    pod: { cpu_cores: null, memory_bytes: null },
+    window_seconds: null,
+    timestamp: null,
+  },
+
   // §7.4. Three fixtures for the three values of `supported`, because all
   // three render differently and collapsing any two is the bug: `false` says
   // this cluster cannot do it, `null` says we could not find out, and only one
@@ -1361,6 +1663,9 @@ export async function mockApi(
     yaml = null,
     workloads = null,
     pods = null,
+    podDetail = null,
+    podEnvironment = null,
+    podMetrics = null,
     debug = null,
     debugAttach = null,
     preflight = null,
@@ -1504,6 +1809,22 @@ export async function mockApi(
         );
       }
       return json(debug ?? FIXTURES.debugSupported);
+    }
+    // §7.6 and §7.7, before the §7.5 detail below: all three live under
+    // /pods/{ns}/{name}, and a router that matched the detail first would
+    // answer an environment read with a pod.
+    if (/^\/pods\/[^/]+\/[^/]+\/environment$/.test(path)) {
+      return json(podEnvironment ?? FIXTURES.podEnvironment);
+    }
+    if (/^\/pods\/[^/]+\/[^/]+\/metrics$/.test(path)) {
+      return json(podMetrics ?? FIXTURES.podMetrics);
+    }
+    if (/^\/pods\/[^/]+\/[^/]+$/.test(path)) {
+      const name = decodeURIComponent(path.split('/').at(-1));
+      const base = podDetail ?? FIXTURES.podDetail;
+      // The name from the URL, so a spec that navigates to a second pod does
+      // not get the first one's detail under the second one's heading.
+      return json({ ...base, name });
     }
     if (path === '/resources/core/v1/pods') return json(pods ?? FIXTURES.pods);
     if (path === '/resources/core/v1/services') return json(services ?? FIXTURES.services);

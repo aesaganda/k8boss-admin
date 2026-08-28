@@ -135,6 +135,19 @@ rules:
     resources: ["pods", "pods/log"]
     verbs: ["get", "list", "watch"]
 
+  # §7.7 the pod page's Metrics tab. `metrics.k8s.io` is an aggregated API served
+  # by metrics-server, which a great many clusters do not run — and on those the
+  # tab reports `unsupported`, an ordinary fact rendered calmly, whether or not
+  # this rule is present. Where the API *is* served, withholding this makes every
+  # `usage` null with a `forbidden` entry rather than zero: a pod drawn at zero
+  # cores reads as idle, and idle is what gets something turned off.
+  #
+  # `get` and `list` and no `watch`: the tab polls a one-shot read, and a verb no
+  # code path issues is a grant with no feature behind it.
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+
   # §5 events. The events page scans a bounded window and sorts it itself,
   # because the API server offers no server-side ordering.
   - apiGroups: [""]
