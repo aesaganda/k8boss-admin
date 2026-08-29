@@ -87,6 +87,7 @@ identity do X" and returns an answer.
 | `get,list,watch rbac.authorization.k8s.io/roles,rolebindings,clusterroles,clusterrolebindings` | §8 Access page | Access page shows `forbidden`. Reading RBAC is not the same privilege as holding it, but it is a map of the cluster's permissions — a reasonable thing to withhold |
 | `get,list,watch networking.k8s.io/ingresses` | §8 Ingresses | Ingresses tab shows `forbidden` |
 | `get,list,watch networking.k8s.io/ingressclasses` | The `class` column for an Ingress whose spec names none | The column is blank rather than wrong |
+| `get,list,watch networking.k8s.io/networkpolicies` | §8.1 the Network policies tab, and §8.2 the pod isolation view | Both tabs show `forbidden`. The isolation view fails outright rather than reporting every pod as unrestricted from a read that did not happen |
 | `get,list,watch discovery.k8s.io/endpointslices` | §8 Services' `endpoint_count` | The column is **`null`**, with an `unavailable` entry — not `0`, which would claim the Service backs nothing. A Service that genuinely has no EndpointSlice still reports `0`, which is a real zero |
 | `get,list,watch ""/endpoints` | The Network page's endpoint listing | That table shows `forbidden` |
 
@@ -132,6 +133,7 @@ these grants.
 | `patch apps/deployments,statefulsets,daemonsets` | §6 restart (a pod-template annotation, the `kubectl rollout restart` mechanism) and §6 rollback (an RFC 6902 replace of `/spec/template`) | Restart and Rollback disabled with the reason |
 | `patch batch/jobs,cronjobs` | §6 suspend | Suspend disabled with the reason. Only Jobs and CronJobs have `spec.suspend`; other kinds are refused at `422 invalid` naming the kind, before RBAC is consulted at all |
 | `create,update,patch,delete` on the §4/§8 resources | The YAML editor and the delete button on those pages | Those actions are disabled with the reason; the editor still opens read-only and the diff still renders |
+| `create,update,patch,delete networking.k8s.io/networkpolicies` | §8.1 New network policy, Edit YAML and Delete on the Network policies tab | Those three are disabled with the reason and the tab stays readable. Withholding this while keeping the read grant is a sensible posture: the isolation view is the reason to open the tab, and it needs no write verb |
 | `patch,update ""/nodes` | §5 cordon and drain | Cordon and Drain disabled with the reason. Note this grants cordon of **any** node, control-plane included |
 | `create ""/pods/eviction` | §5 drain, pod half | The drain refuses at its own preflight, from inside the apply step — because permission to cordon a node is not permission to evict what runs on it, and finding that out three pods into a drain is not a discovery anyone wants. The console never falls back to deleting pods: delete ignores PodDisruptionBudgets |
 | `delete ""/pods` | The resource browser's pod delete | That one button is disabled. Distinct from eviction: a different action with a different confirm dialog |

@@ -485,7 +485,7 @@ Exec sessions are audited on open and on close.
 
 ---
 
-## 8. Config, storage, access — typed rows
+## 8. Config, storage, access, network policy — typed rows
 
 Served through §4's generic endpoint; these are the shapes the UI expects when
 it asks for them, produced by the shaping layer.
@@ -505,6 +505,117 @@ it asks for them, produced by the shaping layer.
 - **ServiceAccounts** — `{name, namespace, secrets_count, automount, age_seconds}`.
 - **Roles / ClusterRoles** — `{name, namespace, rule_count, rules:[{apiGroups,resources,verbs,resourceNames}], age_seconds}`.
 - **RoleBindings / ClusterRoleBindings** — `{name, namespace, role:{kind,name}, subjects:[{kind,name,namespace}], age_seconds}`.
+- **NetworkPolicies** — see §8.1; the row is large enough to need its own
+  subsection, and every null in it means something specific.
+
+### 8.1 The NetworkPolicy row
+
+```json
+{ "name": "default-deny-ingress", "namespace": "prod",
+  "pod_selector": {"matchLabels": {}, "matchExpressions": []},
+  "selects_all_pods": true,
+  "policy_types": ["Ingress"], "policy_types_source": "declared",
+  "ingress": {"governed": true,  "rule_count": 0,    "effect": "deny_all", "rules": []},
+  "egress":  {"governed": false, "rule_count": null, "effect": null,       "rules": []},
+  "age_seconds": 604800 }
+```
+
+**`rule_count` is `null` when the direction is not governed, and `0` only when it
+is.** This is §0's null-versus-zero rule on the object where breaking it is most
+expensive. `policyTypes: [Ingress]` with no `egress` section does not restrict
+egress at all; `policyTypes: [Ingress, Egress]` with no `egress` section denies
+*every* packet out of *every* pod the policy selects. The two differ by one word
+inside a list, and a `0` in both would render the catastrophic one as the
+harmless one.
+
+`effect` states the same thing for a reader, and is `null` exactly when
+`governed` is false:
+
+| `effect` | Meaning |
+|---|---|
+| `deny_all` | Governed, no rules. Nothing is permitted in this direction. |
+| `allow_all` | At least one rule restricts neither peer nor port. **Rules are a union of allowances**, so no restrictive neighbour narrows it. |
+| `restricted` | Governed, with rules naming peers or ports. |
+
+`rules[]` is `{peers, allows_all_peers, ports, allows_all_ports}`. An absent or
+empty `from`/`to` means all peers and an absent or empty `ports` means all ports
+— the API's own rule, computed here so no client counts list lengths and gets it
+backwards. Each peer is
+`{type, podSelector, namespaceSelector, cidr, except}` with `type` one of
+`pod` (pods **in the policy's own namespace**), `namespace` (every pod in the
+matching namespaces), `namespace_pod` (the intersection, from one list entry
+carrying both selectors) or `ipBlock`. A peer carrying none of the three is
+returned as `unknown` rather than dropped: a dropped peer renders a rule
+*narrower* than the one the cluster holds.
+
+`policy_types_source` is `declared` or `derived`. The API server defaults
+`spec.policyTypes` on write, so a read normally declares it; when it does not,
+the API's defaulting rule is applied here and labelled, because the derivation is
+the console's statement rather than the object's.
+
+`selects_all_pods` is a tri-state: `true` for `podSelector: {}` (which selects
+**every** pod in the namespace), `false` for a populated selector, `null` for an
+absent one — which the API forbids, so it means an object this console does not
+understand.
+
+**Nothing in this row asserts enforcement.** NetworkPolicy is implemented by the
+CNI plugin, and no API the console can reach reports whether a given cluster's
+plugin implements it. A cluster whose plugin does not will store and serve these
+objects while forwarding every packet they describe as denied. The row describes
+what the API server holds; the UI says so out loud.
+
+### 8.2 Network policy endpoints
+
+Listing NetworkPolicies is §4 —
+`GET /api/resources/networking.k8s.io/v1/networkpolicies` returns the §8.1 row —
+and creating, replacing and deleting one is §4 as well, through the single
+mutation funnel. These two endpoints exist only for the questions a shaper cannot
+answer, because both need a pod listing.
+
+#### `GET /api/network/policies/{namespace}/{name}`
+→ the §8.1 row plus `{selected_pods: [PodRow] | null, selected_pod_count: int | null,
+unavailable, partial}`.
+
+`selected_pods` is `null`, not `[]`, when the pod listing failed **or** when a
+selector could not be evaluated. `[]` means the policy selects nothing and is
+inert — the finding that gets a policy deleted as dead, so a failed read must
+never look like one. The policy read is primary and raises; the pod listing is
+secondary and is collected.
+
+The §8.1 row served by §4 deliberately carries no `selected_pod_count`: a field
+that were always `null` there would make the em dash mean "we did not look", and
+this kind cannot afford a second meaning for `null`.
+
+#### `GET /api/network/isolation?namespace=`
+→ the §1.2 envelope over **pods**, plus `{namespace, policy_count, summary}`.
+
+The rows are pods and the policies are the decoration, because the question is
+which pods **nothing** selects — and such a pod appears on no policy's page.
+Kubernetes defaults to allow, so an unselected pod accepts traffic from anywhere
+in the cluster.
+
+Each row is the §6 PodRow plus:
+
+```json
+{ "labels": {"app": "checkout"}, "host_network": false,
+  "policies": ["default-deny-ingress"],
+  "ingress": {"isolated": true, "effect": "deny_all", "policies": ["default-deny-ingress"]},
+  "egress":  {"isolated": false, "effect": null, "policies": []} }
+```
+
+`isolated` is a tri-state. `true` means a policy that definitely selects this pod
+governs that direction; `false` means none does; `null` means a selector could
+not be evaluated, and is **not** rendered as `false` — "nothing protects this
+pod" is the sentence an operator acts on. `effect` is the union of the governing
+policies' effects and is `null` when any selecting policy could not be evaluated,
+because an undecided policy can only widen what is permitted. `summary` counts
+`isolated`, `unrestricted` and `unknown` separately per direction, so the three
+sum to `pod_count` and none of them is a guess.
+
+**Both reads are primary and both raise.** Degrading a failed *policy* listing to
+nulls would render a full table of pods under a headline count of unrestricted
+ones, assembled entirely from a read that failed.
+
 
 ---
 

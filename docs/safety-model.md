@@ -452,3 +452,21 @@ Being honest about the edges is part of the model:
   `create pods/exec`, and the session is audited on open and close — but within
   the session, the console is a terminal and nothing more. Withholding
   `pods/exec` is the only real control.
+* **A NetworkPolicy shown here is a declaration, not an enforcement.**
+  NetworkPolicy objects are implemented by the cluster's CNI plugin, and no API
+  this console can reach reports whether a given cluster's plugin implements
+  them: a cluster running a plugin without NetworkPolicy support accepts, stores
+  and serves these objects while forwarding every packet they describe as
+  denied. So the console reports what the API server holds and never uses a word
+  like *enforced*, *blocked* or *protected*. `ingress.isolated` on the pod
+  isolation view means "a policy selecting this pod declares an ingress
+  section" — the strongest true statement available, and a much weaker one than
+  it looks. Both NetworkPolicy tabs carry that sentence above the table rather
+  than in a tooltip.
+
+  The same caution runs through the row itself. A direction nobody governs is
+  `rule_count: null` and a direction that denies everything is `rule_count: 0`,
+  because the two are one word apart in YAML and opposite in effect; a policy
+  whose `podSelector` matches nothing reports `selected_pod_count: 0` and is
+  flagged as inert, while a pod listing we could not make reports `null`. See
+  §8.1 of [`api-contract.md`](api-contract.md).

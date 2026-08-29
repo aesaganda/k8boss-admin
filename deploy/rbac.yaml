@@ -170,6 +170,12 @@ rules:
 
   # §8 Ingresses. `ingressclasses` fills the `class` column for an Ingress whose
   # spec names none; without it the column is blank rather than wrong.
+  #
+  # `networkpolicies` backs §8.1's Network policies tab and §8.2's pod isolation
+  # view. Note what the isolation view does when this is withheld: it fails, with
+  # the 403 naming this resource. It does NOT degrade to a table of pods marked
+  # unrestricted — "no policy selects this pod" assembled from a policy listing
+  # that never happened is a security finding invented out of a missing grant.
   - apiGroups: ["networking.k8s.io"]
     resources: ["ingresses", "ingressclasses", "networkpolicies"]
     verbs: ["get", "list", "watch"]
@@ -303,6 +309,9 @@ rules:
   - apiGroups: [""]
     resources: ["configmaps", "secrets", "services", "serviceaccounts", "persistentvolumeclaims"]
     verbs: ["create", "update", "patch", "delete"]
+  # `networkpolicies` is what the Network policies tab's New / Edit YAML / Delete
+  # buttons need. Dropping it leaves that tab fully readable — and the pod
+  # isolation view, which is the reason to open it, needs no write verb at all.
   - apiGroups: ["networking.k8s.io"]
     resources: ["ingresses", "networkpolicies"]
     verbs: ["create", "update", "patch", "delete"]

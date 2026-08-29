@@ -514,6 +514,330 @@ def ingress_row(obj: Any) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- #
+# §8 — network policy
+# --------------------------------------------------------------------------- #
+
+#: The four ``matchExpressions`` operators ``metav1.LabelSelector`` defines. An
+#: operator outside this set is not guessed at; see :func:`label_selector_matches`.
+_SELECTOR_OPERATORS = frozenset({"In", "NotIn", "Exists", "DoesNotExist"})
+
+
+def label_selector_matches(selector: Any, labels: Any) -> bool | None:
+    """Does ``selector`` (a ``metav1.LabelSelector``) select an object with ``labels``?
+
+    **Tri-state, and the third state is the whole reason this is not a
+    predicate.** ``True`` and ``False`` are answers; ``None`` means *this
+    selector uses something this function cannot evaluate* — an operator outside
+    the four the API defines today, or a selector that is absent where the caller
+    has no contextual meaning for absence.
+
+    A two-state version would have to pick a side for the undecidable case, and
+    both sides are the confidently wrong answer §0 is about, pointed at a
+    security control. ``False`` reports a NetworkPolicy that selects the whole
+    namespace as selecting nothing — so the operator writes another one, or
+    deletes this one as dead. ``True`` reports pods as protected by a policy that
+    does not select them.
+
+    An empty selector (``{}``, or one whose two lists are both empty) matches
+    **everything**. That is the API's own rule and it is the single most
+    important line in this function: ``spec.podSelector: {}`` on a NetworkPolicy
+    is what "this policy applies to every pod in the namespace" looks like, and
+    it is spelled exactly like a selector somebody forgot to fill in.
+
+    ``labels`` of ``None`` is treated as an object with no labels — which is what
+    a pod with no ``metadata.labels`` is, and is decidable: an empty selector
+    still matches it and ``Exists`` still does not.
+
+    ``selector`` of ``None`` returns ``None``. Absence is *contextual* in the
+    NetworkPolicy API — an absent ``namespaceSelector`` on a peer means "this
+    policy's own namespace", which is a fact about the peer and not about the
+    selector — so callers resolve absence before asking, and a ``None`` arriving
+    here is a question this function genuinely cannot answer.
+    """
+    if selector is None:
+        return None
+
+    have = {str(k): v for k, v in (labels or {}).items()} if labels else {}
+
+    for key, value in (get_field(selector, "matchLabels", default={}) or {}).items():
+        if have.get(str(key)) != value:
+            return False
+
+    for expression in get_field(selector, "matchExpressions", default=[]) or []:
+        operator = get_field(expression, "operator")
+        key = str(get_field(expression, "key") or "")
+        values = [v for v in (get_field(expression, "values", default=[]) or [])]
+        if operator not in _SELECTOR_OPERATORS:
+            logger.warning(
+                "Label selector uses operator %r, which this console cannot "
+                "evaluate; the match is reported as unknown rather than guessed.",
+                operator,
+            )
+            return None
+        present = key in have
+        if operator == "In" and (not present or have[key] not in values):
+            return False
+        if operator == "NotIn" and present and have[key] in values:
+            return False
+        if operator == "Exists" and not present:
+            return False
+        if operator == "DoesNotExist" and present:
+            return False
+
+    return True
+
+
+def selector_is_empty(selector: Any) -> bool | None:
+    """Is this an *empty* selector — the one that matches every object?
+
+    ``None`` for an absent selector, for the same reason
+    :func:`label_selector_matches` returns it: "there is no selector here" and
+    "there is a selector here and it selects everything" are opposite facts, and
+    a boolean cannot carry both.
+    """
+    if selector is None:
+        return None
+    return not (get_field(selector, "matchLabels", default={}) or {}) and not (
+        get_field(selector, "matchExpressions", default=[]) or []
+    )
+
+
+def _selector_dict(selector: Any) -> dict[str, Any] | None:
+    """A LabelSelector as plain JSON, or ``None`` when there is no selector.
+
+    Both keys are always present on a returned selector, as lists and dicts
+    rather than nulls, so the frontend can iterate them without a guard.
+    """
+    if selector is None:
+        return None
+    return {
+        "matchLabels": {
+            str(k): v
+            for k, v in (get_field(selector, "matchLabels", default={}) or {}).items()
+        },
+        "matchExpressions": [
+            {
+                "key": get_field(expression, "key"),
+                "operator": get_field(expression, "operator"),
+                "values": list(get_field(expression, "values", default=[]) or []),
+            }
+            for expression in get_field(selector, "matchExpressions", default=[]) or []
+        ],
+    }
+
+
+def _policy_peers(raw: Any) -> list[dict[str, Any]]:
+    """``from``/``to`` entries as typed peers.
+
+    ``type`` is the field the UI renders a sentence from, and it exists because
+    the three peer shapes read almost identically in YAML and mean very
+    different things:
+
+    * ``pod`` — ``podSelector`` alone: pods matching it **in the policy's own
+      namespace**. Not cluster-wide, which is the single most common misreading
+      of this API.
+    * ``namespace`` — ``namespaceSelector`` alone: *every* pod in every matching
+      namespace.
+    * ``namespace_pod`` — both in one entry: the intersection. Two separate
+      entries with one selector each are a union, and the difference between
+      ``- namespaceSelector: …\\n  podSelector: …`` and
+      ``- namespaceSelector: …\\n- podSelector: …`` is two YAML characters and an
+      entirely different policy.
+    * ``ipBlock`` — a CIDR, with optional exclusions.
+
+    A peer carrying none of the three is ``unknown`` and is still returned. The
+    API server rejects such a peer, so reaching this means an API version this
+    console does not understand — and dropping it would render a rule that looks
+    *narrower* than the one the cluster is enforcing.
+    """
+    peers: list[dict[str, Any]] = []
+    for peer in raw or []:
+        ip_block = get_field(peer, "ipBlock")
+        pod_selector = get_field(peer, "podSelector")
+        namespace_selector = get_field(peer, "namespaceSelector")
+
+        if ip_block is not None:
+            peers.append({
+                "type": "ipBlock",
+                "podSelector": None,
+                "namespaceSelector": None,
+                "cidr": get_field(ip_block, "cidr"),
+                "except": [
+                    str(entry) for entry in (get_field(ip_block, "except", default=[]) or [])
+                ],
+            })
+            continue
+
+        if namespace_selector is not None and pod_selector is not None:
+            kind = "namespace_pod"
+        elif namespace_selector is not None:
+            kind = "namespace"
+        elif pod_selector is not None:
+            kind = "pod"
+        else:
+            kind = "unknown"
+
+        peers.append({
+            "type": kind,
+            "podSelector": _selector_dict(pod_selector),
+            "namespaceSelector": _selector_dict(namespace_selector),
+            "cidr": None,
+            "except": [],
+        })
+    return peers
+
+
+def _policy_ports(raw: Any) -> list[dict[str, Any]]:
+    """``ports`` entries, with the values left exactly as the object carries them.
+
+    ``port`` is an int or a *named* port from the target pod's container spec,
+    and both are returned as they arrive: coercing a name to a number would
+    invent a port, and coercing a number to a string would break the comparison
+    the UI makes against a container's declared ports.
+
+    ``protocol`` is not defaulted to ``TCP`` here. The API server defaults it on
+    write so a read almost always carries one; where it does not, the caller can
+    say "unset, which the API defines as TCP" — a sentence this function has no
+    way to write and no business inventing.
+    """
+    return [
+        {
+            "protocol": get_field(port, "protocol"),
+            "port": get_field(port, "port"),
+            "endPort": get_field(port, "endPort"),
+        }
+        for port in raw or []
+    ]
+
+
+def _policy_direction(raw_rules: Any, *, governed: bool, peer_key: str) -> dict[str, Any]:
+    """One direction of a NetworkPolicy: whether it is governed, and to what effect.
+
+    **``rule_count`` is ``None`` when the direction is not governed, and ``0``
+    only when it is.** This is the §0 corollary on the object where getting it
+    wrong is most expensive. ``policyTypes: [Ingress]`` with no ``egress``
+    section does not restrict egress *at all*; ``policyTypes: [Ingress, Egress]``
+    with no ``egress`` section denies **all** egress from every selected pod.
+    The two differ by one word in a list, produce identical-looking YAML around
+    it, and a ``0`` in this field would render them the same — as "no rules",
+    which reads as the harmless one and is the catastrophic one.
+
+    ``effect`` is the same distinction stated for a human:
+
+    * ``deny_all`` — governed, no rules. Nothing is permitted in this direction.
+    * ``allow_all`` — governed, and at least one rule restricts neither peer nor
+      port. Such a rule permits everything, so the rest of the rules cannot
+      narrow it: NetworkPolicy rules are a union of allowances, never an
+      intersection, and a reader who expects "and" gets this exactly backwards.
+    * ``restricted`` — governed, with rules that name peers or ports.
+
+    An empty or missing ``from``/``to`` on a rule means all peers, and an empty
+    or missing ``ports`` means all ports; that is the API's rule, and it is why
+    ``allows_all_peers`` and ``allows_all_ports`` are computed rather than left
+    to a caller counting list lengths.
+    """
+    if not governed:
+        return {"governed": False, "rule_count": None, "effect": None, "rules": []}
+
+    rules: list[dict[str, Any]] = []
+    for rule in raw_rules or []:
+        peers = _policy_peers(get_field(rule, peer_key, default=[]))
+        ports = _policy_ports(get_field(rule, "ports", default=[]))
+        rules.append({
+            "peers": peers,
+            "allows_all_peers": not peers,
+            "ports": ports,
+            "allows_all_ports": not ports,
+        })
+
+    if not rules:
+        effect = "deny_all"
+    elif any(rule["allows_all_peers"] and rule["allows_all_ports"] for rule in rules):
+        effect = "allow_all"
+    else:
+        effect = "restricted"
+
+    return {"governed": True, "rule_count": len(rules), "effect": effect, "rules": rules}
+
+
+def policy_types(obj: Any) -> tuple[list[str], str]:
+    """``(policy_types, source)`` for a NetworkPolicy.
+
+    ``spec.policyTypes`` is defaulted by the API server on write, so a read
+    normally carries it and ``source`` is ``"declared"``. When it is absent the
+    API's own defaulting rule is applied — every policy affects ingress, and a
+    policy carrying an ``egress`` section also affects egress — and ``source`` is
+    ``"derived"``.
+
+    The source travels with the value because the derivation is a statement
+    about what the *cluster* will enforce, made by this console rather than read
+    off the object. Presenting it as if the object said so would leave an
+    operator unable to tell a policy that declares its scope from one whose scope
+    the console worked out — and the second is the one to go and pin down.
+
+    An explicitly empty ``policyTypes: []`` is returned as such: a policy that
+    governs no direction at all. That is a real, if useless, object, and it is
+    not the same as an absent field.
+    """
+    declared = get_field(obj, "spec", "policyTypes", default=None)
+    if declared is not None:
+        return [str(entry) for entry in declared], "declared"
+
+    derived = ["Ingress"]
+    if get_field(obj, "spec", "egress", default=None) is not None:
+        derived.append("Egress")
+    return derived, "derived"
+
+
+def networkpolicy_row(obj: Any) -> dict[str, Any]:
+    """§8 NetworkPolicy row.
+
+    Pure, like every shaper here — which for this kind means it describes what
+    the policy *declares* and never what the cluster *enforces*. Nothing in the
+    API server reports whether a CNI plugin implements NetworkPolicy, so a
+    cluster whose network plugin ignores these objects serves them back
+    unchanged and this row looks identical. Callers render the declared rules and
+    say so; a row that implied enforcement would be a security claim this console
+    cannot stand behind.
+
+    ``selects_all_pods`` is a tri-state for the reason in
+    :func:`selector_is_empty`: ``spec.podSelector: {}`` selects every pod in the
+    namespace, a populated selector selects some, and an absent one — which the
+    API forbids, so it means an object this console does not understand — is
+    ``null`` rather than either.
+
+    No pod count. The question "how many pods does this actually select" needs a
+    pod listing, which is I/O, which shapers do not do; and a ``selected_pod_count``
+    key that were always ``null`` here would collide head-on with §0's rule that
+    ``null`` means *we could not look*. ``app.services.network`` owns that read
+    and adds the count where it has genuinely been made.
+    """
+    spec_types, source = policy_types(obj)
+    governed = set(spec_types)
+    pod_selector = get_field(obj, "spec", "podSelector")
+
+    return {
+        "name": get_field(obj, "metadata", "name"),
+        "namespace": get_field(obj, "metadata", "namespace"),
+        "pod_selector": _selector_dict(pod_selector),
+        "selects_all_pods": selector_is_empty(pod_selector),
+        "policy_types": spec_types,
+        "policy_types_source": source,
+        "ingress": _policy_direction(
+            get_field(obj, "spec", "ingress", default=[]),
+            governed="Ingress" in governed,
+            peer_key="from",
+        ),
+        "egress": _policy_direction(
+            get_field(obj, "spec", "egress", default=[]),
+            governed="Egress" in governed,
+            peer_key="to",
+        ),
+        "age_seconds": age_seconds(get_field(obj, "metadata", "creationTimestamp")),
+    }
+
+
+# --------------------------------------------------------------------------- #
 # §8 — config
 # --------------------------------------------------------------------------- #
 
@@ -822,6 +1146,7 @@ ROW_SHAPERS: dict[tuple[str, str], Callable[[Any], dict[str, Any]]] = {
     ("", "persistentvolumes"): pv_row,
     ("", "serviceaccounts"): serviceaccount_row,
     ("networking.k8s.io", "ingresses"): ingress_row,
+    ("networking.k8s.io", "networkpolicies"): networkpolicy_row,
     ("storage.k8s.io", "storageclasses"): storageclass_row,
     ("rbac.authorization.k8s.io", "roles"): role_row,
     ("rbac.authorization.k8s.io", "clusterroles"): clusterrole_row,
@@ -850,11 +1175,14 @@ __all__ = [
     "configmap_row",
     "get_field",
     "ingress_row",
+    "label_selector_matches",
+    "networkpolicy_row",
     "parse_bytes",
     "parse_cpu_cores",
     "parse_quantity",
     "phase_detail",
     "pod_row",
+    "policy_types",
     "pv_row",
     "pvc_row",
     "redact_secret",
@@ -862,6 +1190,7 @@ __all__ = [
     "role_row",
     "rolebinding_row",
     "secret_row",
+    "selector_is_empty",
     "service_row",
     "serviceaccount_row",
     "shaper_for",

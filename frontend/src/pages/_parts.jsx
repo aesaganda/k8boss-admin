@@ -664,9 +664,16 @@ export function ResourceTabsPage({ title, subtitle, actions, tabs, initialTab })
   const [activeKey, setActiveKey] = useState(initialTab ?? tabs[0]?.key);
   const active = tabs.find((tab) => tab.key === activeKey) ?? tabs[0];
 
+  // `actions` may be a function of the active tab. A page-level button that is
+  // only meaningful on one listing — "New network policy" while the operator is
+  // reading Services — is not harmless clutter: it is an action whose target the
+  // header does not name, and the obvious guess about what it applies to is the
+  // tab in front of them.
+  const headerActions = typeof actions === 'function' ? actions(active?.key) : actions;
+
   return (
     <>
-      <PageHeader title={title} subtitle={subtitle} actions={actions} />
+      <PageHeader title={title} subtitle={subtitle} actions={headerActions} />
       <Tabs
         activeKey={active?.key}
         onSelect={(_event, key) => setActiveKey(key)}
@@ -680,9 +687,30 @@ export function ResourceTabsPage({ title, subtitle, actions, tabs, initialTab })
       {/* Keyed on the tab so switching tabs resets the search box, the drawer
           and the accumulated `continue` pages together. Carrying a Secrets
           filter over into ConfigMaps looked like an empty namespace. */}
-      {active && <ResourceTabBody key={active.key} tab={active} />}
+      {active &&
+        (active.render ? (
+          // A tab whose rows are not a §4 listing renders itself. The escape
+          // hatch is narrow on purpose: everything that *is* a listing goes
+          // through `ResourceTabBody`, which is where the partial banner, the
+          // truncation footer and the namespace-column rule live — three things
+          // a hand-rolled tab would have to remember and would eventually not.
+          <CustomTabBody key={active.key} render={active.render} />
+        ) : (
+          // `refreshToken` is part of the key so a page that has just written to
+          // the cluster can force this listing to be read again — by changing a
+          // number, not by reaching into a hook it does not own. A write from a
+          // page-level button has no row and therefore no listing to call
+          // `reload` on, and a table still showing the object somebody just
+          // deleted is the moment a console stops being believed.
+          <ResourceTabBody key={`${active.key}:${active.refreshToken ?? ''}`} tab={active} />
+        ))}
     </>
   );
+}
+
+/** Renders a tab's own body, keyed like the listing ones so it remounts too. */
+function CustomTabBody({ render }) {
+  return render();
 }
 
 function ResourceTabBody({ tab }) {
@@ -712,6 +740,12 @@ function ResourceTabBody({ tab }) {
   const table = (
     <>
       <PartialBanner unavailable={listing.unavailable} />
+      {/* A standing caveat about what this table does NOT prove, above the rows
+          rather than in a drawer nobody has opened yet. `PartialBanner` reports
+          what could not be read; this reports what was read and still cannot be
+          concluded from — see the NetworkPolicy tabs, where every value in the
+          table is a declaration the cluster may or may not enforce. */}
+      {tab.notice}
       <Toolbar ariaLabel={`${tab.title} controls`}>
         <Toolbar.Item>
           <SearchInput value={search} onChange={setSearch} placeholder={`Filter ${tab.title.toLowerCase()}…`} />

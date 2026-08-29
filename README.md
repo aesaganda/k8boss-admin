@@ -296,6 +296,23 @@ version being that there is no undo for a deleted StatefulSet.
 * **Namespaces, Events, Network, Config, Storage, Access** — Services, Ingresses,
   ConfigMaps, Secrets (key names and byte lengths only), PVCs, PVs,
   StorageClasses, ServiceAccounts, Roles and Bindings.
+* **Network policies** — the declared rules, spelled out as sentences rather than
+  echoed as YAML, because the YAML is what people misread. A direction nobody
+  governs never renders as a denial (`policyTypes: [Ingress]` with no egress
+  section restricts nothing; add `Egress` to that list and it blocks everything),
+  a rule that names neither peer nor port is reported as opening the direction
+  outright, and a bare `podSelector` peer is described as *pods in this
+  namespace* — which is the single most common misreading of the API.
+* **Pod isolation** — the inverse listing: every pod, and which policies select
+  it. Reading the policy list tells you what you wrote; this tells you what you
+  missed, and a pod nothing selects — unrestricted, because Kubernetes defaults
+  to allow — appears on no policy's page. A pod whose selectors could not be
+  evaluated is an em dash, never "unrestricted".
+
+  Neither view claims a policy is *enforced*. NetworkPolicy is implemented by the
+  CNI plugin, no API here reports whether this cluster's implements it, and a
+  cluster whose plugin does not will serve these objects while forwarding every
+  packet they describe as denied. Both tabs say so above the table.
 * **Resource explorer** — anything the cluster serves, including CRDs, through
   the dynamic client, with the raw object and a YAML view.
 * **Logs and exec** — pod logs over HTTP or a WebSocket that always terminates
@@ -311,6 +328,9 @@ version being that there is no undo for a deleted StatefulSet.
   for StatefulSets and DaemonSets. A kind with no revision concept says so rather
   than returning an empty list.
 * Cordon, uncordon and drain.
+* Create, edit and delete NetworkPolicies, from a default-deny starter manifest —
+  through the same dry-run-then-confirm funnel as every other write, so the diff
+  is shown before a segmentation change reaches a cluster.
 * Create, replace and delete any resource from YAML, with optimistic concurrency.
   The manifest editor numbers its lines and colours its syntax, so the line a
   parse error names is the line you can see.
