@@ -69,11 +69,14 @@ identity do X" and returns an answer.
 | `get,list,watch apps/controllerrevisions` | §6 rollout history for StatefulSets and DaemonSets | The rollout panel for those two kinds reports that it could not read history. It must **not** be rendered as "this workload has never been rolled out" — that is a different fact. Deployments are unaffected: their history lives in ReplicaSets |
 | `get,list,watch ""/services` | §6 workload detail's related Services; §8 Services | The `services` block of a workload detail is empty with an `unavailable` entry |
 
-## Read: pod logs
+## Read: one pod — logs, environment, usage
 
 | Permission | Feature | Withheld |
 |---|---|---|
 | `get ""/pods/log` | §7 `GET /api/pods/{ns}/{name}/logs` and the log WebSocket | The log viewer shows a `forbidden` error frame. **This is a separate RBAC resource from `pods`** — granting `pods` alone gives a console that lists pods and cannot show one line of their output, which is the state most operators notice first |
+| `get,list metrics.k8s.io/pods` | §7.7 the pod page's Metrics tab | Every `usage` is **`null`, never `0`**, with a `forbidden` entry in `unavailable[]`. Requests and limits still render — they come from the pod. A pod drawn at zero cores reads as idle, and idle is what gets something turned off. On a cluster with no metrics-server the same tab reports `unsupported` instead, an ordinary fact rendered calmly, regardless of this grant |
+| `get ""/configmaps` | §7.6 resolving a ConfigMap-sourced environment variable to its value | The variable's row stays, with `value_state: "unreadable"` and the ConfigMap named in `unavailable[]` — never a blank that reads as "this variable is unset". Already granted by the §8 Configuration rule below; listed here because this is the second feature that depends on it |
+| `get ""/secrets` | §7.6 listing the **key names** an `envFrom: secretRef` imports | Those rows collapse to one saying an unnamed set of variables comes from that Secret. **This endpoint never returns Secret values under any grant or setting**, so withholding this costs key names only — a `secretKeyRef` is answered without reading the Secret at all, and its tab renders in full on a console with no `get secrets` |
 
 ## Read: config, storage, access
 

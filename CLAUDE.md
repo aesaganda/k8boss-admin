@@ -42,7 +42,7 @@ of [K8Boss](https://github.com/aesaganda/k8boss) and shares no code with it —
 | `backend/app/api/` | FastAPI routers. Thin: parse, call, envelope | Logic belongs below this layer |
 | `backend/app/k8s/` | Per-request cluster context, auth strategy, client manager | `docs/architecture.md` §2 |
 | `backend/app/resources/` | Catalog (discovery), reader (generic list/get/YAML), shaping (rows), envelope | `docs/api-contract.md` §1.2, §4, §8 |
-| `backend/app/services/` | Typed read models: the unified workload row, node rows, the unified route row, the operator catalog (`portal.py`) | `docs/api-contract.md` §5, §6, §13, §16 |
+| `backend/app/services/` | Typed read models: the unified workload row, node rows, the unified route row, the operator catalog (`portal.py`), one pod's detail, environment and usage (`pods.py`) | `docs/api-contract.md` §5, §6, §7.5–§7.7, §13, §16 |
 | `backend/app/admin/` | **Every write.** The funnel, preflight, diff, apply, scale, rollout, node drain, debug containers, route compilation, the shipped router, the one operator Subscription (`portal.py`) | `docs/safety-model.md` |
 | `backend/app/audit/` | Append-only, hash-chained trail: `record()`, `query()`, `verify()`, export | `docs/api-contract.md` §10 |
 | `backend/app/identity/` | Local password hashing, opaque sessions, LDAP search-and-bind, OIDC single sign-on, sign-in throttling | `docs/api-contract.md` §12 |

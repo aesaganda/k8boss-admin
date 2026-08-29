@@ -159,6 +159,7 @@ reason.
 | `resources/envelope.py` | `envelope()`, `collect()`, `unavailable_entry()` — the mechanism behind "empty is never blind" |
 | `services/workloads.py` | Six controller kinds into one row; `Unknown` status, `null`-vs-`0` counts |
 | `services/nodes.py` | Quantity parsing (`Decimal`), node rows, per-node requested totals |
+| `services/pods.py` | §7.5–§7.7 one pod: the detail that enriches the §6 row, the environment with its five `value_state`s (and no Secret values), and `metrics.k8s.io` usage as a *secondary* read so a cluster without metrics-server is a fact rather than an error |
 | `admin/mutate.py` | **The single write funnel.** Gate → preflight → apply → diff → audit |
 | `admin/preflight.py` | `SelfSubjectAccessReview`. Keeps a clean denial distinct from a failed review |
 | `admin/diff.py` | Normalise both sides, render a unified diff, digest it for the audit row |

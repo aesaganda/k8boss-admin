@@ -1256,6 +1256,116 @@ body.admin-resizing * {
   white-space: nowrap;
 }
 
+/* ── Pod detail (§7.5–§7.7) ─────────────────────────────────────────────── */
+
+.admin-pod-tab {
+  padding-block-start: var(--admin-gap);
+}
+
+/*
+ * The used-against-declared bar on the Metrics tab.
+ *
+ * Rendered only when both numbers are known — see `UsageBar` — so there is no
+ * "empty track" state to style here. That is deliberate: an empty bar next to a
+ * container with no limit would read as "using none of its allowance", about a
+ * container that has no allowance and can take the node down.
+ *
+ * The three levels are PatternFly status tokens rather than hexes, so the dark
+ * theme repaints them with everything else.
+ */
+.admin-usage {
+  inline-size: 4.5rem;
+  block-size: 0.4rem;
+  border-radius: 999px;
+  background: var(--admin-surface);
+  overflow: hidden;
+  flex: none;
+}
+
+.admin-usage__fill {
+  block-size: 100%;
+  border-radius: inherit;
+  background: var(--pf-t--global--icon--color--status--success--default, #3e8635);
+}
+
+.admin-usage[data-level="warning"] .admin-usage__fill {
+  background: var(--pf-t--global--icon--color--status--warning--default, #f0ab00);
+}
+
+.admin-usage[data-level="danger"] .admin-usage__fill {
+  background: var(--pf-t--global--icon--color--status--danger--default, #c9190b);
+}
+
+/*
+ * The Environment tab's four kinds of blank.
+ *
+ * They are styled apart from each other on purpose: `withheld`, `unreadable`,
+ * `runtime` and "overridden" would otherwise all render as a grey phrase in the
+ * same column, which is the same failure as rendering them all as an empty
+ * cell — one glance, four different facts, no way to tell them apart.
+ */
+.admin-env__state {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.05rem 0.4rem;
+  border-radius: var(--pf-t--global--border--radius--small, 4px);
+  border: 1px solid var(--admin-border);
+  background: var(--admin-surface);
+  color: var(--admin-muted);
+  font-size: 0.8em;
+  white-space: nowrap;
+  cursor: help;
+}
+
+.admin-env__state[data-tone="unreadable"] {
+  border-color: var(--pf-t--global--border--color--status--warning--default, #f0ab00);
+  color: var(--pf-t--global--text--color--status--warning--default, #795600);
+}
+
+.admin-env__state[data-tone="withheld"] {
+  border-style: dashed;
+}
+
+/*
+ * `absent` is a finding, not a blank: unless the reference is optional, the
+ * kubelet refuses to start the container. It borrows the danger border rather
+ * than the warning one so it does not read as the same thing as a refused read
+ * sitting two rows above it.
+ */
+.admin-env__state[data-tone="absent"] {
+  border-color: var(--pf-t--global--border--color--status--danger--default, #c9190b);
+  color: var(--pf-t--global--text--color--status--danger--default, #b1380b);
+}
+
+.admin-env__value {
+  font-family: var(--admin-mono);
+  font-size: 0.85em;
+  overflow-wrap: anywhere;
+}
+
+.admin-env__name {
+  font-family: var(--admin-mono);
+  font-size: 0.9em;
+}
+
+/*
+ * A variable a later entry redefines is struck through, because the row is
+ * still worth showing — "this ConfigMap sets DATABASE_URL and something else is
+ * overriding it" is the answer to a question people spend an afternoon on — and
+ * showing it as though it were in force would be the wrong answer.
+ */
+.admin-env__name--overridden {
+  text-decoration: line-through;
+  color: var(--admin-muted);
+}
+
+.admin-env__name--unknown {
+  font-family: inherit;
+  font-style: italic;
+  color: var(--admin-muted);
+  cursor: help;
+}
+
 /* ── Dark theme adjustments ─────────────────────────────────────────────── */
 
 /*
@@ -1293,6 +1403,18 @@ body.admin-resizing * {
 
 .pf-v6-theme-dark .admin-yaml__lineno--error {
   color: #ff9b93;
+}
+
+.pf-v6-theme-dark .admin-env__state[data-tone="absent"] {
+  /* Same reason as the warning tone below: the light danger *text* token is
+     picked for contrast against white. */
+  color: var(--pf-t--global--icon--color--status--danger--default, #f0561d);
+}
+
+.pf-v6-theme-dark .admin-env__state[data-tone="unreadable"] {
+  /* The light warning text token is chosen for contrast against white and is
+     unreadable on charcoal; the icon token clears 4.5:1 on both. */
+  color: var(--pf-t--global--icon--color--status--warning--default, #f0ab00);
 }
 
 .pf-v6-theme-dark .admin-partial__detail {

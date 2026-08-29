@@ -64,6 +64,7 @@ const Namespaces = lazyPage('Namespaces', () => import('./pages/Namespaces'));
 const Workloads = lazyPage('Workloads', () => import('./pages/Workloads'));
 const WorkloadDetail = lazyPage('WorkloadDetail', () => import('./pages/WorkloadDetail'));
 const Pods = lazyPage('Pods', () => import('./pages/Pods'));
+const PodDetail = lazyPage('PodDetail', () => import('./pages/PodDetail'));
 const Network = lazyPage('Network', () => import('./pages/Network'));
 const RoutesPage = lazyPage('Routes', () => import('./pages/Routes'));
 const Config = lazyPage('Config', () => import('./pages/Config'));
@@ -108,6 +109,10 @@ function ConsoleRoutes() {
               />
 
               <Route path="pods" element={<Pods />} />
+              {/* §7.5. The pod's own page: details, metrics, YAML,
+                  environment, logs, events, terminal and §7.4's debug, with the
+                  active one in `?tab=` so every tab is a link. */}
+              <Route path="pods/:namespace/:name" element={<PodDetail />} />
               <Route path="network" element={<Network />} />
               {/* §13/§14. "routes" is the feature, not react-router's
                   <Route> — the page component is aliased to RoutesPage so

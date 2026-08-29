@@ -782,9 +782,41 @@ export const audit = {
   },
 };
 
-/* ── §7 Pod logs ────────────────────────────────────────────────────────── */
+/* ── §7 Pods — the detail reads, the logs, the streams ──────────────────── */
+
+const podPath = (namespace, name) =>
+  `/pods/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}`;
 
 export const pods = {
+  /**
+   * §7.5. The §6 PodRow plus what a detail page needs and a table has no room
+   * for: init containers, conditions, volumes, and per-container ports,
+   * resources and `last_terminated` — the field that turns "restarted 14 times"
+   * into "OOMKilled".
+   */
+  detail: (namespace, name) => api.get(podPath(namespace, name)),
+
+  /**
+   * §7.6. Every environment variable each container will see, with where it
+   * comes from.
+   *
+   * **Secret values are never in this response.** Each variable carries a
+   * `value_state` — `literal`, `resolved`, `withheld`, `unreadable` or
+   * `runtime` — and the UI branches on it, because a blank value that means "we
+   * will not show you this" and one that means "we could not read the ConfigMap"
+   * send an operator to two different places.
+   */
+  environment: (namespace, name) => api.get(`${podPath(namespace, name)}/environment`),
+
+  /**
+   * §7.7. Live CPU and memory per container, against what each one requested.
+   *
+   * A cluster with no `metrics.k8s.io` answers 200 with every `usage` at `null`
+   * and an `unsupported` entry in `unavailable[]` — not an error, and never a
+   * zero. A pod drawn at zero cores reads as idle.
+   */
+  metrics: (namespace, name) => api.get(`${podPath(namespace, name)}/metrics`),
+
   /**
    * params: { container, tailLines, previous, sinceSeconds, timestamps }
    * Returns text/plain. A multi-container pod with no `container` is a
