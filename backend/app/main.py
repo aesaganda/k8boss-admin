@@ -22,13 +22,16 @@ the context is pinned, and both are outside the routes that read them.
 
 from __future__ import annotations
 
+import faulthandler
 import logging
+import signal
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.errors import ServerErrorMiddleware
 
-from app.api.exception_handlers import register_exception_handlers
+from app.api.exception_handlers import register_exception_handlers, unhandled_error_handler
 from app.config import settings
 from app.database import create_tables
 from app.k8s.client import manager as cluster_manager
@@ -38,7 +41,9 @@ from app.middleware.auth import AuthenticationMiddleware
 
 from app.api.access import router as access_router
 from app.api.audit import router as audit_router
+from app.api.cli import router as cli_router
 from app.api.clusters import router as clusters_router
+from app.api.debug import router as debug_router
 from app.api.events import router as events_router
 from app.api.exec_ws import router as exec_ws_router
 from app.api.health import router as health_router
@@ -46,11 +51,20 @@ from app.api.logs import router as logs_router
 from app.api.namespaces import router as namespaces_router
 from app.api.network import router as network_router
 from app.api.nodes import router as nodes_router
+from app.api.pods import router as pods_router
+from app.api.portal import router as portal_router
 from app.api.resources import router as resources_router
+from app.api.routes import router as routes_router
 from app.api.workloads import router as workloads_router
 from app.api.auth import router as auth_router
 
 logger = logging.getLogger(__name__)
+
+# `docker kill -s USR1 <container>` dumps every thread's Python stack to stderr.
+# Without this, a wedged event loop (the whole point of a wedge is that it stops
+# answering, including its own liveness probe) leaves no way to tell "blocked on
+# a lock" from "blocked on a socket" apart from killing and losing the evidence.
+faulthandler.register(signal.SIGUSR1, all_threads=True)
 
 
 @asynccontextmanager
@@ -108,6 +122,18 @@ app = FastAPI(
 app.add_middleware(ClusterContextMiddleware)
 app.add_middleware(AuthenticationMiddleware)
 app.add_middleware(RequestLoggingMiddleware)
+# The floor under the handlers registered below, and it has to be a middleware
+# rather than another entry in `register_exception_handlers`. Starlette's own
+# ServerErrorMiddleware is the outermost layer of the stack by construction, so
+# an exception nothing maps is rendered *outside* the CORS layer added next: the
+# 500 carries no Access-Control-Allow-Origin, the browser refuses to read it,
+# and `fetch()` rejects with `TypeError: Failed to fetch`. The operator sees a
+# network error and the real reason is never delivered — which is the same
+# failure `app/api/exception_handlers.py` exists to prevent, arriving through
+# the one door that module cannot close. A second ServerErrorMiddleware here
+# catches it first, one layer *inside* CORS, so the envelope reaches the browser
+# with the headers that let it be read.
+app.add_middleware(ServerErrorMiddleware, handler=unhandled_error_handler)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origin_list,
@@ -129,12 +155,17 @@ app.include_router(resources_router)
 app.include_router(namespaces_router)
 app.include_router(events_router)
 app.include_router(workloads_router)
+app.include_router(routes_router)
+app.include_router(portal_router)
 app.include_router(nodes_router)
 app.include_router(network_router)
 app.include_router(access_router)
 app.include_router(audit_router)
+app.include_router(pods_router)
 app.include_router(logs_router)
+app.include_router(debug_router)
 app.include_router(exec_ws_router)
+app.include_router(cli_router)
 
 
 if __name__ == "__main__":  # pragma: no cover - developer convenience

@@ -84,6 +84,7 @@ import {
   NoClusterState,
   ResourceTabsPage,
   YamlPanel,
+  genericTab,
   menuAction,
 } from './_parts';
 
@@ -325,7 +326,7 @@ function PolicyRules({ direction, kind, namespace }) {
 /**
  * The drawer for one policy: what it declares, and who it actually selects.
  *
- * The second half needs a pod listing, so it comes from §8.2's typed endpoint
+ * The second half needs a pod listing, so it comes from §8.4's typed endpoint
  * rather than from the row in the table. `selected_pod_count` is therefore
  * genuinely nullable here in the §0 sense — `null` means *the pods could not be
  * listed*, and `0` means *this policy governs nothing*, which is the finding
@@ -967,9 +968,28 @@ export default function Network() {
     () => [
       SERVICES_TAB,
       INGRESSES_TAB,
+      ENDPOINTS_TAB,
+
+      genericTab({
+        key: 'endpointslices',
+        title: 'Endpoint Slices',
+        group: 'discovery.k8s.io',
+        version: 'v1',
+        plural: 'endpointslices',
+        namespaced: true,
+      }),
+      genericTab({
+        key: 'ingressclasses',
+        title: 'Ingress Classes',
+        group: 'networking.k8s.io',
+        version: 'v1',
+        plural: 'ingressclasses',
+        namespaced: false,
+      }),
+
       {
         key: 'networkpolicies',
-        title: 'Network policies',
+        title: 'Network Policies',
         ...POLICY_GVP,
         namespaced: true,
         refreshToken,
@@ -1042,10 +1062,9 @@ export default function Network() {
       },
       {
         key: 'isolation',
-        title: 'Pod isolation',
+        title: 'Pod Isolation',
         render: () => <PodIsolation />,
       },
-      ENDPOINTS_TAB,
     ],
     [gate, refreshToken],
   );
@@ -1057,7 +1076,7 @@ export default function Network() {
   return (
     <>
       <ResourceTabsPage
-        title="Networking"
+        title="Network"
         subtitle="Services, Ingresses, the addresses behind them, and the NetworkPolicies that describe who may reach what. This console reads no service mesh — what is here is what the API server serves."
         actions={(activeKey) =>
           activeKey === 'networkpolicies' ? (

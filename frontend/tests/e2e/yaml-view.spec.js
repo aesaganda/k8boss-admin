@@ -25,18 +25,15 @@ import { expectPageRendered, mockApi, objectYaml } from './fixtures.js';
  */
 
 /**
- * Open the pod console on a given tab from the pods table.
+ * Open the pod page on a given tab.
  *
- * Clicked on the QoS cell rather than the Name cell: the name is a
- * `ResourceLink` into the API explorer, so clicking it navigates instead of
- * opening the row's console.
+ * By URL: §7.5 puts the tab in the query string so every tab is a link, which
+ * makes this a one-line navigation rather than three clicks through a table
+ * that is covered by its own spec.
  */
-async function openPod(page, tab = 'YAML') {
-  await page.goto('/pods');
-  await expectPageRendered(page, 'Pods');
-  await page.getByRole('gridcell', { name: 'Burstable', exact: true }).first().click();
-  await expect(page.getByTestId('pod-console')).toBeVisible();
-  if (tab) await page.getByRole('tab', { name: tab, exact: true }).click();
+async function openPod(page, tab = 'yaml') {
+  await page.goto(`/pods/prod/checkout-7d9f8b6c4-hk2xv${tab ? `?tab=${tab}` : ''}`);
+  await expectPageRendered(page, 'checkout-7d9f8b6c4-hk2xv');
 }
 
 function panelLines(page) {
@@ -51,6 +48,11 @@ test.describe('reading an object’s YAML', () => {
   test('clicking a pod leads to its manifest, numbered and coloured', async ({ page }) => {
     await mockApi(page);
     await openPod(page);
+
+    // `allTextContents` below does not auto-wait, and the panel starts as a
+    // skeleton — the pod page's heading is up before its YAML tab has read
+    // anything, so without this the comparison races the fetch.
+    await expect(page.getByTestId('yaml-panel')).toBeVisible();
 
     const expected = objectYaml({ name: 'checkout-7d9f8b6c4-hk2xv' }).split('\n');
     expect(await panelLines(page)).toEqual(expected);
@@ -73,7 +75,9 @@ test.describe('reading an object’s YAML', () => {
     await page.getByRole('button', { name: 'Kebab toggle' }).first().click();
     await page.getByRole('menuitem', { name: 'View YAML' }).click();
 
-    await expect(page.getByTestId('pod-console')).toBeVisible();
+    // Straight to the pod's YAML tab rather than to its Details, because the
+    // operator has already said which panel they want.
+    await expect(page).toHaveURL(/\/pods\/prod\/checkout-7d9f8b6c4-hk2xv\?tab=yaml$/);
     await expect(page.getByTestId('yaml-panel')).toBeVisible();
     await expect(page.getByTestId('code-block')).toContainText('kind: Pod');
   });

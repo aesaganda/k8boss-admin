@@ -51,6 +51,7 @@ import {
 } from '@patternfly/react-core';
 import SyncAltIcon from '@patternfly/react-icons/dist/esm/icons/sync-alt-icon';
 import {
+  AgeCell,
   CodeBlock,
   DataTable,
   EmptyState,
@@ -62,13 +63,14 @@ import {
   Skeleton,
   Toolbar,
 } from '../components/ui';
+import DebugPanel from '../components/DebugPanel';
 import LogViewer from '../components/LogViewer';
 import MutationDialog from '../components/MutationDialog';
 import PodTerminal from '../components/PodTerminal';
 import YamlEditor from '../components/YamlEditor';
-import { resources } from '../api/client';
+import { realGroup, resources } from '../api/client';
 import { useNamespace } from '../contexts/NamespaceContext';
-import { useLiveYaml, useResourceList, entriesOf } from './_data';
+import { useAsync, useLiveYaml, useResourceList, entriesOf, objectAgeSeconds, objectName, objectNamespace } from './_data';
 
 /* ── Cluster scope ──────────────────────────────────────────────────────── */
 
@@ -101,70 +103,15 @@ function ClusterSettingsLink(props) {
 
 /* ── Rule 11.4 controls ─────────────────────────────────────────────────── */
 
-/**
- * A button that states why it cannot be pressed.
- *
- *   <ActionButton gate={gate('scale')} onClick={...}>Scale</ActionButton>
- *
- * `gate` is `{ allowed, reason }` from `useGates`. When it is not allowed the
- * button stays visible and focusable (`isAriaDisabled`) with the reason in a
- * tooltip, which is the whole of rule 11.4: an operator must be able to see that
- * the action exists and why it is unavailable.
- */
-export function ActionButton({
-  gate,
-  onClick,
-  children,
-  variant = 'secondary',
-  icon,
-  isDanger = false,
-  isLoading = false,
-  size,
-  ariaLabel,
-}) {
-  const allowed = gate ? gate.allowed : true;
-  const button = (
-    <Button
-      variant={isDanger ? 'danger' : variant}
-      icon={icon}
-      size={size}
-      isLoading={isLoading}
-      isAriaDisabled={!allowed || isLoading}
-      aria-label={ariaLabel}
-      onClick={allowed && !isLoading ? onClick : undefined}
-      data-testid="action-button"
-      data-allowed={allowed ? 'true' : 'false'}
-    >
-      {children}
-    </Button>
-  );
-  if (allowed) return button;
-  // The span guarantees Tooltip a DOM node to attach its ref to, and keeps the
-  // explanation reachable when the button itself is aria-disabled.
-  return (
-    <Tooltip content={gate.reason}>
-      <span className="admin-gated-action">{button}</span>
-    </Tooltip>
-  );
-}
-
-/**
- * One entry for `DataTable`'s `actions` kebab, gated the same way.
- *
- * Not a component — `ActionsColumn` takes plain objects — so it renders the
- * reason with a `title` attribute on the label rather than a `Tooltip`. That is
- * deliberate: PatternFly's menu closes the item's tooltip along with the menu on
- * some interactions, and a reason the operator cannot read is not a reason.
- */
-export function menuAction(label, gate, onClick, { isDanger = false } = {}) {
-  const allowed = gate ? gate.allowed : true;
-  return {
-    title: allowed ? label : <span title={gate.reason}>{label}</span>,
-    isDisabled: !allowed,
-    isDanger,
-    onClick: allowed ? onClick : undefined,
-  };
-}
+// `ActionButton` and `menuAction` moved to `components/ui/gated.jsx` — they are
+// rule-11.4 enforcement in the same sense `PartialBanner` and `NullableCell` are
+// rule-11.1 and 11.2 enforcement, and that is where the design system lives.
+// Re-exported here because every page in this lane imports them from `./_parts`,
+// and because `components/DebugPanel` needs them too: importing them from here
+// would make this module and that one import each other, and a cycle across a
+// lazy chunk boundary is the class of mistake this repo builds for production
+// before it tests.
+export { ActionButton, menuAction } from '../components/ui';
 
 /* ── Small cells ────────────────────────────────────────────────────────── */
 
@@ -182,19 +129,55 @@ export function Muted({ children, title }) {
   );
 }
 
-/** Up to `max` chips, then "+n more" with the rest in a tooltip. */
-export function ChipList({ values, max = 3, color = 'grey', emptyText = 'None' }) {
+/**
+ * Up to `max` chips, then "+n more" with the rest in a tooltip.
+ *
+ * `hrefFor` turns a chip into a link. It goes through PatternFly's `render`
+ * prop rather than `Label href`, because `href` builds the anchor itself and
+ * spreads extra props onto the *outer* span — so `target` and `rel` never reach
+ * the `<a>`. Both are load-bearing here: an exposure opens somewhere that is not
+ * this console, so it belongs in its own tab, and `rel="noopener noreferrer"`
+ * is not optional on a link whose target is a cluster workload nobody has
+ * vetted.
+ *
+ * The overflow chip stays plain text on purpose — it is a tooltip trigger, and
+ * a link that swallows its own click is worse than one that is not offered.
+ */
+export function ChipList({ values, max = 3, color = 'grey', emptyText = 'None', hrefFor }) {
   const list = (values ?? []).filter((v) => v != null && v !== '');
   if (!list.length) return <Muted>{emptyText}</Muted>;
   const shown = list.slice(0, max);
   const hidden = list.slice(max);
   return (
     <LabelGroup numLabels={max + 1}>
-      {shown.map((value, i) => (
-        <Label key={`${value}-${i}`} isCompact color={color}>
-          {String(value)}
-        </Label>
-      ))}
+      {shown.map((value, i) => {
+        const href = hrefFor ? hrefFor(value) : null;
+        return href ? (
+          <Label
+            key={`${value}-${i}`}
+            isCompact
+            color={color}
+            isClickable
+            render={({ className, content, componentRef }) => (
+              <a
+                className={className}
+                ref={componentRef}
+                href={href}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                {content}
+              </a>
+            )}
+          >
+            {String(value)}
+          </Label>
+        ) : (
+          <Label key={`${value}-${i}`} isCompact color={color}>
+            {String(value)}
+          </Label>
+        );
+      })}
       {hidden.length > 0 && (
         <Tooltip content={hidden.join(', ')}>
           <Label isCompact color={color} tabIndex={0}>
@@ -599,12 +582,20 @@ export function EditYamlDialog({ isOpen, group, version, plural, name, namespace
 /**
  * Logs, YAML and exec for one pod, in one modal.
  *
+ * **This is the in-context peek, not the pod's page.** `/pods/{ns}/{name}`
+ * (§7.5) is where a pod's whole story lives — details, metrics, environment,
+ * events, and these same panels — and the pod table links there. This modal
+ * survives because the node detail and workload detail pages are places an
+ * operator is *deciding something else*: reading one pod's logs mid-drain
+ * should not cost them the plan they were looking at. Where the two overlap
+ * they render the same components, so there is one Logs viewer and one
+ * terminal, in two frames.
+ *
  * `LogViewer` and `PodTerminal` are inline panels rather than dialogs — they are
  * embeddable anywhere, and neither takes `isOpen` or `onClose` — so the modal,
- * the tab strip and the close button belong to whoever opens them. Every pod
- * table in this lane opens the same one, so they live side by side: the
- * overwhelmingly common sequence is to read the logs, fail to find the answer,
- * and go in with a shell.
+ * the tab strip and the close button belong to whoever opens them. The pod
+ * tables that open this one put them side by side: the overwhelmingly common
+ * sequence is to read the logs, fail to find the answer, and go in with a shell.
  *
  * **YAML is a tab here rather than a page of its own.** A pod is the one kind
  * an operator opens by clicking a row rather than by browsing to it, and until
@@ -614,14 +605,29 @@ export function EditYamlDialog({ isOpen, group, version, plural, name, namespace
  * of a misbehaving pod are what it logged, what it is, and what it looks like
  * from inside; they belong behind one set of tabs.
  *
- * The exec tab is *rendered* even when the caller may not use it, with the
- * reason in place of the terminal (rule 11.4). Hiding the tab would leave an
- * operator wondering whether this console can exec at all.
+ * **Debug is the fourth tab, and it is the one for a pod with no shell.** §7.4:
+ * an image built from `scratch` or `distroless` is the one an operator most
+ * needs to get inside and the one the Terminal tab is useless against, because
+ * there is nothing to exec. That tab attaches an ephemeral container carrying
+ * the tools and then opens a shell in *it*.
+ *
+ * The exec and debug tabs are *rendered* even when the caller may not use them,
+ * with the reason in place of the content (rule 11.4). Hiding a tab would leave
+ * an operator wondering whether this console can exec or debug at all.
  */
-export function PodConsoleModal({ pod, initialTab = 'logs', execGate, onClose }) {
+export function PodConsoleModal({ pod, initialTab = 'logs', execGate, debugGate, onClose }) {
   const [tab, setTab] = useState(initialTab);
   if (!pod) return null;
   const execAllowed = !execGate || execGate.allowed;
+  // Containers by kind. The Debug tab needs the pod's *own* containers for the
+  // process-namespace target picker and for the name-collision check, and an
+  // ephemeral container is neither a valid target nor a name it should suggest
+  // — §6's `kind` is what tells them apart.
+  const entries = Array.isArray(pod.containers) ? pod.containers : [];
+  const ownContainers = entries
+    .filter((entry) => (entry?.kind ?? 'container') === 'container')
+    .map((entry) => entry?.name)
+    .filter(Boolean);
   return (
     <Modal isOpen variant="large" onClose={onClose} aria-label={`Pod ${pod.name}`} data-testid="pod-console">
       <ModalHeader title={`${pod.namespace}/${pod.name}`} />
@@ -630,11 +636,20 @@ export function PodConsoleModal({ pod, initialTab = 'logs', execGate, onClose })
           <Tab eventKey="logs" title={<TabTitleText>Logs</TabTitleText>} aria-label="Logs" />
           <Tab eventKey="yaml" title={<TabTitleText>YAML</TabTitleText>} aria-label="YAML" />
           <Tab eventKey="exec" title={<TabTitleText>Terminal</TabTitleText>} aria-label="Terminal" />
+          <Tab eventKey="debug" title={<TabTitleText>Debug</TabTitleText>} aria-label="Debug" />
         </Tabs>
         {tab === 'logs' ? (
           <LogViewer namespace={pod.namespace} name={pod.name} containers={pod.containers} />
         ) : tab === 'yaml' ? (
           <YamlPanel group="core" version="v1" plural="pods" name={pod.name} namespace={pod.namespace} height={520} />
+        ) : tab === 'debug' ? (
+          <DebugPanel
+            namespace={pod.namespace}
+            name={pod.name}
+            gate={debugGate}
+            execGate={execGate}
+            containers={ownContainers}
+          />
         ) : execAllowed ? (
           <PodTerminal namespace={pod.namespace} name={pod.name} containers={pod.containers} />
         ) : (
@@ -713,13 +728,42 @@ function CustomTabBody({ render }) {
   return render();
 }
 
+/**
+ * The version a `resolveVersion` tab actually reads. Gateway API's kinds
+ * still move between release channels on a live cluster (`ReferenceGrant` at
+ * `v1beta1`, `BackendTLSPolicy` at `v1alpha2`/`v1alpha3` depending on which CRD
+ * bundle is installed) — `resolve()` on the backend matches a version exactly,
+ * so a tab that pinned one the way every other tab in this console does would
+ * 501 on any cluster running a different channel than the one this code was
+ * written against. Looked up from the same catalog the API explorer already
+ * fetches (`GET /resources/catalog`), preferring the version the cluster marks
+ * `preferred`. Until the catalog answers — or if this group/plural isn't in it
+ * at all — this falls back to the tab's own hardcoded guess, so the first
+ * request Phase 0 already renders calmly as "not present" if that guess is
+ * wrong, rather than waiting on a second round trip before showing anything.
+ */
+function useResolvedVersion(tab) {
+  const enabled = Boolean(tab.resolveVersion);
+  const catalog = useAsync(() => resources.catalog(), { key: 'catalog', enabled });
+  const entry = useMemo(() => {
+    if (!enabled || !catalog.data?.items) return null;
+    const real = realGroup(tab.group);
+    const matches = catalog.data.items.filter(
+      (item) => realGroup(item.group) === real && item.resource === tab.plural,
+    );
+    return matches.find((item) => item.preferred) ?? matches[0] ?? null;
+  }, [enabled, catalog.data, tab.group, tab.plural]);
+  return entry?.version || tab.version;
+}
+
 function ResourceTabBody({ tab }) {
   const { selected } = useNamespace();
   const namespace = tab.namespaced ? selected : null;
   const [search, setSearch] = useState('');
   const [detailRow, setDetailRow] = useState(null);
 
-  const listing = useResourceList(tab.group, tab.version, tab.plural, {
+  const version = useResolvedVersion(tab);
+  const listing = useResourceList(tab.group, version, tab.plural, {
     namespace,
     shape: tab.shape,
     limit: tab.limit,
@@ -798,7 +842,9 @@ function ResourceTabBody({ tab }) {
           <DrawerCloseButton onClick={close} />
         </DrawerActions>
       </DrawerHead>
-      <DrawerPanelBody>{detailRow && tab.detail(detailRow, { close, namespace, reload: listing.reload })}</DrawerPanelBody>
+      <DrawerPanelBody>
+        {detailRow && tab.detail(detailRow, { close, namespace, reload: listing.reload, version })}
+      </DrawerPanelBody>
     </DrawerPanelContent>
   );
 
@@ -809,4 +855,75 @@ function ResourceTabBody({ tab }) {
       </DrawerContent>
     </Drawer>
   );
+}
+
+/* ── Generic tabs ───────────────────────────────────────────────────────── */
+
+/**
+ * A tab spec for a resource with no typed row (§8 defines none) and nothing
+ * page-specific to say about it: Name (+ Namespace, if namespaced) + Age, and
+ * a YAML detail panel. This is most of what Configuration's and Gateway's new
+ * tabs are — the cluster serves the object, nobody has written it a shaper,
+ * and there is nothing beyond "here it is, here is its YAML". Written once so
+ * a dozen near-identical column arrays don't drift from each other one typo at
+ * a time; a tab with a real typed row or resource-specific columns (Services,
+ * Ingresses, StorageClasses, …) is still hand-written, as those already are.
+ *
+ * `shape: 'raw'` is explicit rather than left to `shape=auto`'s fallback,
+ * matching `Network.jsx`'s Endpoints tab: saying "no shaper" out loud here
+ * costs nothing and reads better next to a tab that has one.
+ *
+ * `resolveVersion: true` is for a group whose served version is not stable
+ * across clusters (Gateway API's release channels) — see `useResolvedVersion`
+ * above. Every other caller pins a version, same as every hand-written tab in
+ * this console.
+ */
+export function genericTab({
+  key,
+  title,
+  group,
+  version,
+  plural,
+  namespaced,
+  resolveVersion = false,
+  emptyDescription = `The listing succeeded and returned no ${title} in this scope.`,
+}) {
+  return {
+    key,
+    title,
+    group,
+    version,
+    plural,
+    namespaced,
+    resolveVersion,
+    shape: 'raw',
+    rowKey: namespaced
+      ? (row) => `${objectNamespace(row)}/${objectName(row)}`
+      : (row) => objectName(row),
+    emptyDescription,
+    detailTitle: (row) => `${title.replace(/s$/, '')} ${namespaced ? `${objectNamespace(row)}/` : ''}${objectName(row)}`,
+    columns: [
+      { key: 'name', title: 'Name', sortable: true, value: (row) => objectName(row) },
+      ...(namespaced
+        ? [{ key: 'namespace', title: 'Namespace', sortable: true, value: (row) => objectNamespace(row) }]
+        : []),
+      {
+        key: 'age_seconds',
+        title: 'Age',
+        sortable: true,
+        value: (row) => objectAgeSeconds(row),
+        cell: (row) => <AgeCell seconds={objectAgeSeconds(row)} timestamp={row?.metadata?.creationTimestamp} />,
+      },
+    ],
+    detail: (row, ctx) => (
+      <YamlPanel
+        group={group}
+        version={ctx?.version ?? version}
+        plural={plural}
+        name={objectName(row)}
+        namespace={namespaced ? objectNamespace(row) : undefined}
+        height={420}
+      />
+    ),
+  };
 }

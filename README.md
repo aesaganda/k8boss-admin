@@ -11,12 +11,35 @@ clusters, built on the assumption that the dangerous part is not reading.
 
 * **Not a monitoring or observability tool.** No metrics storage, no dashboards
   over time, no alerting. It shows you the cluster's current state, live.
-* **Not a deployment or CI system.** It does not build, does not template, does
-  not reconcile from Git. If you have GitOps, this console is the thing you use
-  when you are deliberately going around it — which is why every write is
-  dry-run-first and audited.
-* **Not a security posture product.** No network policy analysis, no service mesh
-  awareness, no runtime process intelligence, no attack paths. That is
+* **Not a deployment or CI system, with one stated exception.** It does not
+  build, does not template, does not reconcile from Git. If you have GitOps,
+  this console is the thing you use when you are deliberately going around it —
+  which is why every write is dry-run-first and audited.
+
+  The exception is the router: k8boss-admin ships a pinned HAProxy ingress
+  controller and can install it (§14), because an exposure written into a
+  cluster with no controller is an object that routes nothing while looking
+  created. It installs **one bundle of eight objects, through the same write
+  funnel as everything else, and nothing else, ever** — no reconcile loop, no
+  desired state, no drift correction, and its status is a live read like every
+  other page. It is off by default behind `ADMIN_ROUTER_MANAGE_ENABLED`.
+  [`docs/adr-0004-shipped-router.md`](docs/adr-0004-shipped-router.md) records
+  the boundary and what it costs.
+
+  The operator portal (§16) is a different act, not a second exception: it ships
+  no catalog and installs nothing. It creates **one** OLM `Subscription` in an API
+  your cluster already serves — exactly what the YAML editor could — and Operator
+  Lifecycle Manager, which is your cluster's software, does the installing.
+  Off by default behind `ADMIN_PORTAL_INSTALL_ENABLED`;
+  [`docs/adr-0005-operator-portal.md`](docs/adr-0005-operator-portal.md) records
+  why that line is where it is.
+* **Not a security posture product.** It lists NetworkPolicies, says which pods
+  each one selects, and — by subtracting one listing from another — which pods
+  nothing selects. That is a correlation, not an analysis: it computes no
+  reachability between pods, models no attack paths, and cannot tell you whether
+  a policy is *enforced*, because enforcement belongs to the CNI plugin and no
+  API this console can reach reports on it. No service mesh awareness, no
+  runtime process intelligence. That is
   [K8Boss](https://github.com/aesaganda/k8boss), which this console was split out
   of; see [`docs/adr-0002-lineage.md`](docs/adr-0002-lineage.md) for what was
   carried over and what deliberately was not.
@@ -293,6 +316,32 @@ version being that there is no undo for a deleted StatefulSet.
   have not reported on the current generation.
 * **Pods** — with `phase_detail` for the cases where the phase lies: a `Running`
   pod whose container is in `CrashLoopBackOff` is not reported as Running.
+* **A page per pod**, at `/pods/{namespace}/{name}`, with eight tabs and the
+  active one in the URL so every tab is a link: **Details**, **Metrics**,
+  **YAML**, **Environment**, **Logs**, **Events**, **Terminal** and **Debug**.
+  Only the visible tab fetches — two of them open a websocket, and a terminal
+  that connected behind an unopened tab would start an audited exec session
+  nobody asked for. Three things it is careful about:
+  * **Details** carries what a table has no room for — per-container ports,
+    requests, limits and `lastState.terminated`, which is what turns "restarted
+    14 times" into `OOMKilled`. A container that declares no resources says so
+    rather than showing `cpu 0`; init containers are their own list, because a
+    `Terminated` init container is a success and the same two words on an app
+    container are an outage; and a condition the kubelet has said nothing about
+    stays `Unknown` rather than becoming `False`.
+  * **Environment** shows every variable each container will see and where it
+    comes from — including the ones that are references rather than values.
+    **Secret values are never shown here**, under any setting, and the kinds of
+    blank stay apart: *withheld* (it is a Secret), *could not be read* (the
+    ConfigMap was refused — the variable is not known to be unset), *key not
+    present* (the ConfigMap was read and has no such key, so the container will
+    not start), *set by the kubelet* (a `fieldRef`, computed at start and never
+    stored), and an actual empty string.
+  * **Metrics** reads `metrics.k8s.io` for live CPU and memory against what each
+    container asked for. A cluster with no metrics-server is an ordinary fact
+    stated calmly, not a red panel — and an unmeasured pod is drawn as unknown,
+    never at zero, because a pod at zero cores reads as idle and idle is what
+    gets something turned off.
 * **Namespaces, Events, Network, Config, Storage, Access** — Services, Ingresses,
   ConfigMaps, Secrets (key names and byte lengths only), PVCs, PVs,
   StorageClasses, ServiceAccounts, Roles and Bindings.
@@ -318,7 +367,21 @@ version being that there is no undo for a deleted StatefulSet.
 * **Logs and exec** — pod logs over HTTP or a WebSocket that always terminates
   with exactly one `end` or `error` frame, so you can tell "the pod stopped
   logging" from "we lost the connection"; and a terminal, gated on both write
-  gates and audited on open and close.
+  gates and audited on open and close. Neither picks a container for you on a
+  multi-container pod: the logs of the wrong container look exactly like the
+  logs of the right one.
+* **Node debug pods** — `kubectl debug node/…` from a node's page, for when the
+  machine is what needs looking at and there is no SSH to it. Off by default
+  behind its own gate; the host filesystem mounts **read-only** unless you ask
+  otherwise (unlike `kubectl`); the whole manifest is the diff you confirm; and
+  because nothing removes it afterwards — `kubectl debug` has no `--rm` either —
+  the console labels what it creates, lists it per node, and offers a Remove.
+* **Debug containers** — `kubectl debug` for the pod whose image has no shell.
+  Attaches an ephemeral container carrying the tools, then opens a terminal in
+  it. A write like any other: previewed as a diff, confirmed, audited with the
+  image named. A cluster that does not serve `pods/ephemeralcontainers` is told
+  so as an ordinary fact, and a cluster whose discovery could not be read is
+  reported as *unknown* rather than as unsupported.
 
 **Write** (all dry-run-first, all audited)
 
@@ -379,6 +442,100 @@ version being that there is no undo for a deleted StatefulSet.
   both tables.
 
 ---
+
+### Routes — exposing a Service to the outside world
+
+One page for every way a cluster is reachable from outside, whichever API it is
+written in: OpenShift `Route`, `Ingress`, or Gateway API `HTTPRoute`. The
+configuration screen has a **form and a YAML view**, like OpenShift's console —
+with one difference that matters.
+
+**The document is the source of truth and the form is a projection of it.**
+OpenShift's console warns you that switching views discards your changes; this
+one does not need the warning. Form edits are patched *into* the current
+document rather than regenerating it, so a `spec.rules[1]` you hand-wrote or a
+controller annotation you added survives a trip through the form — and the form
+tells you, by path, which parts of the document it is not showing you. Once you
+edit the YAML by hand the form locks and the write sends your document verbatim,
+with no form model at all.
+
+**The hostname and the target Service are picked, not typed.** Set an **App
+domain** on the cluster — its wildcard DNS, `apps.example.com` — and naming an
+exposure fills the hostname in as `<name>-<namespace>.<domain>`, OpenShift's own
+rule. On OpenShift the domain is read from the cluster and offered; elsewhere you
+type it once, on the registration. Any keystroke in the hostname field takes it
+over for good, with a link back to the generated one, and editing an existing
+exposure never rewrites the hostname it is already admitted under.
+
+With **no** app domain set the console generates nothing and asks you to type a
+hostname, which is the point rather than a gap: a name under a wildcard that does
+not resolve is an exposure that is created, reports Admitted and routes nothing.
+The namespace is in the generated name because without it the same Service name
+in two namespaces produces one hostname twice, and the second exposure quietly
+loses.
+
+The target Service is a list of what is actually in the namespace, and a
+single-port Service fills its port in too. If that listing *fails* the control
+falls back to a text box and says so — an empty dropdown would read as "this
+namespace has no Services" and send you to create one you already have.
+
+**A backend that cannot express what you asked for says so and refuses to guess.**
+An Ingress cannot do passthrough TLS. The console does not emit an
+`nginx.ingress.kubernetes.io` annotation and hope it is nginx you are running,
+and it does not quietly downgrade to edge and let you find out when your mTLS
+client breaks. It tells you what happens to your traffic, what to do instead,
+and refuses the write until you tick the box — the same shape as `force` on a
+node drain.
+
+**Three states, not two.** A route kind this cluster does not serve is an
+ordinary fact in a neutral notice. A route kind the console could not *check* is
+a warning that says it is not the same thing — because creating an exposure that
+already exists claims a hostname twice.
+
+`Admitted` is tri-state and `Unknown` is the common value: a router that has not
+reported has not rejected anything, and the Ingress API has no admission
+condition at all.
+
+### The shipped router
+
+k8boss-admin ships a pinned HAProxy ingress controller (3.2.13) and can install
+it, upgrade it and remove it — eight objects, each through the same preflight,
+dry run, diff and audit row as every other write. Off by default behind
+`ADMIN_ROUTER_MANAGE_ENABLED`; the install plan is readable with it off, because
+deciding whether to turn it on requires reading what it would create. The same
+bundle is checked in as `deploy/router.yaml` for `kubectl apply`, generated by
+`make router-manifest` and kept honest by a test.
+
+It says what it does **not** serve, before you write something it will never
+accept: the HAProxy controller implements Gateway API for TCPRoute only — never
+HTTPRoute — and OpenShift Routes are served by OpenShift's own router.
+
+### The operator portal
+
+What **your** cluster's catalogs offer, and what somebody already subscribed to.
+k8boss-admin ships no catalog and curates no list: every package comes from a
+`CatalogSource` the cluster already runs, so a private mirror shows its own
+contents with nothing to configure, and a cluster without OLM says so in a calm
+notice rather than an error.
+
+Subscribing writes **one object** — an OLM `Subscription` — through the same
+preflight, dry run, diff and audit row as every other write. Off by default
+behind `ADMIN_PORTAL_INSTALL_ENABLED`; the plan is readable with it off, because
+deciding whether to turn it on requires reading what it would create.
+
+**A Subscription is not an installation, and the console will not say it is.**
+Creating one means one object exists; Operator Lifecycle Manager does the
+installing afterwards, on its own schedule, and only if the namespace and the
+approval strategy let it. Three things stop it and all three are checked before
+the write — a namespace with no OperatorGroup or with two, an install mode the
+operator does not support, and a `Manual` approval strategy that holds the
+install until somebody approves the InstallPlan. Each is a named consequence you
+have to acknowledge by code before the write is accepted, the same shape as
+`force` on a drain.
+
+`Installed` is tri-state: a catalog row whose Subscription listing failed is
+`Unknown`, never "not installed" — which is how you would end up subscribing
+twice to an operator you already run.
 
 ## Architecture
 
@@ -451,6 +608,17 @@ means read-only.
 |---|---|---|
 | `ADMIN_ALLOW_MUTATIONS` | `false` | **The write gate.** False makes every write return `403 mutations_disabled` before the cluster is touched, and `/api/health` report `mutations: disabled` so the UI disables the buttons. Dry-run stays available: previewing is a read |
 | `SECRET_REVEAL_ENABLED` | `false` | Lets the single-object Secret read return values when asked with `?reveal=true`. Separate gate, separate blast radius; every reveal is audited either way |
+| `ADMIN_DEBUG_IMAGE` | `busybox:1.36` | The image a debug container is attached with when the operator names none. Not a gate — attaching one needs `ADMIN_ALLOW_MUTATIONS` and `patch pods/ephemeralcontainers` — but worth setting for an air-gapped cluster, which cannot pull from Docker Hub and answers the attempt with an `ImagePullBackOff` on a pod somebody is already debugging |
+| `ADMIN_NODE_DEBUG_ENABLED` | `false` | **A third gate, and the one to read about before flipping.** Allows a node debug pod: a pod pinned to one node with the host filesystem mounted and the host PID namespace shared. A shell in one is effectively root on that machine — it reaches every pod's ServiceAccount token and mounted Secrets on that node. Separate from `ADMIN_ALLOW_MUTATIONS` because RBAC cannot express the difference between this pod and any other, so this switch is the only control the console itself has. With it off, the create *and its dry run* are refused, and the refusal is audited |
+| `ADMIN_NODE_DEBUG_NAMESPACE` | `default` | Namespace node debug pods are created in. The namespace decides which Pod Security level admits them: a cluster enforcing `restricted` everywhere needs one namespace labelled to permit host namespaces and hostPath, and pinning the console to it keeps that exception in one auditable place |
+| `ADMIN_ROUTER_MANAGE_ENABLED` | `false` | **A fourth gate.** Allows the console to install, upgrade and remove the HAProxy ingress controller it ships (§14). Separate from `ADMIN_ALLOW_MUTATIONS` because of what an install creates: a cluster-scoped ClusterRole that can read every Secret in the cluster — which is what any ingress controller needs to terminate TLS, and which RBAC cannot narrow — plus a process on the cluster's ingress path. Unlike node debug pods, the **dry run is permitted with this off**: the manifests are a pinned copy of a public upstream bundle rather than a recipe for a privileged pod, and deciding whether to turn this on requires reading them |
+| `ADMIN_ROUTER_NAMESPACE` | `k8boss-router` | Default namespace the shipped router is installed into, and where status looks when there is no installation to discover it from. Only a default: the namespace a running router actually lives in is read back off its own ClusterRoleBinding, so changing this does not make the console lose track of one already installed |
+| `ADMIN_CLI_ENABLED` | `false` | **A fifth gate.** Allows a CLI session: a pod carrying `kubectl` (or `oc`) that the console opens a shell into, for the one command it has no page for. Separate from `ADMIN_ALLOW_MUTATIONS` because of what it removes rather than what it creates — every command typed in that shell is outside the write funnel, so there is no preflight naming the permission, no dry run, no diff, and **no audit record of what changed**. The trail records that a session was opened, by whom and for how long; it cannot record the `kubectl delete` typed into it. With this off, the create *and its dry run* are refused, and the refusal is audited |
+| `ADMIN_CLI_SERVICE_ACCOUNT` | `default` | **The identity every kubectl command in that pod runs as, and the only control over what it can reach.** Not the console's permissions and not the signed-in operator's. Kubernetes has no RBAC verb covering which ServiceAccount a pod may bind, so a caller who can create a pod here can bind an account more privileged than themselves and nothing downstream narrows it — which is why this is a deployment setting rather than a per-user one. The default is the namespace's own `default` account, which holds no permissions: kubectl in the pod is refused by the API server for everything until a cluster admin deliberately binds a Role. Bind the narrowest Role that makes the sessions useful, and read `docs/safety-model.md` §9.2 before widening it |
+| `ADMIN_CLI_NAMESPACE` | `default` | Namespace CLI pods are created in, and where `ADMIN_CLI_SERVICE_ACCOUNT` is looked for. It decides both which Pod Security level admits the pod and which accounts are bindable to it, so pinning the console to one namespace keeps both in a place an administrator chose |
+| `ADMIN_CLI_IMAGE` | `alpine/k8s:1.34.9` | Image a CLI pod runs. It needs `kubectl` (or `oc`) on its PATH **and a `/bin/sh`** — the pod runs a shell loop, because a kubectl image's own entrypoint *is* kubectl and would exit immediately. The console cannot check either and does not pretend to: an image without them starts fine and answers `command not found`. Pick a kubectl within one minor version of your cluster — Kubernetes' own supported skew, which this default will drift out of. Set an image carrying `oc` for OpenShift, and one in your own registry for an air-gapped cluster, where the default cannot be pulled |
+| `ADMIN_CLI_MAX_SECONDS` | `3600` | Wall-clock limit on a CLI pod's container, as `spec.activeDeadlineSeconds`; 0 means unbounded. It bounds the window in which an unattended shell holding a live API token is possible. It does **not** clean up: the kubelet stops the container at the deadline and marks the pod Failed, and the pod object stays until somebody removes it |
+| `ADMIN_PORTAL_INSTALL_ENABLED` | `false` | **A sixth gate.** Allows the operator portal (§16) to create an OLM `Subscription` — the one write it makes. Separate from `ADMIN_ALLOW_MUTATIONS` because of what follows the write rather than what is in it: the object is nine lines, and Operator Lifecycle Manager then installs somebody else's operator and grants it whatever its bundle asks for — with OLM's permissions, not the console's, so neither RBAC here nor any preflight bounds it. Like the router and unlike node debug pods, the **dry run is permitted with this off**: the plan is your own request rendered as a Subscription plus the contents of a catalog your cluster already publishes, and deciding whether to turn this on requires reading it. With it off, a real write returns `403 mutations_disabled` and the refusal is audited |
 | `AUTH_ENABLED` | `false` | Requires a managed local, LDAP or single sign-on session for every API and WebSocket request except health, login and the two OIDC handshake routes |
 | `AUTH_SESSION_TTL_HOURS` | `12` | Lifetime of the revocable HttpOnly session cookie, from 1 to 168 hours |
 | `AUTH_COOKIE_NAME` | `k8boss_admin_session` | Session cookie name |
@@ -526,8 +694,9 @@ an install and not a configuration:
   creates nothing — it is how preflight asks).
 * **`k8boss-admin-writer`** — defined, **binding commented out**. Adds the write
   verbs: `*/scale`, `patch` on workload kinds, `patch nodes`, `create
-  pods/eviction`, `delete pods`, `create pods/exec`, and create/update/delete on
-  the config, storage and networking resources.
+  pods/eviction`, `delete pods`, `create pods/exec`, `get,patch
+  pods/ephemeralcontainers`, and create/update/delete on the config, storage and
+  networking resources.
 
 Two rules are worth knowing before you apply anything:
 
@@ -537,6 +706,12 @@ Two rules are worth knowing before you apply anything:
 * **`create pods/exec` bypasses every other control here.** A shell in a pod can
   do whatever that pod's own ServiceAccount can, and there is no diff for a
   keystroke. Withholding it is the only real control over it.
+* **`patch pods/ephemeralcontainers` is close behind it.** The operator picks the
+  image, and the container it becomes shares the pod's network namespace, its
+  volumes and — on request — the process namespace of an application container.
+  It is a separate rule from `pods/exec` so an install can withhold either one,
+  and there is no delete verb to grant: the API has none, so an attached debug
+  container lives until the pod does.
 
 Every permission, grouped by feature, with the exact degradation you get from
 withholding it, is in [`docs/rbac.md`](docs/rbac.md).

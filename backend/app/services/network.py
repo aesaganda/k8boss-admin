@@ -1,5 +1,5 @@
 """
-Network policy read models (§8.2) — who a policy selects, and who nothing selects.
+Network policy read models (§8.4) — who a policy selects, and who nothing selects.
 
 The generic §4 endpoint already returns the typed NetworkPolicy row, because
 :func:`app.resources.shaping.networkpolicy_row` is registered in the shaper
@@ -150,7 +150,7 @@ def _direction_state(
 ) -> dict[str, Any]:
     """``{isolated, effect, policies}`` for one direction over the policies on a pod.
 
-    ``rows`` are the §8 rows of the policies that *definitely* select the pod;
+    ``rows`` are the §8.3 rows of the policies that *definitely* select the pod;
     ``undecided`` says whether some other policy's selector could not be
     evaluated against it.
 
@@ -176,9 +176,9 @@ def _direction_state(
 
 
 def get_network_policy(namespace: str, name: str) -> dict[str, Any]:
-    """``GET /api/network/policies/{namespace}/{name}`` (§8.2).
+    """``GET /api/network/policies/{namespace}/{name}`` (§8.4).
 
-    The §8 row, plus the pods the policy selects.
+    The §8.3 row, plus the pods the policy selects.
 
     ``selected_pods`` is ``None`` — never ``[]`` — when the pod listing failed or
     when a selector could not be evaluated, and the reason is in
@@ -239,7 +239,7 @@ def get_network_policy(namespace: str, name: str) -> dict[str, Any]:
 
 
 def namespace_isolation(namespace: str | None = None) -> dict[str, Any]:
-    """``GET /api/network/isolation`` (§8.2) — every pod, and what selects it.
+    """``GET /api/network/isolation`` (§8.4) — every pod, and what selects it.
 
     The inverse listing: pods are the rows, policies are the decoration. That
     ordering is the point of the endpoint. Reading the policy list tells an

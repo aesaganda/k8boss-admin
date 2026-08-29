@@ -64,12 +64,17 @@ const Namespaces = lazyPage('Namespaces', () => import('./pages/Namespaces'));
 const Workloads = lazyPage('Workloads', () => import('./pages/Workloads'));
 const WorkloadDetail = lazyPage('WorkloadDetail', () => import('./pages/WorkloadDetail'));
 const Pods = lazyPage('Pods', () => import('./pages/Pods'));
+const PodDetail = lazyPage('PodDetail', () => import('./pages/PodDetail'));
 const Network = lazyPage('Network', () => import('./pages/Network'));
+const RoutesPage = lazyPage('Routes', () => import('./pages/Routes'));
 const Config = lazyPage('Config', () => import('./pages/Config'));
 const Storage = lazyPage('Storage', () => import('./pages/Storage'));
+const Gateway = lazyPage('Gateway', () => import('./pages/Gateway'));
 const Access = lazyPage('Access', () => import('./pages/Access'));
 const Events = lazyPage('Events', () => import('./pages/Events'));
 const Explorer = lazyPage('Explorer', () => import('./pages/Explorer'));
+const CustomResources = lazyPage('CustomResources', () => import('./pages/CustomResources'));
+const Portal = lazyPage('Operator portal', () => import('./pages/Portal'));
 const Clusters = lazyPage('Clusters', () => import('./pages/Clusters'));
 const Audit = lazyPage('Audit', () => import('./pages/Audit'));
 const Users = lazyPage('Users', () => import('./pages/Users'));
@@ -104,9 +109,18 @@ function ConsoleRoutes() {
               />
 
               <Route path="pods" element={<Pods />} />
+              {/* §7.5. The pod's own page: details, metrics, YAML,
+                  environment, logs, events, terminal and §7.4's debug, with the
+                  active one in `?tab=` so every tab is a link. */}
+              <Route path="pods/:namespace/:name" element={<PodDetail />} />
               <Route path="network" element={<Network />} />
+              {/* §13/§14. "routes" is the feature, not react-router's
+                  <Route> — the page component is aliased to RoutesPage so
+                  the two names cannot be confused at the point of use. */}
+              <Route path="routes" element={<RoutesPage />} />
               <Route path="config" element={<Config />} />
               <Route path="storage" element={<Storage />} />
+              <Route path="gateway" element={<Gateway />} />
               <Route path="access" element={<Access />} />
               <Route path="events" element={<Events />} />
 
@@ -114,6 +128,18 @@ function ConsoleRoutes() {
                   the catalog, and the same page renders a selected listing. */}
               <Route path="explorer" element={<Explorer />} />
               <Route path="explorer/:group/:version/:plural" element={<Explorer />} />
+
+              {/* Custom Resources: the same discovery catalog as the explorer,
+                  grouped by API group and filtered down to the ones that are
+                  not built into Kubernetes — a curated view for "what CRDs are
+                  installed", where the explorer stays the raw, everything
+                  browser. */}
+              <Route path="custom-resources" element={<CustomResources />} />
+
+              {/* §16. The operator portal sits beside Custom Resources rather
+                  than inside it: subscribing is what *installs* the CRDs that
+                  page browses, and it is a write, not a browser. */}
+              <Route path="portal" element={<Portal />} />
 
               <Route path="clusters" element={<Clusters />} />
               <Route path="audit" element={<Audit />} />

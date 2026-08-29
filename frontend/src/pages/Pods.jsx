@@ -1,9 +1,11 @@
 /**
  * Pods — every pod in scope, through the generic §4 listing.
  *
- * There is no typed `/api/pods` endpoint and there does not need to be: §8's
- * shaping layer registers `pod_row` for `core/v1/pods`, so the generic listing
- * already returns the §6 PodRow with `phase_detail` on it.
+ * The *listing* is the generic §4 one and does not need to be anything else:
+ * §8's shaping layer registers `pod_row` for `core/v1/pods`, so it already
+ * returns the §6 PodRow with `phase_detail` on it. (§7.5's typed endpoint is for
+ * one pod, and it is what `/pods/{namespace}/{name}` reads — this page never
+ * calls it, because a hundred single-pod reads is not a table.)
  *
  * `phase_detail` is the reason this page is worth having. §6: *`phase` is the
  * raw Kubernetes phase … the backend additionally supplies `phase_detail` for
@@ -39,7 +41,6 @@ import {
   ActionButton,
   ImagesCell,
   NoClusterState,
-  PodConsoleModal,
   TruncationFooter,
   menuAction,
 } from './_parts';
@@ -48,6 +49,12 @@ const CHECKS = [
   { id: 'logs', verb: 'get', group: 'core', resource: 'pods', subresource: 'log' },
   { id: 'exec', verb: 'create', group: 'core', resource: 'pods', subresource: 'exec' },
   { id: 'create', verb: 'create', group: 'core', resource: 'pods' },
+  // §7.4. `patch`, matching what `mutate` preflights — a check that named a
+  // different verb would report a permission nobody is about to exercise. The
+  // subresource is named separately because RBAC does: a ServiceAccount can hold
+  // `patch pods` and not this. Appended rather than spliced in, because
+  // `usePreflight` pairs results to checks strictly by index (§9).
+  { id: 'debug', verb: 'patch', group: 'core', resource: 'pods', subresource: 'ephemeralcontainers' },
 ];
 
 /** What the Status pill actually says, which is what a filter must match. */
@@ -92,8 +99,14 @@ export default function Pods() {
   const navigate = useNavigate();
 
   const [search, setSearch] = useState('');
-  const [podConsole, setPodConsole] = useState(null);
   const [createOpen, setCreateOpen] = useState(false);
+
+  // Every row action opens the pod's own page (§7.5) on the tab it names,
+  // rather than a modal. The page is addressable — an operator can send a
+  // colleague the exact panel — and it is where the pod's detail, environment
+  // and metrics live, none of which fitted in a dialog.
+  const openPod = (row, tab) =>
+    navigate(`/pods/${encodeURIComponent(row.namespace)}/${encodeURIComponent(row.name)}?tab=${tab}`);
 
   const listing = useResourceList('core', 'v1', 'pods', {
     namespace,
@@ -233,11 +246,9 @@ export default function Pods() {
         error={listing.error}
         onRetry={listing.reload}
         filterText={search}
-        onRowClick={(row) => setPodConsole({ pod: row, tab: 'logs' })}
+        onRowClick={(row) => openPod(row, 'details')}
         actions={(row) => [
-          menuAction('View logs', gate('logs', { requiresWrite: false }), () =>
-            setPodConsole({ pod: row, tab: 'logs' }),
-          ),
+          menuAction('View logs', gate('logs', { requiresWrite: false }), () => openPod(row, 'logs')),
           // Straight to the manifest, rather than opening on Logs and asking
           // the operator to find the tab. Not gated: the pod is already in
           // front of them, so `get` on it has demonstrably been allowed —
@@ -245,9 +256,17 @@ export default function Pods() {
           // rule 11.4 used to hide a thing that works.
           {
             title: 'View YAML',
-            onClick: () => setPodConsole({ pod: row, tab: 'yaml' }),
+            onClick: () => openPod(row, 'yaml'),
           },
-          menuAction('Open terminal', gate('exec'), () => setPodConsole({ pod: row, tab: 'exec' })),
+          {
+            title: 'View environment',
+            onClick: () => openPod(row, 'environment'),
+          },
+          menuAction('Open terminal', gate('exec'), () => openPod(row, 'terminal')),
+          // §7.4. Its own entry rather than a step inside the terminal: the pod
+          // this is for is the one whose image has no shell, so the operator
+          // reaching for it has already found that the terminal cannot help.
+          menuAction('Debug…', gate('debug'), () => openPod(row, 'debug')),
           { isSeparator: true },
           {
             title: 'Show its node',
@@ -263,15 +282,6 @@ export default function Pods() {
         }
         footer={<TruncationFooter listing={listing} noun="pods" />}
       />
-
-      {podConsole && (
-        <PodConsoleModal
-          pod={podConsole.pod}
-          initialTab={podConsole.tab}
-          execGate={gate('exec')}
-          onClose={() => setPodConsole(null)}
-        />
-      )}
 
       {createOpen && (
         <ImportYamlDialog

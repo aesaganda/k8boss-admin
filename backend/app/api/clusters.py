@@ -24,6 +24,7 @@ from __future__ import annotations
 import logging
 import time
 from contextlib import contextmanager
+from decimal import Decimal
 
 from fastapi import APIRouter, Depends, Response
 from pydantic import BaseModel, Field
@@ -36,7 +37,9 @@ from app.errors import AdminError, Conflict, Invalid, NotFound, UpstreamError, f
 from app.k8s.auth import TOKEN_AUTH_TYPES
 from app.k8s.client import manager
 from app.k8s.context import reset_current_cluster_id, set_current_cluster_id
+from app.k8s.quantities import add_quantities, parse_quantity
 from app.models import Cluster, utcnow
+from app.services import route_domain
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +73,11 @@ BASELINE_PREFLIGHT_CHECKS: tuple[dict, ...] = (
     {"verb": "list", "group": "rbac.authorization.k8s.io", "resource": "roles"},
     {"verb": "patch", "group": "apps", "resource": "deployments"},
     {"verb": "create", "group": "core", "resource": "pods", "subresource": "exec"},
+    # §7.4. Checked here rather than discovered on the Debug tab: this is a
+    # grant an operator is likely to have missed, because it is newer than the
+    # rest of this file and because "we can exec" reads like "we can debug".
+    {"verb": "patch", "group": "core", "resource": "pods",
+     "subresource": "ephemeralcontainers"},
     {"verb": "delete", "group": "core", "resource": "pods"},
     {"verb": "get", "group": "core", "resource": "secrets"},
 )
@@ -89,6 +97,10 @@ class ClusterCreate(BaseModel):
     token: str = Field(..., min_length=1)
     ca_certificate: str | None = None
     skip_tls_verify: bool = False
+    #: §13. The cluster's wildcard DNS domain, used to generate exposure
+    #: hostnames. Optional, and blank is meaningful: it means the console
+    #: generates none rather than guessing one.
+    app_domain: str | None = None
 
 
 class ClusterUpdate(BaseModel):
@@ -107,6 +119,11 @@ class ClusterUpdate(BaseModel):
     token: str | None = None
     ca_certificate: str | None = None
     skip_tls_verify: bool | None = None
+    #: Sending "" clears it. That is the only way to clear it, because the
+    #: generic assignment loop below skips None so that an omitted field cannot
+    #: blank a stored one — and an operator who typed the wrong domain has to be
+    #: able to remove it, not just overwrite it with another wrong one.
+    app_domain: str | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -164,48 +181,19 @@ def _cluster_context(cluster_id: int):
         reset_current_cluster_id(token)
 
 
-# Kubernetes quantity suffixes. Binary first: "Mi" must not be read as "M".
-_BINARY_SUFFIX = {"Ki": 2 ** 10, "Mi": 2 ** 20, "Gi": 2 ** 30,
-                  "Ti": 2 ** 40, "Pi": 2 ** 50, "Ei": 2 ** 60}
-_DECIMAL_SUFFIX = {"n": 1e-9, "u": 1e-6, "m": 1e-3, "k": 1e3, "M": 1e6,
-                   "G": 1e9, "T": 1e12, "P": 1e15, "E": 1e18}
-
-
-def _parse_quantity(value) -> float:
-    """Parse a Kubernetes resource quantity ("16", "1500m", "64Gi", "1.5e3").
-
-    Raises ``ValueError`` on anything it does not understand, and the callers
-    turn that into an ``unavailable`` entry rather than a partial sum. A total
-    that silently skipped the quantities it could not read is a number an
-    operator will use to make a capacity decision, and it would be wrong with no
-    indication that it was — worse than showing them nothing.
-
-    Case matters: ``m`` is milli and ``M`` is mega, so a case-insensitive lookup
-    would report a 500m-CPU request as 500 million cores.
-    """
-    text = str(value).strip()
-    if not text:
-        raise ValueError("empty quantity")
-    if len(text) > 2 and text[-2:] in _BINARY_SUFFIX:
-        return float(text[:-2]) * _BINARY_SUFFIX[text[-2:]]
-    if len(text) > 1 and text[-1] in _DECIMAL_SUFFIX:
-        return float(text[:-1]) * _DECIMAL_SUFFIX[text[-1]]
-    return float(text)
-
-
-def _sum_quantities(values: list, *, what: str) -> float:
+def _sum_quantities(values: list, *, what: str) -> Decimal:
     """Sum quantities, converting a parse failure into a reportable error."""
-    total = 0.0
+    total = Decimal(0)
     for value in values:
-        try:
-            total += _parse_quantity(value)
-        except (TypeError, ValueError) as e:
+        parsed = parse_quantity(value)
+        if parsed is None:
             raise UpstreamError(
                 f"The cluster reported a {what} value this console could not parse.",
-                detail=f"{value!r}: {e}",
+                detail=repr(value),
                 hint="The totals are withheld rather than reported partially summed.",
                 context={"resource": "nodes" if "capacit" in what else "pods"},
-            ) from e
+            )
+        total = add_quantities(total, parsed)
     return total
 
 
@@ -246,6 +234,7 @@ def create_cluster(payload: ClusterCreate, db: Session = Depends(get_db)) -> dic
         token_encrypted=encrypt(payload.token),
         ca_certificate=payload.ca_certificate,
         skip_tls_verify=payload.skip_tls_verify,
+        app_domain=route_domain.normalize_domain(payload.app_domain),
         # Never tested yet, and that is a distinct state from "failed". See
         # Cluster.status.
         status="unknown",
@@ -287,6 +276,13 @@ def update_cluster(
                 context={"field": "token"},
             )
         cluster.token_encrypted = encrypt(token)
+
+    if "app_domain" in fields:
+        # Normalised here rather than in the loop: it is the one field where a
+        # blank is an instruction ("stop generating hostnames") rather than an
+        # absent value, and normalize_domain refuses anything that would build a
+        # hostname DNS cannot resolve.
+        cluster.app_domain = route_domain.normalize_domain(fields.pop("app_domain"))
 
     for key, value in fields.items():
         if value is not None:
@@ -397,11 +393,21 @@ def test_cluster(cluster_id: int, db: Session = Depends(get_db)) -> dict:
     with _cluster_context(cluster.id):
         permissions = preflight.check_many([dict(check) for check in BASELINE_PREFLIGHT_CHECKS])
 
+    # §13. Offered, never applied: the stored value is the operator's and this
+    # is only what the cluster says about itself. The dialog shows it as a
+    # suggestion beside the field. None covers both "not OpenShift" and "we
+    # could not ask", which are the same thing to a form that has nothing to
+    # pre-fill — the difference is reported where it can be acted on, in the
+    # capabilities envelope the route dialog reads.
+    with _cluster_context(cluster.id):
+        discovered = route_domain.discover_domain()
+
     return {
         "reachable": True,
         "server_version": server_version,
         "latency_ms": latency_ms,
         "permissions": permissions,
+        "discovered_app_domain": discovered,
     }
 
 
@@ -526,7 +532,7 @@ def _collect_nodes() -> tuple[dict, dict]:
 
     counts = {"total": len(nodes), "ready": ready, "unschedulable": unschedulable}
     capacity_totals = {
-        "cpu_cores": round(_sum_quantities(cpu, what="node capacity cpu"), 3),
+        "cpu_cores": float(round(_sum_quantities(cpu, what="node capacity cpu"), 3)),
         "memory_bytes": int(_sum_quantities(memory, what="node capacity memory")),
         "pods": int(_sum_quantities(pods, what="node capacity pods")),
     }
@@ -591,7 +597,7 @@ def _collect_pods() -> tuple[dict, dict]:
                 memory.append(requests["memory"])
 
     requested = {
-        "cpu_cores": round(_sum_quantities(cpu, what="pod requested cpu"), 3),
+        "cpu_cores": float(round(_sum_quantities(cpu, what="pod requested cpu"), 3)),
         "memory_bytes": int(_sum_quantities(memory, what="pod requested memory")),
     }
     return phases, requested

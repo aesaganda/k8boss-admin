@@ -107,6 +107,7 @@ Stable `error` codes:
 | `mutations_disabled` | 403 | the deployment is running read-only |
 | `unsupported` | 501 | the API resource is not served by this cluster |
 | `upstream_error` | 502 | any other API server failure |
+| `internal_error` | 500 | the console itself failed and nothing mapped the cause. Distinct from `upstream_error`, which blames the cluster; the message is fixed and carries no exception text, and the detail is in the log beside the request's correlation id |
 
 ### 1.4 Group-version-resource in URLs
 
@@ -198,6 +199,7 @@ encrypted, never returned.
   "authentication_type": "service_account_token",
   "has_ca_certificate": true,
   "skip_tls_verify": false,
+  "app_domain": "apps.prod-eu.example.com",
   "status": "connected",
   "server_version": "v1.31.4",
   "last_connected": "2026-08-18T09:03:11Z",
@@ -208,12 +210,25 @@ encrypted, never returned.
 
 No field of this object ever contains credential material. Enforced by a test.
 
+`app_domain` is the cluster's wildcard DNS domain, and §13.3.1 builds generated
+exposure hostnames under it. **`null` is a real value and means the console does
+not know of one**, which is not the same as the cluster having none — both
+render as "no hostname is generated", because a hostname under a wildcard that
+does not exist is an exposure that is created, reports Admitted, and routes
+nothing.
+
+Unlike `token` and `ca_certificate` it is not credential material, so it *is*
+returned here and a UI can prefill it. Sending `""` on `PUT` clears it; omitting
+it keeps the stored value. That asymmetry is deliberate — a domain typed wrongly
+has to be removable, not only overwritable.
+
 ### `POST /api/clusters`
 
 ```json
 { "name": "prod-eu", "platform": "kubernetes", "api_server": "https://...",
   "authentication_type": "service_account_token", "token": "eyJ...",
-  "ca_certificate": "-----BEGIN CERTIFICATE-----\n...", "skip_tls_verify": false }
+  "ca_certificate": "-----BEGIN CERTIFICATE-----\n...", "skip_tls_verify": false,
+  "app_domain": "apps.prod-eu.example.com" }
 ```
 → `201` `ClusterPublic`.
 
@@ -222,10 +237,17 @@ No field of this object ever contains credential material. Enforced by a test.
 ### `POST /api/clusters/{id}/test`
 
 Performs a live connection check. Returns
-`{"reachable": true, "server_version": "v1.31.4", "latency_ms": 42, "permissions": [PreflightResult]}`
+`{"reachable": true, "server_version": "v1.31.4", "latency_ms": 42, "permissions": [PreflightResult], "discovered_app_domain": "apps.ocp.example.com"}`
 where `permissions` preflights the console's baseline verb set (see §9) so
 registration surfaces a half-permissioned ServiceAccount immediately rather than
 at first use.
+
+`discovered_app_domain` is what the cluster publishes about *itself* — OpenShift
+at `ingresses.config.openshift.io/cluster`, `null` everywhere else. **Offered,
+never applied**: it is a suggestion beside the field, and the stored
+`app_domain` always wins. Exposing under a CNAME of the cluster wildcard is
+ordinary, and a console that re-corrected it on every connection test would
+overwrite a deliberate choice with a discovered default.
 
 ### `GET /api/clusters/{id}/overview`
 
@@ -359,6 +381,98 @@ returns `207`-style detail: `applied: true` with per-pod `result` fields, becaus
 "drain succeeded" when three pods failed to evict is exactly the confident wrong
 answer this project exists to avoid.
 
+### 5.5 Node debug pods
+
+`kubectl debug node/<name>`: a pod pinned to one machine with its filesystem
+mounted, for when the node itself is what needs looking at and there is no way
+to SSH to it. **The most privileged object this API creates.**
+
+#### `GET /api/nodes/{name}/debug`
+A §1.2 envelope of the debug pods this console created *for this node*, plus:
+```json
+{ "items": [ {"name","namespace","node","image","phase","state","reason",
+              "started_at","created_at","hostFilesystemReadOnly"} ],
+  "continue": null, "remaining": null, "partial": false, "unavailable": [],
+  "enabled": true,
+  "enabledDetail": "Node debug pods are enabled on this deployment.",
+  "namespace": "default" }
+```
+- `enabled` is this deployment's **two** gates answered together, so a client can
+  disable the action with the reason rather than offering it and taking a 403.
+- `namespace` is where a new pod would be created (`ADMIN_NODE_DEBUG_NAMESPACE`).
+  A client must not guess it: it is part of what the operator is confirming.
+- `hostFilesystemReadOnly` is `null` for a pod carrying this console's label but
+  no host mount it recognises — not `true`, which would be a safety claim about
+  an object we do not understand.
+- The listing is a **read** and answers even when creating is gated off. That is
+  what makes rule 11.4 possible here, and a pod left behind after the gate was
+  switched off is the one that most needs finding.
+
+#### `POST /api/nodes/{name}/debug`
+`{"image": null, "writableHostFilesystem": false, "dryRun": true}` → the §1.5
+mutation response plus `pod`, `namespace`, `node`, `image` and
+`writableHostFilesystem`.
+
+The pod is pinned with `spec.nodeName`, tolerates every taint, sets `hostPID` and
+`hostNetwork`, and mounts the node's root filesystem at `/host` — **read-only
+unless `writableHostFilesystem` is true**, which is a deliberate departure from
+`kubectl debug`, which always mounts it writable. It is *not* privileged, sets
+`automountServiceAccountToken: false`, and does not set `hostIPC`.
+
+`before` is `null`, so the diff is the whole manifest as an addition. That is the
+disclosure mechanism: every privileged field is on screen before the confirming
+call.
+
+- **Two gates.** `ADMIN_ALLOW_MUTATIONS` **and** `ADMIN_NODE_DEBUG_ENABLED`.
+  Either off is `403 mutations_disabled` whose `hint` names both.
+- **The dry run is refused too**, uniquely among the writes in this contract.
+  Elsewhere §1.6 permits a projection on a read-only console because inspecting
+  what would change is a read; here the projection *is* a working manifest for a
+  privileged pod, and a deployment that switched this off has not consented to
+  handing one out.
+- **The gate refusal is audited** as `outcome: "denied"`, because the funnel that
+  records every other refusal is never reached.
+- **PodSecurity admission decides whether this is possible at all.** A namespace
+  enforcing `baseline` or `restricted` rejects the pod (host namespaces, hostPath
+  volume). Admission runs on `dryRun=All`, so the refusal arrives at the preview
+  step carrying the plugin's own message — before anything exists:
+
+  ```
+  403 rbac_denied
+  detail: pods "node-debugger-…" is forbidden: violates PodSecurity
+          "baseline:latest": host namespaces (hostNetwork=true, hostPID=true),
+          hostPath volumes (volume "host-root")
+  ```
+
+  **`403 rbac_denied`, not `422 invalid`.** Pod Security refuses with
+  `Forbidden`, and §1.3 maps by status rather than by `Status.reason` — which is
+  `Forbidden` here exactly as it is for a real RBAC denial, and is the reason
+  that mapping exists. The code is therefore right and the advice it implies is
+  wrong: no ClusterRole admits a pod the namespace's enforce label refuses. So
+  the **hint** is rewritten to name Pod Security and `ADMIN_NODE_DEBUG_NAMESPACE`
+  — `app.errors.podsecurity_hint`, shared with §15, and the same treatment §14.4
+  gives RBAC escalation prevention. The code, the status and the API server's own
+  detail are left alone.
+
+#### `DELETE /api/nodes/{name}/debug/{pod}?dryRun=`
+→ the §1.5 mutation response. The delete diff is §4's: `before=live, after=null`.
+
+Only pods carrying this console's label **and** pinned to this node; anything
+else is `404 not_found` from this route rather than a delete, or it would be a
+general pod-delete with a node in its path.
+
+> **Nothing removes this pod automatically, and that is not a gap this API can
+> close.** `kubectl debug` has no `--rm` either. A closed browser tab is not a
+> signal, and a restarted console drops whatever would have issued the DELETE, so
+> the honest answer is to label the pods, list them, and offer removal — not to
+> promise a cleanup that fails exactly when it matters.
+
+Contrast §7.4, which is the opposite case: an ephemeral container **cannot** be
+removed, because the API has no verb for it. A client must render the two
+differently.
+
+---
+
 ### `GET /api/events`
 Query `namespace`, `involvedObjectKind`, `involvedObjectName`, `type`
 (`Normal`|`Warning`), `limit` (default 200).
@@ -414,9 +528,16 @@ Row:
 PodRow:
 ```json
 { "name", "namespace", "node", "phase", "ready": "2/2", "restarts": 3,
-  "age_seconds", "ip", "qos_class", "containers": [{"name","image","ready","restarts","state","reason"}],
+  "age_seconds", "ip", "qos_class",
+  "containers": [{"name","image","ready","restarts","state","reason","kind"}],
   "owner": {"kind":"ReplicaSet","name":"checkout-7d9"} }
 ```
+
+`containers[].kind` is `container` for the pod's own and `ephemeral` for a §7.4
+debug container somebody attached. **Neither `ready` nor `restarts` counts an
+ephemeral entry**, because the kubelet does not either: an ephemeral container
+has no readiness and is never restarted, and letting one turn `2/2` into `2/3`
+would report a healthy pod as degraded for the duration of somebody's shell.
 
 `phase` is the raw Kubernetes phase. The UI derives display state, but the
 backend additionally supplies `phase_detail` for the cases where phase lies —
@@ -453,7 +574,7 @@ template vs. the historical one.
 
 ---
 
-## 7. Pod logs and exec
+## 7. One pod — its detail, its logs, its shell, its environment and its usage
 
 ### `GET /api/pods/{namespace}/{name}/logs`
 Query `container`, `tailLines` (default 500, max 10000), `previous`,
@@ -483,6 +604,263 @@ Server→client: `{"type":"stdout","data":"..."}`, `{"type":"stderr","data":"...
 `{"type":"error","reason":"...","detail":"..."}`, `{"type":"end","code":0}`.
 Exec sessions are audited on open and on close.
 
+`container` may name an **ephemeral** container (§7.4) as well as a regular or
+init one. A missing `container` on a pod with more than one entry in
+`spec.containers` is refused; ephemeral containers never enter that count,
+because the API server's own defaulting rule does not count them either — so
+attaching a debug container to a single-container pod must not start refusing
+container-less requests that worked before.
+
+### 7.4 Debug containers
+
+`kubectl debug`, for the pod whose image has no shell. An **ephemeral
+container** is scheduled into the *running* pod, sharing its network namespace
+and volumes and — if asked — the process namespace of one of its containers.
+
+#### `GET /api/pods/{namespace}/{name}/debug`
+A §1.2 envelope of the pod's ephemeral containers, plus two additive keys:
+```json
+{ "items": [ {"name","image","targetContainer","command","tty",
+              "state","reason","started_at"} ],
+  "continue": null, "remaining": null, "partial": false, "unavailable": [],
+  "podContainers": ["app", "envoy"], "initContainers": ["migrate"],
+  "supported": true,
+  "supportDetail": "The API server serves pods/ephemeralcontainers with verbs: get, patch, update." }
+```
+- `state` uses the same vocabulary as a PodRow container: `Running` |
+  `Waiting` | `Terminated`, or **`null` when the kubelet has not reported on the
+  container at all**, which is a different fact from `Waiting`.
+- `command: null` means the image's own entrypoint runs. It is a real answer,
+  not an unread value, and a client must not render it as §11.2's em dash.
+- `started_at` is the container's start time from whichever state carries it —
+  the API sets it on both `running` and `terminated`. It is `null` only for a
+  container that genuinely has not started (`waiting`, or no status yet).
+  Reporting a container that ran and exited as never started conflates two
+  faults with opposite fixes: a debug image whose entrypoint returned, and one
+  the node could not pull.
+- `podContainers` and `initContainers` are the pod's own container names, from
+  the same read. They are here so a client can offer the `targetContainer`
+  choices and refuse an already-taken name **before** spending a request and an
+  audit row — the §6 PodRow deliberately carries no init containers.
+- **`supported` is three-valued.** `true`/`false` come from the core group's
+  discovery document; **`null` means it could not be read**, so whether the
+  cluster serves ephemeral containers is unknown. A client that renders `null`
+  as `false` tells an operator their cluster lacks a feature it may well have,
+  and sends them to plan an upgrade instead of to look at their API server.
+- `items: []` is a real zero: the pod was read. A pod that could **not** be read
+  is an error, never an empty list (§0.1).
+
+#### `POST /api/pods/{namespace}/{name}/debug`
+```json
+{ "image": "busybox:1.36", "container": null, "targetContainer": "app",
+  "command": ["sleep","3600"], "tty": true, "dryRun": true }
+```
+→ the §1.5 mutation response, plus `container`, `image`, `targetContainer`,
+`command` and `tty`. `container` is the name that was generated
+(`debugger-xxxxx`), so a client can open a terminal on what it created without
+parsing the diff.
+
+Every field is optional. `image` omitted uses the console's configured default
+(`ADMIN_DEBUG_IMAGE`); `container` omitted is generated; `command` omitted runs
+the image's entrypoint.
+
+**A client that previews must replay the `container` it was given.** A generated
+name is fresh per request, so a confirming call that omits `container` again
+gets a *different* one — and the container that appears in the pod is then not
+the one whose diff the operator approved. The response returns `container` for
+exactly this reason; carry it into the confirming call the same way `dryRun`'s
+echoed `resourceVersion` is carried (§0.4). A client that never previews may
+omit it.
+
+- **It is a write and it goes through the funnel** (§0.2–§0.5): a
+  `SelfSubjectAccessReview` on **`patch` `pods/ephemeralcontainers`** — RBAC
+  names the subresource separately from `pods` — then `dryRun=All` on the same
+  call, the API server's projected diff, and an audit row naming the image.
+- The patch is a **strategic merge** on `spec.ephemeralContainers`, whose merge
+  key is `name`, so a second debug container appends. RFC 7386 would replace the
+  list and delete the first one — which the API server then refuses, because an
+  ephemeral container cannot be removed.
+- A cluster that does not serve the subresource is **`501 unsupported`**,
+  decided from discovery. Not `404 not_found`: the API server answers 404 for an
+  unserved subresource, and "not found" about a pod the operator is looking at
+  sends them hunting for a deletion that never happened. Per §1.3 a client
+  renders this as an ordinary fact, not as an error.
+- A container name already used by *any* container of the pod — regular, init or
+  ephemeral — is `422 invalid` listing them. So is a `targetContainer` that is
+  not one of `spec.containers`, and a pod whose phase is `Succeeded` or
+  `Failed`, where the kubelet would never start the container.
+- **§0.4 does not apply.** There is no `resourceVersion` on this write and none
+  is needed: the merge key makes two concurrent attaches produce two containers
+  rather than one overwriting the other, so there is no lost update to detect.
+
+> **An ephemeral container cannot be removed.** The Kubernetes API has no verb
+> for deleting one; it lives until the pod does. There is no `DELETE` here, and
+> a client must not offer one — a control the API server will always refuse is
+> the defect standard applied to a button. Restarting the workload is what
+> removes it.
+
+### 7.5 `GET /api/pods/{namespace}/{name}`
+
+The §6 `PodRow` for one pod, plus the fields a table has no room for. `unavailable`
+is present and empty: this endpoint makes exactly one read, and a pod that could
+not be read is a §1.3 error, never an empty shell with a name at the top of it.
+
+Added to the row:
+
+```jsonc
+{
+  "...": "every §6 PodRow field",
+  "init_containers": [ /* the container shape below, kind: "init" */ ],
+  "conditions": [{"type","status","reason","message","last_transition"}],
+  "volumes":    [{"name","kind","source"}],
+  "uid": "...", "resource_version": "884213",
+  "created_at": "...", "deleted_at": null, "start_time": "...",
+  "labels": {}, "annotations": {},
+  "service_account": "checkout", "restart_policy": "Always",
+  "priority_class": null, "node_selector": {}, "host_network": false,
+  "host_ip": "10.0.1.4",
+  "status_reason": null, "status_message": null,
+  "unavailable": [], "partial": false
+}
+```
+
+Every entry of `containers` (and of `init_containers`) additionally carries
+`image_id`, `container_id`, `started_at`, `ports:[{name,container_port,protocol,host_port}]`,
+`requests`, `limits`, `command`, `args` and:
+
+```jsonc
+"last_terminated": {"reason": "OOMKilled", "exit_code": 137, "signal": null,
+                    "started_at": "...", "finished_at": "...", "message": null}
+```
+
+That field is why this endpoint exists. "Restarted 14 times" is a symptom;
+`OOMKilled` is the answer, and §6's row has nowhere to put it.
+
+Three rules the shape encodes:
+
+- **`requests` and `limits` are `null`, never `{}`, for a container that declares
+  none.** A BestEffort container is first in line to be evicted; `cpu: 0` would
+  describe it as one that asked for nothing and got it.
+- **`init_containers` is a separate list.** A `Terminated` init container with
+  exit code 0 is a success and the same two words on an app container are an
+  outage. Merged, every healthy pod that has ever run a migration gets a red row.
+- **`conditions[].status` stays the tri-state string** `"True"`/`"False"`/`"Unknown"`.
+  Coerced to a boolean, "the kubelet has not said" becomes "no" — and a pod whose
+  `Ready` condition is `Unknown` is a pod on a node that stopped reporting.
+
+The row's `ready` fraction and `restarts` total still exclude ephemeral
+containers, exactly as §6 specifies: this endpoint *enriches* the shaper's
+entries rather than rebuilding them.
+
+### 7.6 `GET /api/pods/{namespace}/{name}/environment`
+
+The §1.2 envelope, one item per container, with the variables that container
+will see in the order the kubelet builds them (`envFrom` first, then `env`).
+
+```jsonc
+{
+  "items": [{
+    "container": "app",
+    "kind": "container" | "init" | "ephemeral",
+    "variables": [{
+      "name": "DB_PASSWORD",
+      "value": null,
+      "value_state": "withheld",
+      "source": {"kind": "secretKeyRef", "name": "checkout-db",
+                 "key": "password", "optional": null},
+      "all_keys": false,
+      "overridden": false
+    }]
+  }],
+  "unavailable": [], "partial": false
+}
+```
+
+`value_state` is a closed vocabulary and clients **branch on it**, because four
+of the six states render as a blank value and they are four different facts:
+
+| `value_state` | What it means |
+|---|---|
+| `literal` | Written in the pod spec. The blank you see is what the container sees |
+| `resolved` | Read out of a ConfigMap |
+| `withheld` | It comes from a Secret. **This endpoint never returns Secret values**, under any setting |
+| `absent` | The ConfigMap was read and has no such key. Unless the reference is `optional` the kubelet refuses to start the container — a finding, and not the same as either blank below |
+| `unreadable` | The ConfigMap or Secret could not be read. Named in `unavailable[]`; the variable is **not** known to be unset |
+| `runtime` | A `fieldRef` or `resourceFieldRef`. The kubelet computes it at start and the API server never stores the result |
+
+`source.kind` is the spec spelling — `configMapKeyRef`, `secretKeyRef`,
+`configMapRef`, `secretRef`, `fieldRef`, `resourceFieldRef` — so a client can
+name the object a variable comes from without parsing prose.
+
+Two further rules:
+
+- **`all_keys: true` with `name: null`** is the one row that stands in for an
+  `envFrom` import whose object could not be read. Variables are coming from it
+  and we cannot name them; reporting zero of them would be §0.1's failure hidden
+  inside a container's environment, where nobody would look for it.
+- **`overridden: true`** marks a variable a later entry in the same container
+  redefines. The losing row is kept, because "this ConfigMap sets `DATABASE_URL`
+  and something else is overriding it" is an answer people spend an afternoon on.
+
+A `secretKeyRef` is answered **without reading the Secret**: the key is already in
+the pod spec and the value is never returned, so there is nothing a read would
+add — which is also why this endpoint renders in full on a console with no
+`get secrets` grant. A `secretRef` in `envFrom` does read the Secret, for its key
+names only.
+
+### 7.7 `GET /api/pods/{namespace}/{name}/metrics`
+
+The §1.2 envelope, one item per container, plus the pod totals and the sample
+window.
+
+```jsonc
+{
+  "items": [{
+    "container": "app",
+    "kind": "container" | "init",
+    "usage": {"cpu_cores": 0.12, "memory_bytes": 188743680} | null,
+    "sample_expected": true,
+    "requests": {"cpu": "250m", "memory": "256Mi"} | null,
+    "limits":   {"cpu": "1",    "memory": "512Mi"} | null
+  }],
+  "pod": {"cpu_cores": null, "memory_bytes": null},
+  "window_seconds": 30,
+  "timestamp": "2026-08-19T09:04:00Z",
+  "unavailable": [], "partial": false
+}
+```
+
+**The pod is the primary read and the sample is a secondary one.** That is the
+whole design. A cluster with no `metrics.k8s.io` is an ordinary fact — §1.2's
+`unsupported`, which §1.3 says a client renders as "not present on this cluster"
+and deliberately not in red — and a pod that started ten seconds ago has no
+sample on a cluster that is working perfectly. Both answer **200** with every
+`usage` at `null` and an entry in `unavailable[]` naming the group; `requests`
+and `limits` still render, because they come from the pod.
+
+- **A number we did not measure is `null`, never `0`.** A pod drawn at zero cores
+  reads as idle, and idle is what gets something turned off. That includes a
+  quantity the API server spelled in a way this console cannot parse.
+- **`pod.cpu_cores` and `pod.memory_bytes` are `null` when any container we
+  expected a sample for is missing from it.** Summing the parts we have
+  understates the pod by however much the unmeasured container is using, with
+  nothing in the response to say a container is missing from the arithmetic.
+- **`sample_expected` is what keeps the two kinds of `usage: null` apart.** It is
+  `true` for every app container and for a *running* init container — a
+  `restartPolicy: Always` sidecar, which runs for the life of the pod and uses
+  real resources. It is `false` for a terminated init container: metrics-server
+  does not report one, it holds nothing, and requiring it would make every pod
+  that has ever run a migration report unknown usage forever. Only a missing
+  `sample_expected: true` container nulls the totals.
+- **The served version comes from discovery**, not from a pinned `v1beta1`: a
+  cluster that has moved on is read rather than refused. A discovery that could
+  not be *enumerated* is `forbidden`/`unreachable` in `unavailable[]` and never
+  `unsupported` — "this cluster has no metrics" and "we could not find out" send
+  an operator to two different places, and only one of them is an install.
+- **A 404 from the metrics API is translated.** The pod was read a moment ago, so
+  relaying "not found" beside its own name would read as "this pod is gone". The
+  `unavailable` entry says the sample is missing and why.
+
 ---
 
 ## 8. Config, storage, access, network policy — typed rows
@@ -505,10 +883,64 @@ it asks for them, produced by the shaping layer.
 - **ServiceAccounts** — `{name, namespace, secrets_count, automount, age_seconds}`.
 - **Roles / ClusterRoles** — `{name, namespace, rule_count, rules:[{apiGroups,resources,verbs,resourceNames}], age_seconds}`.
 - **RoleBindings / ClusterRoleBindings** — `{name, namespace, role:{kind,name}, subjects:[{kind,name,namespace}], age_seconds}`.
-- **NetworkPolicies** — see §8.1; the row is large enough to need its own
+- **NetworkPolicies** — see §8.3; the row is large enough to need its own
   subsection, and every null in it means something specific.
 
-### 8.1 The NetworkPolicy row
+### 8.1 Browsable, untyped — Storage, Network, Configuration, Gateway (beta)
+
+The Storage, Network and Configuration pages also carry tabs for resources with
+no typed row above: the generic §4 endpoint returns the trimmed manifest
+(`shape=raw`), and the frontend renders Name/Namespace/Age plus a YAML detail
+panel, nothing shape-specific. This is a UI/nav decision, not a new contract —
+each is reachable exactly as any resource is through §4, just given a tab in
+the console's own navigation rather than only through §4's catalog/explorer:
+
+- **Storage**: Volume Attributes Classes (`storage.k8s.io`, cluster-scoped).
+- **Network**: Endpoint Slices (`discovery.k8s.io`, namespaced), Ingress
+  Classes (`networking.k8s.io`, cluster-scoped), Network Policies
+  (`networking.k8s.io`, namespaced).
+- **Configuration**: HorizontalPodAutoscalers (`autoscaling`),
+  VerticalPodAutoscalers (`autoscaling.k8s.io`), PodDisruptionBudgets
+  (`policy`), ResourceQuotas / LimitRanges (core), PriorityClasses
+  (`scheduling.k8s.io`, cluster-scoped), RuntimeClasses (`node.k8s.io`,
+  cluster-scoped), Leases (`coordination.k8s.io`), Mutating/ValidatingWebhook
+  Configurations (`admissionregistration.k8s.io`, cluster-scoped).
+- **Gateway (beta)**: Gateways, Gateway Classes, HTTP Routes, GRPC Routes,
+  Reference Grants, Backend TLS Policies — all `gateway.networking.k8s.io`.
+  `BackendTrafficPolicy` is intentionally not included: it is not part of the
+  upstream Gateway API and its real group varies by implementation (e.g. Envoy
+  Gateway's is `gateway.envoyproxy.io`) — adding it requires confirming which
+  implementation the target cluster runs, not a guess.
+
+**VerticalPodAutoscalers, VolumeAttributesClasses and the whole Gateway (beta)
+category are CRD-backed and commonly absent.** Per §1.2 and rule 7 above, a
+cluster without the relevant CRDs installed answers `unsupported` on these
+tabs' primary list call, and the frontend renders that as an ordinary "not
+present on this cluster" state — ranked with the `metrics.k8s.io` example
+already in §1.2, not as a defect.
+
+**Gateway API's served version is resolved from the live catalog, not
+hardcoded.** Its kinds move between release channels on real clusters
+(`ReferenceGrant` commonly at `v1beta1`, `BackendTLSPolicy` at
+`v1alpha2`/`v1alpha3` depending on the installed CRD bundle) and §4's resolver
+matches a version exactly, so a tab that pinned one the way every other typed
+tab does would `unsupported` on any cluster running a different channel. The
+Gateway (beta) tabs instead look their plural up in `GET /api/resources/catalog`
+and use whichever version the cluster actually reports, falling back to a
+guessed version only until the catalog answers.
+
+### 8.2 Custom Resources
+
+A curated view over the same catalog §4's explorer already exposes (`GET
+/api/resources/catalog`), grouped by API group and filtered down to groups that
+are not one of Kubernetes' own built-in APIs — everything left is a CRD's
+instances, by elimination. There is no `isCRD` field in a catalog item; the
+frontend holds a static allowlist of built-in group names rather than the
+backend adding one, unless that heuristic is shown to misbehave on a real
+cluster. This is a second navigation surface over §4's existing data, not a new
+endpoint or row shape.
+
+### 8.3 The NetworkPolicy row
 
 ```json
 { "name": "default-deny-ingress", "namespace": "prod",
@@ -564,16 +996,16 @@ plugin implements it. A cluster whose plugin does not will store and serve these
 objects while forwarding every packet they describe as denied. The row describes
 what the API server holds; the UI says so out loud.
 
-### 8.2 Network policy endpoints
+### 8.4 Network policy endpoints
 
 Listing NetworkPolicies is §4 —
-`GET /api/resources/networking.k8s.io/v1/networkpolicies` returns the §8.1 row —
+`GET /api/resources/networking.k8s.io/v1/networkpolicies` returns the §8.3 row —
 and creating, replacing and deleting one is §4 as well, through the single
 mutation funnel. These two endpoints exist only for the questions a shaper cannot
 answer, because both need a pod listing.
 
 #### `GET /api/network/policies/{namespace}/{name}`
-→ the §8.1 row plus `{selected_pods: [PodRow] | null, selected_pod_count: int | null,
+→ the §8.3 row plus `{selected_pods: [PodRow] | null, selected_pod_count: int | null,
 unavailable, partial}`.
 
 `selected_pods` is `null`, not `[]`, when the pod listing failed **or** when a
@@ -582,7 +1014,7 @@ inert — the finding that gets a policy deleted as dead, so a failed read must
 never look like one. The policy read is primary and raises; the pod listing is
 secondary and is collected.
 
-The §8.1 row served by §4 deliberately carries no `selected_pod_count`: a field
+The §8.3 row served by §4 deliberately carries no `selected_pod_count`: a field
 that were always `null` there would make the em dash mean "we did not look", and
 this kind cannot afford a second meaning for `null`.
 
@@ -852,6 +1284,20 @@ trace.
    blanks, and it never advances the timestamp on an attempt that did not
    return: an unlabelled view is indistinguishable from a live one, and a stale
    object presented as current is the defect standard applied to time.
+7. A **primary** list call answering `unsupported` (§1.2) renders the same calm
+   "not present on this cluster" empty state as any other ordinary absence —
+   never `ErrorState`'s red panel. This applies to a whole tab/page's own
+   listing, not only to a secondary read folded into `unavailable[]`: a tab for
+   a CRD-backed resource (Gateway API, VerticalPodAutoscaler,
+   VolumeAttributesClass) is routine on a cluster that doesn't have the CRD
+   installed, and rendering that red trains operators to stop trusting red.
+8. A detail view with tabs **fetches only the visible tab**, and the active tab
+   lives in the URL. Mounting all of them at once is one read per tab on
+   arrival — most of them for a panel nobody is looking at — and on the pod page
+   (§7.5) two of the tabs open a websocket, so a Terminal that connected behind
+   an unopened tab would start an audited exec session nobody asked for. The URL
+   half is not cosmetic: a panel an operator cannot link to is a panel they have
+   to describe over the phone.
 
 ---
 
@@ -1059,3 +1505,1101 @@ does not, the stored role is left alone rather than reset (§12.4). The `admin` 
 user-administration surface; both `admin` and `user` identities retain the
 console's normal cluster capabilities, still constrained by preflight and the
 deployment-wide mutation gate.
+
+---
+
+## 13. Routes — exposing a Service to the outside world
+
+One operator question — *what is reachable from outside, and where does it go* —
+answered across the three unrelated APIs that can answer it. The console models
+an **exposure** (a hostname, a path, one or more target Services, a decision
+about TLS) in OpenShift's vocabulary, because it is the only one of the three
+with a field for every part of it, and compiles that model down to whichever API
+the cluster actually serves.
+
+### 13.1 The three backends
+
+| `backend` | Kind | Group | Notes |
+|---|---|---|---|
+| `openshift` | `Route` | `route.openshift.io` | Lossless. Every feature is one field. |
+| `ingress` | `Ingress` | `networking.k8s.io` | Portable, and the lossiest. |
+| `gateway` | `HTTPRoute` | `gateway.networking.k8s.io` | Weights and redirects are real fields; TLS belongs to the Gateway. |
+
+Two of the three are CRDs whose served version depends on which release the
+cluster installed, so the version is **resolved through discovery** and never
+assumed. Pinning `gateway.networking.k8s.io/v1` 404s on a cluster serving
+`v1beta1`, and a 404 reads as "this cluster has no HTTPRoutes".
+
+### 13.2 Backend state is three-valued
+
+`available` / `unsupported` / `unknown`, and the third is not a variant of the
+second:
+
+- `available` — discovery lists the resource.
+- `unsupported` — discovery answered and it is not there. **An ordinary fact.**
+- `unknown` — discovery could not answer for that group. **We do not know.**
+
+`resolve()` already refuses to report `unsupported` for a group in its own
+`unavailable` list; §13 only has to not undo that. Getting it backwards during
+an aggregated-API outage tells an operator their Routes are gone, and the action
+that follows is re-creating an exposure on a hostname that is already claimed.
+
+**Only `unknown` makes the listing partial.** `unsupported` does *not* go in
+`unavailable[]` — a cluster that does not serve `route.openshift.io` is not a
+cluster whose Routes we failed to read, there are none, and raising the §1.2
+banner on the Routes page of every non-OpenShift cluster would train operators
+to ignore it. Per-backend state is reported in its own `backends[]` field.
+
+### 13.3 The exposure features
+
+Nine stable tokens. The frontend branches on them to disable a control **with
+the reason** (§11.4), so they are contract, not an internal enum.
+
+`edge-tls`, `passthrough-tls`, `reencrypt-tls`, `insecure-redirect`,
+`insecure-allow`, `weighted-backends`, `wildcard-subdomain`, `generated-host`,
+`path-exact`.
+
+`GET /api/routes/capabilities` reports **all nine for every backend**, including
+the unsupported ones — an absent key carries no reason, and §11.4 needs one.
+
+### 13.3.1 `appDomain` — the cluster wildcard, and generated hostnames
+
+`GET /api/routes/capabilities` carries one extra top-level key beside the §1.2
+envelope:
+
+```json
+"appDomain": {
+  "value": "apps.prod-eu.example.com",
+  "source": "configured",
+  "stored": "apps.prod-eu.example.com",
+  "discovered": null,
+  "pattern": "<name>-<namespace>.<domain>"
+}
+```
+
+`value` is what a generated hostname is built under and is `stored || discovered`;
+`source` is `configured`, `discovered`, or `null`. Both inputs are reported even
+when they agree — "what you typed differs from what the cluster says" is the only
+place a mistyped domain becomes visible.
+
+**`value: null` means no hostname is generated at all,** and the form asks the
+operator to type one. This is §0.1 applied to a hostname: a suffix under a
+wildcard that does not resolve produces an exposure that is created, reports
+Admitted, and routes nothing — §14's failure with a hostname in place of a
+controller. A field left blank asks a question; a generated hostname answers it,
+and answering it wrongly is worse than not answering.
+
+**The pattern includes the namespace, and that is load-bearing.** Without it a
+Service called `web` in two namespaces generates one hostname twice; most
+controllers admit both and route to whichever won, which is an outage invisible
+in either object.
+
+**Discovery must not make the envelope partial.** `config.openshift.io` is absent
+on every non-OpenShift cluster, so the read raises `unsupported` — which §13.2
+already says does not belong in `unavailable[]`. The same sentence applies here
+for the same reason: a §1.2 banner lit on every plain cluster is a banner nobody
+reads. A discovery read that genuinely *failed* is still recorded, because "not
+OpenShift" and "we could not ask" are different answers.
+
+The client may build the hostname itself to fill the field as the operator
+types. It is a suggestion only: the value travels as an ordinary `host` and is
+compiled and validated server-side like any hostname that was typed, so the
+backend remains the authority on what is accepted.
+
+### 13.4 `GET /api/routes?namespace=&backend=&limit=`
+
+The §1.2 envelope, plus `backends[]` (§13.2) and `truncated[]`. `continue` is
+deliberately **not** propagated: three independent listings cannot share one
+cursor, and a token meaning "page 2 of the Ingresses and page 1 of everything
+else" produces a table that skips rows.
+
+Each row:
+
+```json
+{
+  "id": "ingress/prod/shop", "backend": "ingress", "kind": "Ingress",
+  "group": "networking.k8s.io", "version": "v1", "plural": "ingresses",
+  "name": "shop", "namespace": "prod",
+  "hosts": ["shop.example.com"], "subdomain": null,
+  "path": "/", "pathType": "Prefix", "paths": [ ... ],
+  "targets": [{"service": "shop", "port": 80, "weight": null}],
+  "tls": {"termination": "edge", "insecurePolicy": null,
+          "inlineCertificate": false, "secretName": "shop-tls"},
+  "wildcardPolicy": null,
+  "admitted": null, "admittedDetail": "...",
+  "addresses": ["a1b2.elb.eu-west-1.amazonaws.com"],
+  "ingressClass": "haproxy", "tlsHosts": ["shop.example.com"], "parents": [],
+  "age_seconds": 86400, "resourceVersion": "4021"
+}
+```
+
+**`admitted` is tri-state and the third value is the common one.**
+
+- `true` — a router admitted it. When another shard *refused* it, that is named
+  in `admittedDetail` rather than hidden: a Route admitted by `default` and
+  refused by `internal` with `HostAlreadyClaimed` is served on one shard and not
+  the other, and a bare green badge hides the half the operator came to find.
+- `false` — every router that reported refused it, carrying the reason verbatim.
+- `null` — **no router has reported.** Not a rejection. Also, permanently, the
+  value for every Ingress: the Ingress API has no admission condition at all,
+  and whether a controller took the object is visible only through `addresses`.
+
+**`admitted` is not generation-scoped, and cannot be.** §6 refuses to believe a
+workload's counts until `status.observedGeneration` matches `metadata.generation`.
+`RouteIngressCondition` has no such field: there is nothing in a Route saying
+which generation of the spec a router's verdict is about. An `Admitted: True`
+written before the hostname was changed still reads as `True` afterwards. The
+console does not synthesise a substitute from `lastTransitionTime` — that moves
+when the condition's *status* changes, not when the spec does, so comparing it
+would manufacture confidence from a timestamp that means something else. This is
+a limitation of the Route API, stated rather than papered over.
+
+`managedBy` reports whether something other than a person owns the exposure:
+`controller` from an `ownerReferences` entry with `controller: true`
+(definitive — something is reconciling it now), `tool` from a Helm, Argo CD or
+Flux marker (advisory — whether an edit survives depends on that tool's drift
+mode). All keys present and `null` throughout when nothing owns it.
+`kubectl.kubernetes.io/last-applied-configuration` is deliberately **not** a
+marker: it means somebody once ran `kubectl apply`, not that anything is
+watching, and flagging it would warn on a large fraction of every cluster's
+objects. `app.kubernetes.io/instance` is recognised but attributed to no tool,
+because Helm, hand-written manifests and half the ecosystem all set it.
+
+An edit to a controller-owned exposure succeeds, reports `applied: true`
+truthfully, and is reverted seconds later. Both halves are true at once, which
+is why the row carries this and the edit dialog says it before the diff.
+
+`targets[].weight` is `null`, never `100`, on a single-backend exposure. A
+weight rendered where no split was configured reads as one that was.
+
+A Route's `tls` reports `inlineCertificate: true|false` and **never the key**.
+The key lives in the object's own spec — an OpenShift API design fact, not a
+choice this console gets to make — but a list endpoint that echoed it would put
+key material in a table.
+
+### 13.5 `POST /api/routes/render` — compile, and write nothing
+
+Body `{backend, spec?, document?}`. Returns
+`{yaml, document, backend, kind, group, version, plural, lossy[], preserved[], requested[], verbatim}`.
+
+Not preflighted and not audited, because nothing happens. It reads the cluster
+only to resolve the served API version.
+
+Two modes:
+
+- **`spec` given** — the form's fields are compiled and patched **into**
+  `document` rather than replacing it. A `spec.rules[1]` somebody hand-wrote, a
+  controller annotation, an `externalCertificate` reference: all of it survives
+  a trip through the form, and `preserved[]` names each path the form is not
+  showing.
+- **`spec` omitted, `document` given** — the document is taken **verbatim**.
+  `lossy` and `preserved` are empty as statements of fact: the console compiled
+  nothing, so it dropped nothing and hides nothing. This is what the YAML view
+  sends once the operator has edited it, and without it a hand-edited document
+  would have the form's fields recompiled over the top of it at write time.
+
+### 13.6 `lossy[]`, and the acknowledgement that gates a write
+
+An Ingress cannot express passthrough TLS. The compiler does **not** emit a
+controller-specific annotation and hope, and it does not quietly downgrade. It
+returns the object it can write plus:
+
+```json
+{"feature": "passthrough-tls",
+ "label": "Pass TLS through to the pod without terminating it",
+ "consequence": "The Ingress API cannot express passthrough. This exposure will be written with the router terminating TLS instead, so client certificates the pod expects will not arrive…",
+ "mitigation": "Write this as an OpenShift Route if the cluster serves them, or use a Gateway API TLSRoute…"}
+```
+
+Every entry answers *what happens to my traffic* and then *what to do instead*,
+in that order. A warning that answers only the first is one people click past.
+
+**A write is refused with `422 invalid` unless `acknowledgeLossy` names every
+entry.** The same shape as `force` on a node drain, and for the same reason:
+consenting to a consequence is a separate act from requesting the change. The
+list is per-feature, not a boolean, so a caller that acknowledged one
+consequence and then edited the form must read the new one.
+
+No compiler output ever contains a vendor annotation of its own
+(`nginx.ingress.kubernetes.io/…`, `haproxy.org/…`, `traefik…`). Asserted by a
+test rather than stated as policy — that is the exact pressure point where
+"report it as lossy" gets quietly reversed into "guess the controller", and a
+reversal would leave `lossy[]` claiming a feature was dropped while the object
+silently carried it. An annotation the *operator* supplies is written, because
+they chose it for a controller they know they are running.
+
+### 13.7 Writes
+
+- `POST /api/routes` — `{backend, spec?, document?, acknowledgeLossy[], dryRun}`
+- `PUT /api/routes/{backend}/{namespace}/{name}` — the above plus a required
+  `resourceVersion`
+- `DELETE /api/routes/{backend}/{namespace}/{name}?dryRun=` — `dryRun` is a
+  query parameter for the same reason §4's delete is
+
+All three return the §1.5 mutation response, with an extra `route` object
+carrying `{backend, kind, lossy, preserved, verbatim}`.
+
+They delegate to `app.admin.apply.create_from_yaml` / `update_from_yaml` /
+`delete_resource`, which is what routes them through the single funnel. A second
+create path here would be a second place for the gate, the preflight, the dry
+run and the audit row to be got right. What §13 adds is the audit *sentence*:
+`create Route checkout: expose checkout:8080 at https://checkout.example.com/ (edge)`
+rather than `create Route checkout`, because the question the trail is asked is
+who exposed the payments service to the internet, and the generic sentence does
+not answer it. A verbatim write says so instead —
+`create Ingress prod/checkout (written verbatim from the YAML view)` — because
+the console did not model the intent and must not narrate one it inferred.
+
+**`routes/custom-host` is preflighted separately.** OpenShift gates *choosing a
+hostname* behind its own RBAC subresource, distinct from creating the Route. The
+funnel preflights `create routes`, that review passes, and the API server then
+refuses the write — so without this the operator is told they cannot create
+Routes, a permission the review just confirmed they hold. It is checked only for
+`openshift` and only when `spec.host` is set (a generated hostname is not a
+custom one), and the denial is audited here because it happens outside the
+funnel.
+
+---
+
+## 14. The shipped router
+
+k8boss-admin ships a reverse proxy and can install it. That is a deliberate
+departure from *not a deployment engine*, and the shape of the departure is the
+whole design: **the console writes manifests, and nothing else.**
+
+There is no controller in the console process, no reconcile loop, and no desired
+state stored anywhere. Install, upgrade and uninstall are each a sequence of
+ordinary writes — one per object, each through `mutate()`, each gated,
+preflighted, dry-run, diffed and audited exactly like a scale. What keeps the
+router running is the Kubernetes control plane. What routes traffic is HAProxy's
+own in-cluster controller. `GET /api/router` is a live read like every other page
+in this console.
+
+### 14.1 What it is, and what it does not serve
+
+HAProxy Kubernetes Ingress Controller, pinned, as eight objects: Namespace,
+ServiceAccount, ClusterRole, ClusterRoleBinding, IngressClass, ConfigMap,
+Deployment, Service. `deploy/router.yaml` is the same bundle at default options,
+generated by `make router-manifest` and enforced by a test, so
+`kubectl apply -f` and pressing Install are demonstrably the same install.
+
+`serves[]` reports, as facts about the software rather than about the
+installation:
+
+| backend | served | why |
+|---|---|---|
+| `ingress` | **yes** | It is an Ingress controller. This is the point of it. |
+| `gateway` | **no** | The controller implements Gateway API for **TCPRoute only**. Enabling the Gateway API option grants the permissions and the controller name and it still will not accept an HTTPRoute. |
+| `openshift` | **no** | Routes are served by OpenShift's own router, which an OpenShift cluster already runs. A second one contending for the same hostnames is how an outage starts. |
+
+### 14.2 `GET /api/router`
+
+A live read, never cached. `installed` is **tri-state**: `true`, `false`, or
+`null` when one of the reads failed — reporting `false` during an API outage
+invites an operator to install a second router on top of the one already
+running. `deployment.present`, `service.present` and `ingressClass.present` are
+tri-state for the same reason one level down.
+
+`readyReplicas` is `null`, not `0`, when the Deployment controller has not
+reported on the current generation — the §6 staleness rule applied to the one
+workload whose health decides whether the cluster is reachable at all.
+
+`deployment.gatewayApi` reports whether the **installed** router carries
+`--gateway-controller-name`, read off its own arguments rather than remembered,
+and is `null` — never `false` — when the Deployment could not be read. It exists
+because §14.4's install options are not otherwise recoverable from the cluster,
+and the reinstall form seeds itself from them: offered the bundle's defaults over
+a router installed with different ones, an operator taking a version bump turns
+their own choices off by confirming. `defaultClass` needs no equivalent — it is
+already visible as `ingressClass.default`, on the object that carries it.
+
+`otherClasses[]` lists every IngressClass on the cluster with
+`{name, controller, default, managedByUs, retired}`, and is `null` — never `[]` —
+when the listing failed: "nothing else is serving Ingresses here" is a real
+claim and an unreadable listing does not support it. `retired` is matched on the
+**exact** `spec.controller` string: `k8s.io/ingress-nginx` was retired in March
+2026, and F5's NGINX Ingress Controller and NGINX Gateway Fabric are different,
+supported products. Telling an operator their supported controller is retired is
+the confidently-wrong answer aimed at their whole ingress path.
+
+`upgradeAvailable` means **the installed version differs from the one this
+console ships** — not that a newer HAProxy exists, which would be a claim about
+a third party's release history made from a string baked into this repo, wrong
+in both directions. `versionMatches` carries the same fact without the
+directional word.
+
+### 14.3 `POST /api/router/plan`
+
+The manifests an install would create. **Pure and ungated**: nothing is written,
+nothing is audited, and it renders on a console where router management is
+switched off — because deciding whether to enable it requires reading what it
+would create.
+
+### 14.4 `POST /api/router` — install or upgrade
+
+One endpoint for both; there is no difference in what happens. Each object is a
+create if absent and a replace if it is already ours.
+
+**The console never adopts an object it did not create.** Every bundle object
+carries `app.kubernetes.io/managed-by: k8boss-admin`. An install that finds one
+of the same name without it refuses with `409 conflict` naming the object —
+before writing anything, on a dry run as much as on a real one, and the refusal
+is audited because it happens before the funnel is reached.
+
+**A partial install is reported as one.** `installed` is false unless every
+object landed; `failed` counts the rest; `objects[]` carries a per-object
+outcome with the error and its hint. There is no rollback — deleting what
+succeeded would be more writes the operator did not approve.
+
+**RBAC escalation prevention is the one denial preflight cannot foresee.** A
+`SelfSubjectAccessReview` on `create clusterroles` answers *yes*; the API server
+then refuses the ClusterRole with `attempt to grant extra privileges`, because
+the caller does not itself hold cluster-wide Secret reads. The status-code
+mapping stands (it is `rbac_denied`); only the **hint** is rewritten, to name
+escalation prevention and the `escalate`/`bind` grants instead of a verb the
+operator demonstrably has.
+
+Optimistic concurrency here is **weaker than §13's, on purpose**: the
+`resourceVersion` a replace carries is the one read by the ownership scan
+moments earlier, not one an operator was shown. Rule 4 holds — the API server
+enforces it and the scan-to-apply window is closed — but there is no editor
+here, so there is no "fresh diff against what you were looking at" to offer.
+
+### 14.5 `DELETE /api/router`
+
+Reverse order, and **the Namespace is left standing**, reported in `retained[]`
+with the reason. A namespace can hold objects the console never put there and
+deleting one is not recoverable. Objects that are not ours are `skipped[]`, not
+deleted.
+
+### 14.6 The gates
+
+Two, both required for a real write: `ADMIN_ALLOW_MUTATIONS` and
+`ADMIN_ROUTER_MANAGE_ENABLED` (off by default). Refusals are
+`403 mutations_disabled` — not `rbac_denied`, because the operator's permissions
+are irrelevant — and are audited.
+
+**Dry runs are permitted with the feature gate off**, which is a deliberate
+departure from §5.5's node debug pods. The difference is what the projection
+*is*: a node debug pod's manifest is a working recipe for a privileged pod on a
+deployment that switched the feature off; the router's manifests are a pinned
+copy of a public upstream bundle, and reading them is the whole point.
+
+---
+
+## 15. The CLI session
+
+A pod carrying `kubectl` (or `oc`), and §7's shell into it. For the one command
+this console has no page for — `kubectl auth can-i --list`, `kubectl get --raw
+/metrics`, an `oc adm` subcommand — where the alternative is leaving the console
+for a laptop with a kubeconfig on it, which is the moment the trail stops.
+
+**This API creates the pod. It does not serve the terminal.** The shell is
+§7's `WS /api/ws/pods/{namespace}/{name}/exec`, unchanged, with `container` set
+to the `container` this section returns. There is deliberately no CLI-specific
+exec route: a second one would be a second place for the mutations gate, the
+`create pods/exec` preflight and the open/close audit records to be got right.
+
+### 15.1 What this section cannot promise
+
+Every other write in this contract is preflighted for the exact permission,
+projected with `dryRun=All`, shown as a diff and recorded in §10 naming the
+object. **A command typed into this shell is none of those.** The trail records
+that a session was opened on this pod, by whom, for how long and how many bytes
+went through it (§7); it cannot record the `kubectl delete` typed into it.
+
+A client must say so before creating the pod. An operator who has learned to
+trust the diff will otherwise reasonably assume this surface has one.
+
+### 15.2 The ServiceAccount is the whole permission story
+
+`kubectl` inside the pod authenticates as the pod's ServiceAccount. What a shell
+here can do is therefore that account's permissions — **not** the console's, and
+**not** the signed-in operator's.
+
+Kubernetes offers no RBAC verb covering *which* ServiceAccount a pod may bind: a
+caller holding `create pods` in a namespace can bind any account in it,
+including one far more privileged than themselves, and no ClusterRole can narrow
+it afterwards. So `ADMIN_CLI_SERVICE_ACCOUNT` is the only control over this
+feature's reach, it is a deployment setting rather than a per-user one, and this
+API must never present it as anything else.
+
+The default is `default` — the account every namespace has and which holds no
+permissions. Out of the box `kubectl` in this pod is refused by the API server
+for everything until a cluster admin deliberately binds a Role. A feature that
+arrives useless rather than one that arrives dangerous.
+
+### 15.3 `GET /api/cli`
+
+A §1.2 envelope of the CLI pods this console created, plus:
+```json
+{ "items": [ {"name","namespace","image","serviceAccount","phase","state",
+              "reason","node","started_at","created_at"} ],
+  "continue": null, "remaining": null, "partial": false, "unavailable": [],
+  "enabled": true,
+  "enabledDetail": "CLI pods are enabled on this deployment.",
+  "namespace": "default",
+  "image": "alpine/k8s:1.34.9",
+  "serviceAccount": "default",
+  "container": "cli" }
+```
+- `enabled` is this deployment's **two** gates answered together, so a client can
+  disable the action with the reason rather than offering it and taking a 403.
+- `namespace`, `image` and `serviceAccount` describe what a **new** pod would be
+  made of. A client must not guess any of them: they are what the operator is
+  confirming, and the third decides what the shell can reach.
+- `container` is the container name to pass to §7's exec socket.
+- A row's `serviceAccount` is **`null`** when the pod names none and the API
+  server defaulted it. That is not `"default"`: rendering it so would be a claim
+  about what a shell in that pod may do, made from a field that was absent.
+- The listing is a **read** and answers even when creating is gated off. That is
+  what makes rule 11.4 possible here, and a pod left behind after the gate was
+  switched off is the one that most needs finding.
+- `items: []` is a real zero: the namespace was listed and holds none. A read
+  that could **not** happen is an error, never an empty list (§0.1) — a client
+  shown "no session" because the namespace was unreadable creates a second pod
+  beside the one already running.
+
+### 15.4 `POST /api/cli`
+
+`{"image": null, "dryRun": true}` → the §1.5 mutation response plus `pod`,
+`namespace`, `image`, `serviceAccount` and `container`.
+
+There is **no ServiceAccount field**, deliberately: see §15.2. `image` is the
+only thing a caller chooses, and everything else is fixed by the deployment.
+
+The pod binds `ADMIN_CLI_SERVICE_ACCOUNT` with `automountServiceAccountToken:
+true`, runs a shell loop rather than the image's entrypoint (which for a kubectl
+image *is* kubectl and would exit immediately), sets `stdin` and `tty` so §7 has
+a terminal to attach to, and drops every capability with
+`allowPrivilegeEscalation: false` and the runtime's default seccomp profile. It
+sets no host namespace, mounts no host path, and is not privileged — §5.5 is the
+feature for that and is gated separately.
+
+`before` is `null`, so the diff is the whole manifest as an addition. That is the
+disclosure mechanism: `serviceAccountName` is on screen before the confirming
+call.
+
+- **Two gates.** `ADMIN_ALLOW_MUTATIONS` **and** `ADMIN_CLI_ENABLED`. Either off
+  is `403 mutations_disabled` whose `hint` names both.
+- **The dry run is permitted on a read-only console** and refused by the feature
+  gate — the two behave differently on purpose. §1.6's ordinary rule applies to
+  the first, because this projection is a pod running `sleep` bound to an account
+  named in the deployment's own configuration and inspecting it discloses nothing
+  new. The second refuses both, because a deployment that switched this off has
+  decided the console is not a kubectl terminal, and offering a preview of one is
+  offering the feature.
+- **The feature-gate refusal is audited** as `outcome: "denied"`, because the
+  funnel that records every other refusal is never reached. The mutations gate is
+  *not* audited here — `mutate()` already did, and two rows for one attempt makes
+  the count of "who tried" wrong in the one table that exists to answer it.
+- **This endpoint always creates.** Reusing a Running pod is the client's
+  decision, made from §15.3, because a POST that sometimes creates and sometimes
+  does not cannot report `applied` honestly.
+- **PodSecurity admission decides whether this is possible at all.** A namespace
+  enforcing `restricted` wants `runAsNonRoot`, which this pod deliberately does
+  not set — setting it would make an image whose user is root fail to start with
+  a kubelet error naming a field the operator never chose. Admission runs on
+  `dryRun=All`, so the refusal arrives at the preview step carrying the plugin's
+  own message, before anything exists:
+
+  ```
+  403 rbac_denied
+  detail: pods "k8boss-cli-3q27n" is forbidden: violates PodSecurity
+          "restricted:latest": runAsNonRoot != true (pod or container "cli"
+          must set securityContext.runAsNonRoot=true)
+  ```
+
+  **`403 rbac_denied`, not `422 invalid`.** Pod Security refuses with
+  `Forbidden`, and §1.3 maps by status rather than by `Status.reason` — which is
+  `Forbidden` here exactly as it is for a real RBAC denial, and is the reason
+  that mapping exists. The code is therefore right and the advice it implies is
+  wrong: nothing the operator can write in a ClusterRole fixes a namespace
+  label. So the **hint** is rewritten to name Pod Security and
+  `ADMIN_CLI_NAMESPACE` — `app.errors.podsecurity_hint`, shared with §5.5, which
+  meets the same refusal for the same reason and used to describe it the same
+  wrong way. It is the treatment §14.4 gives RBAC escalation prevention, and for
+  the same reason. The code, the status and the API server's own detail are left
+  alone.
+
+### 15.5 `DELETE /api/cli/{pod}?dryRun=`
+
+→ the §1.5 mutation response. The delete diff is §4's: `before=live, after=null`.
+
+Only pods carrying this console's label; anything else is `404 not_found` from
+this route rather than a delete, or it would be a namespaced pod-delete wearing
+a friendlier URL.
+
+> **Nothing removes this pod automatically, and that is not a gap this API can
+> close.** A closed browser tab is not a signal, and a restarted console drops
+> whatever would have issued the DELETE. `ADMIN_CLI_MAX_SECONDS` bounds how long
+> the *container* runs — the kubelet stops it at the deadline and marks the pod
+> Failed; the object stays and still has to be removed. So the honest answer is
+> the same as §5.5's: label the pods, list them, bound them, and offer removal —
+> not promise a cleanup that fails exactly when it matters.
+
+Note what a pod left behind here holds: a live API credential for as long as it
+exists. §5.5's leaked pod holds a node's filesystem; this one holds a token.
+
+---
+
+## 16. The operator portal
+
+What this cluster's own catalogs offer, what somebody already subscribed to, and
+the one object this console writes to add to that list: a `Subscription`.
+
+**The console ships no catalog.** Every package in §16 comes from a
+`CatalogSource` the cluster already runs. There is no bundled index, no curated
+list, and no network call to anywhere but the API server. A cluster with no
+catalogs has an empty portal, which is the true answer; a cluster with a private
+mirror gets its own contents with no configuration here.
+
+**And the console installs nothing.** It creates one `Subscription`. Operator
+Lifecycle Manager — the cluster's software, not this console's — resolves it,
+creates an `InstallPlan`, and installs a `ClusterServiceVersion`, on its own
+schedule and only if the namespace and the approval strategy let it. §14 is a
+departure from *not a deployment engine*; §16 is not a second one. It writes one
+object into an API the cluster already serves, exactly as §4's YAML editor could,
+with discovery and a pre-write check in front of it.
+`docs/adr-0005-operator-portal.md` records the argument on both sides, including
+what it costs.
+
+### 16.1 What it is, and what it is not
+
+| It does | It does not |
+|---|---|
+| Read PackageManifests and render what a channel would install | Ship, mirror or curate a catalog |
+| Create one `Subscription`, through the funnel | Install an operator — OLM does that |
+| Report whether OLM *can* install into the target namespace | Create the OperatorGroup that would let it |
+| Report an outstanding InstallPlan and that it is holding the install | Approve one |
+| Say what removing an operator actually takes | Uninstall one (§16.9) |
+
+`applied: true` on §16.7 means one object was created. Nothing in that response
+may be read as evidence that an operator is running. This is §0.3's rule about
+dry runs pointed one API further out: the write succeeded, and the thing the
+operator wanted has not happened yet.
+
+### 16.2 The six OLM APIs, and three-valued source state
+
+Two API groups, six resources. Every one is resolved through discovery and never
+assumed: these are CRDs (and, for `packagemanifests`, an aggregated APIService),
+and which version a cluster serves depends on which release of OLM it installed.
+
+| `api` | Kind | Group | Versions tried | `required` | Without it |
+|---|---|---|---|---|---|
+| `packages` | `PackageManifest` | `packages.operators.coreos.com` | `v1` | **yes** | There is no catalog to browse |
+| `subscriptions` | `Subscription` | `operators.coreos.com` | `v1alpha1` | **yes** | There is nothing to list and nothing to write |
+| `clusterserviceversions` | `ClusterServiceVersion` | `operators.coreos.com` | `v1alpha1` | no | Every row's `phase` is `null` (§16.4) |
+| `installplans` | `InstallPlan` | `operators.coreos.com` | `v1alpha1` | no | `approvalRequired` is `null` |
+| `catalogsources` | `CatalogSource` | `operators.coreos.com` | `v1alpha1` | no | `catalogs` is `null`, never `[]` |
+| `operatorgroups` | `OperatorGroup` | `operators.coreos.com` | `v1`, then `v1alpha2` | no | `target.ready` is `null` (§16.5) |
+
+`operatorgroups` is tried at two versions because `v1alpha2` is what pre-0.17 OLM
+served and long-lived clusters still do. Pinning `v1` 404s there, and a 404 reads
+as "this namespace has no OperatorGroup" — the single most consequential wrong
+answer this section can give, because it is the reason a subscription installs
+nothing.
+
+`sources[]` is reported on §16.3 and §16.4, one entry per API, **including the
+ones that are fine**, because rule 11.4 needs a reason to put on a disabled
+control and an absent key carries none:
+
+```json
+{"api": "packages", "kind": "PackageManifest",
+ "group": "packages.operators.coreos.com", "version": "v1",
+ "plural": "packagemanifests", "label": "Catalog contents", "required": true,
+ "state": "available",
+ "detail": "This cluster serves packages.operators.coreos.com/v1 packagemanifests."}
+```
+
+State is three-valued, exactly as §13.2's backends are, and the third is not a
+variant of the second:
+
+- `available` — discovery lists the resource. `version` names the one served.
+- `unsupported` — discovery answered and it is not there. **OLM is not installed
+  here. An ordinary fact**, rendered as a calm empty state and never as an error
+  (§11.7).
+- `unknown` — discovery could not answer. **We do not know** whether this cluster
+  serves it. `version` is `null` rather than the first candidate: naming a version
+  nobody confirmed is served lets a caller build a URL out of it.
+
+**Only `unknown` makes the envelope partial**, and only `unknown` produces an
+`unavailable[]` entry. A cluster without OLM is not a cluster whose operators we
+failed to read; raising the §1.2 banner on every one of them is the banner nobody
+reads. The `reason` token on the entry is the failure discovery actually raised —
+`forbidden` when the read was refused, `unreachable` when the package server did
+not answer — because those two send somebody to two different places.
+
+A single `unknown` outranks any number of `unsupported` misses across the
+candidate versions. Failing to read `v1` does not entitle the console to conclude
+from the `v1alpha2` miss that the cluster has no OperatorGroups.
+
+### 16.3 `GET /api/portal/catalog?limit=`
+
+Every package this cluster's catalogs offer. The §1.2 envelope plus `sources[]`
+(§16.2), `catalogs`, `truncated[]` and the §16.8 gate:
+
+```json
+{
+  "items": [ PackageRow ],
+  "continue": null, "remaining": null, "partial": false, "unavailable": [],
+  "sources": [ SourceRow ],
+  "catalogs": [ CatalogRow ],
+  "truncated": [ {"kind": "PackageManifest", "shown": 500, "remaining": null,
+                  "detail": "More packages are in the cluster's catalogs than are shown."} ],
+  "enabled": false,
+  "enabledDetail": "Subscribing is switched off on this deployment: ADMIN_PORTAL_INSTALL_ENABLED is not set. …"
+}
+```
+
+Read **cluster-wide**, never per namespace. PackageManifests are namespaced
+objects served by an aggregated API server, and listing them in one namespace
+returns the global catalogs plus that namespace's local ones — so a
+namespace-scoped read would silently omit another team's private catalog from a
+page whose whole purpose is *what can this cluster install*.
+
+`continue` is deliberately **not** propagated, for §13.4's reason with a second
+one on top: three independent listings cannot share one cursor, and the package
+server does not implement continuation at all, so a token handed back here would
+be one this endpoint could not honour. What a bound left out is reported in
+`truncated[]` instead of behind a paging control that lies.
+
+A `PackageRow`:
+
+```json
+{
+  "id": "olm/community-operators/prometheus",
+  "name": "prometheus",
+  "displayName": "Prometheus Operator",
+  "provider": "Red Hat", "providerUrl": "https://…",
+  "catalog": "community-operators", "catalogNamespace": "olm",
+  "catalogDisplayName": "Community Operators",
+  "defaultChannel": "beta", "channels": ["beta", "stable"],
+  "version": "0.79.0",
+  "summary": "Manages Prometheus and Alertmanager…",
+  "categories": ["Monitoring", "Logging & Tracing"],
+  "capabilityLevel": "Deep Insights",
+  "certified": null,
+  "installModes": ["OwnNamespace", "SingleNamespace", "AllNamespaces"],
+  "installed": true,
+  "installations": [ SubscriptionRow ]
+}
+```
+
+- `version`, `summary`, `categories`, `capabilityLevel`, `certified` and
+  `installModes` are read off the **default channel's** CSV description. All are
+  `null` (or `[]` for `categories`) when the catalog published none for it — a
+  real state for a pruned catalog, and not the same as version zero.
+- `certified` and `capabilityLevel` are the **publisher's own claims**, carried
+  verbatim from CSV annotations because this console has no way to verify either.
+  `certified` is tri-state: `null` for absent *and* for an annotation that is
+  neither spelling of a boolean. Guessing `false` from a parse failure would
+  render "not certified" for an operator whose publisher wrote `True` — a claim
+  about somebody else's software made from a string this console failed to read.
+- `installModes` here is the *supported* mode names only, and is `null` — never
+  `[]` — when the catalog published no `installModes` block. An empty list would
+  read as "this operator supports no install mode", which is a claim no
+  PackageManifest makes.
+- `installations` is every Subscription on the cluster naming this package, keyed
+  on `spec.name` alone rather than on the catalog triple: an operator installed
+  from a mirror is still installed.
+
+**`installed` is tri-state, and `false` is a claim.**
+
+- `true` — the Subscription listing succeeded and matched.
+- `false` — the listing succeeded and matched nothing.
+- `null` — **the Subscription listing did not happen**, because OLM's
+  Subscription API was `unknown` or the read failed. `installations` is `null`
+  with it.
+
+A client must never render `null` as "not installed". This is not a cosmetic
+error here: the operator subscribes again, and a second Subscription for the same
+package is how two ClusterServiceVersions end up racing to own the same CRDs. The
+same reasoning is why a truncated Subscription listing produces a `truncated[]`
+entry saying, in as many words, that a package shown as not installed may be
+installed by one that was not seen.
+
+`catalogs` is `null` — **never `[]`** — when the CatalogSource listing did not
+happen, because "this cluster has no catalogs" is a real claim and an unreadable
+listing does not support it. A `CatalogRow`:
+
+```json
+{"id": "olm/community-operators", "name": "community-operators",
+ "namespace": "olm", "displayName": "Community Operators",
+ "publisher": "Red Hat", "sourceType": "grpc", "image": "quay.io/…",
+ "state": "READY", "healthy": true,
+ "detail": "The catalog's last observed connection state is READY.",
+ "age_seconds": 86400}
+```
+
+`healthy` is `null` until the catalog operator publishes a connection state. A
+freshly created CatalogSource has no status at all, and reporting that as
+unhealthy sends somebody to debug a registry that is merely still starting.
+
+### 16.4 `GET /api/portal/subscriptions?namespace=&limit=`
+
+What somebody already installed. The §1.2 envelope plus `sources[]`,
+`truncated[]` and the §16.8 gate. Omit `namespace` to read every namespace this
+deployment may read.
+
+Each Subscription is joined to the ClusterServiceVersion it names and to its
+outstanding InstallPlan. The join is by **`(namespace, name)`**, not by name: OLM
+copies a CSV owned by an all-namespaces OperatorGroup into every other namespace,
+and a copy in `kube-system` is not the installation a Subscription in
+`monitoring` is waiting for.
+
+A `SubscriptionRow`:
+
+```json
+{
+  "id": "monitoring/prometheus", "name": "prometheus", "namespace": "monitoring",
+  "package": "prometheus", "channel": "beta",
+  "catalog": "community-operators", "catalogNamespace": "olm",
+  "installPlanApproval": "Automatic", "startingCSV": null,
+  "installedCSV": "prometheusoperator.0.79.0",
+  "currentCSV": "prometheusoperator.0.79.0",
+  "state": "AtLatestKnown",
+  "phase": "Succeeded", "phaseDetail": "install strategy completed with no errors",
+  "approvalRequired": false,
+  "installPlanDetail": "InstallPlan install-x7kd2 is Complete.",
+  "installPlan": "install-x7kd2",
+  "conditions": [{"type": "CatalogSourcesUnhealthy", "status": "True",
+                  "reason": "…", "message": "…"}],
+  "age_seconds": 86400
+}
+```
+
+**`spec` and `status` are kept apart on purpose.** `channel`,
+`installPlanApproval` and `startingCSV` are what somebody asked for.
+`installedCSV` is the only evidence anything was installed. A row that merged
+them would report an operator as installed the moment somebody typed its name —
+the §1.5 rule that a successful dry run is not a write, one API further out.
+
+**`installedCSV: null` means OLM has installed nothing for this Subscription
+yet.** It is not a failed read, and it is not a failed install.
+
+**`phase` is tri-state, and there are two different reasons it is `null`.**
+`phaseDetail` always carries the sentence saying which:
+
+| `phase` | When | `phaseDetail` says |
+|---|---|---|
+| a CSV phase (`Succeeded`, `Installing`, `Failed`, …) | The CSV was read | the CSV's own `status.message` or `reason` |
+| `null` | **The CSV listing failed or was truncated** | that the read did not happen, and that this is not a failed install |
+| `null` | **OLM has published no `installedCSV`** | that resolution may be pending, an InstallPlan may be waiting for approval, or the namespace may have no OperatorGroup |
+| `null` | The Subscription names a CSV that is not in the namespace | which CSV, and which namespace it is missing from |
+
+A client renders `phase` through the tri-state cell with
+`reason={row.phaseDetail}`. It must **never** default it to `Failed` or to a
+blank: reporting a healthy operator as broken during an API outage is the defect
+standard aimed at the one column an operator reads to decide whether to
+reinstall.
+
+A truncated CSV or InstallPlan listing is treated as *did not read* for the whole
+join, not just for the rows that fell outside the page, and says so in
+`truncated[]`. A Subscription whose CSV was on page two reports an unknown phase
+rather than a missing installation.
+
+`approvalRequired` is tri-state for the same reason one field over: `null` when
+the InstallPlan listing did not happen, or when the Subscription names an
+InstallPlan that is not in the listing. `true` means the install is stopped dead
+until somebody approves it — which this console does not do (§16.9).
+
+`conditions[]` carries the Subscription conditions that are currently `True`,
+verbatim rather than collapsed into a boolean. `ResolutionFailed` and
+`CatalogSourcesUnhealthy` are the two that answer *I subscribed and nothing
+happened*.
+
+### 16.5 `POST /api/portal/subscriptions/plan`
+
+The Subscription that would be created, and what will stop it.
+
+```json
+{"package": "prometheus", "namespace": "monitoring",
+ "channel": null, "catalog": null, "catalogNamespace": null,
+ "installPlanApproval": "Automatic", "startingCSV": null}
+```
+
+`channel` defaults to the package's `status.defaultChannel`. Naming a channel the
+package does not publish is `422 invalid` listing the ones it does — rather than
+silently subscribing to the default and installing something nobody chose.
+`catalog` is optional and required in one case: when two catalogs offer a package
+of the same name, the plan refuses to guess. They are different software with
+different publishers, and picking the first would subscribe to whichever one the
+API server happened to list first.
+
+**Ungated and it writes nothing** — no preflight, no audit row, and it renders on
+a console where `ADMIN_PORTAL_INSTALL_ENABLED` is off (§16.8). It is a `POST`
+only because its body is a request, not a resource path; a client's method for it
+must be retryable the way §13.5's render and §14.3's plan are, or a transient
+`503` makes the operator refill the form.
+
+The response:
+
+```json
+{
+  "package": "prometheus", "namespace": "monitoring", "channel": "beta",
+  "catalog": "community-operators", "catalogNamespace": "olm",
+  "installPlanApproval": "Automatic",
+  "displayName": "Community Operators", "provider": "Red Hat",
+  "defaultChannel": "beta",
+  "channels": [ ChannelPayload ], "selected": ChannelPayload,
+  "target": { … },
+  "existing": [ SubscriptionRow ],
+  "consequences": [ … ],
+  "document": "apiVersion: operators.coreos.com/v1alpha1\nkind: Subscription\n…",
+  "partial": false, "unavailable": [],
+  "enabled": false, "enabledDetail": "…"
+}
+```
+
+A `ChannelPayload` is one channel in full —
+`{name, currentCSV, version, displayName, summary, description, installModes,
+minKubeVersion, ownedCustomResources, containerImage, repository,
+capabilityLevel, certified, categories, provider}`. `installModes` here is the
+full `[{type, supported}]` list, `null` when the catalog published none.
+`ownedCustomResources` is `[{kind, name, version, description}]` — the CRDs the
+channel's CSV declares it owns, and the visible half of what installing this
+operator does to a cluster, listed before the write rather than discovered
+afterwards in the API explorer. `description` is the catalog's long-form text,
+carried on the channel rather than on a §16.3 row because it is routinely tens of
+kilobytes and a listing of three hundred packages carrying it is a response
+nobody can use. It is the publisher's copy and is rendered as text (§16.9).
+
+`document` is the object that would be created, rendered as YAML: named after the
+package, with the caller's channel, catalog, approval strategy and optional
+`startingCSV`, and **nothing else**. No labels of this console's own, no
+annotations, no `config` block. An operator reading the diff sees exactly the
+fields they filled in, and this console leaves no fingerprint on an object OLM
+will go on to manage. Naming it after the package is what OLM's own tooling does,
+so a Subscription created here and one created with `kubectl` collide rather than
+quietly coexisting — and a collision is a `409` the operator can read.
+
+**The target namespace verdict.** OLM installs an operator only into a namespace
+governed by **exactly one** OperatorGroup whose scope the operator supports.
+Getting either wrong produces a Subscription that is created and installs
+nothing — §14's failure with a namespace in place of a controller. `target`
+reports it before the write:
+
+```json
+"target": {
+  "namespace": "monitoring",
+  "operatorGroups": [ {"name": "monitoring-og", "namespace": "monitoring",
+                       "targetNamespaces": ["monitoring"],
+                       "publishedNamespaces": ["monitoring"],
+                       "selector": false, "allNamespaces": false} ],
+  "requiredInstallMode": "OwnNamespace",
+  "ready": true,
+  "detail": "OperatorGroup monitoring-og requires OwnNamespace, which this channel supports."
+}
+```
+
+**`ready` is tri-state and `null` is the common third state.** It is `true` only
+when every check actually ran and passed:
+
+- `false` — the namespace has no OperatorGroup, or more than one, or the required
+  install mode is one this channel does not declare.
+- `null` — the OperatorGroup listing could not be read, or the group selects its
+  namespaces **by label** (which this console does not evaluate, so
+  `requiredInstallMode` is `null` too), or the catalog published no install modes
+  to check against.
+
+`operatorGroups` is `null` when the listing did not happen and `[]` when the
+namespace genuinely has none. Those are the two answers that must never be
+confused: `[]` means OLM will refuse to install, `null` means we do not know, and
+reporting the second as the first puts a blocking warning in front of a namespace
+that is perfectly configured. An `OperatorGroupRow`'s `allNamespaces` is `null`
+for a selector-based group for the same reason — an empty target list reported as
+"all namespaces" is a different group.
+
+`existing` is the Subscriptions in the target namespace already naming this
+package, or `null` when that listing did not happen.
+
+**The consequence codes.** A closed set — the frontend renders one control per
+entry and §16.7 refuses unless every code is acknowledged by name, so a new code
+is a contract change rather than a new string:
+
+| `code` | Raised when | What it means for the install |
+|---|---|---|
+| `no_operator_group` | The namespace has zero OperatorGroups | The Subscription is created; OLM marks the CSV `Failed` with `NoOperatorGroup`. **Nothing installs, and the operator keeps looking subscribed.** |
+| `too_many_operator_groups` | The namespace has more than one | `TooManyOperatorGroups`, nothing installs — and **every operator already in that namespace is affected too**, not only this one |
+| `operator_group_unknown` | The OperatorGroup listing could not be read | Unknown. The Subscription is created either way; if the namespace has none, it fails as above |
+| `install_mode_unsupported` | The group's scope requires a mode this channel does not declare | `UnsupportedOperatorGroup`, nothing installs |
+| `install_modes_unknown` | The catalog published no install modes, **or** the group selects namespaces by label | The scope check could not run. If the operator does not support the scope, `UnsupportedOperatorGroup` |
+| `already_subscribed` | A Subscription for this package already exists in the namespace | The create is refused with a conflict. Written under another name, two Subscriptions would resolve the same package independently |
+| `subscriptions_unknown` | That listing could not be read | Unknown. If one already exists, a second leaves two resolutions competing for the same custom resources |
+| `manual_approval` | `installPlanApproval: "Manual"` | OLM creates an InstallPlan and stops. **Nothing installs, and nothing upgrades later,** until it is approved — which this console does not do |
+
+Every entry carries `{code, label, consequence, mitigation}` and answers *what
+happens to my cluster* before *what to do instead*, in that order (§13.6). Note
+that three of the eight — the `_unknown` codes — report a check that **could not
+run** rather than one that failed, and they are acknowledgeable on exactly the
+same terms as the rest. Letting a check that did not happen pass silently is the
+swallowed `[]` of §0.1 wearing a different shape, and a silent `null` here is a
+Subscription that installs nothing.
+
+The plan's own reads fail independently. An unreadable OperatorGroup listing
+costs `target.ready` and adds an `unavailable[]` entry; the rendered document is
+returned regardless. `partial` and `unavailable` are the §1.2 fields on an object
+rather than a collection.
+
+### 16.6 `consequences[]`, and the acknowledgement that gates a write
+
+**§16.7 is refused with `422 invalid` unless `acknowledgeConsequences` names
+every code the plan returned.** `context.unacknowledged` lists the missing ones
+and the `hint` names them.
+
+The key is `consequences`, not `warnings`, and the name is load-bearing rather
+than cosmetic: §1.5 already owns `warnings` for the API server's own `Warning:`
+headers on this create. A §16 list written into that key would drop a
+deprecation notice about the very object being created, which is the one place
+an operator would actually want to read one.
+
+This copies §13.6's `acknowledgeLossy` deliberately, and for the same reason:
+consenting to a consequence is a separate act from requesting the change. The
+list is per-code, not a boolean, so a caller that acknowledged one set and then
+changed the namespace has to read the new one. Extra codes are accepted; missing
+ones are not.
+
+**The plan is recomputed inside the write**, never trusted from the caller. A
+client that read a plan, edited the namespace and posted the old acknowledgements
+would otherwise be consenting to consequences that no longer describe the write.
+
+### 16.7 `POST /api/portal/subscriptions`
+
+The §16.5 body plus `acknowledgeConsequences[]` and `dryRun` (default `true`).
+Returns the §1.5 mutation response — `{dryRun, applied, verb, target, diff,
+resourceVersion, warnings, auditId}` — with §16's own fields riding along:
+
+```json
+{
+  "dryRun": false, "applied": true, "verb": "create",
+  "diff": {"before": null, "after": "apiVersion: …", "unified": "…", "changed": true},
+  "resourceVersion": "40219",
+  "warnings": [],
+  "auditId": 8817,
+  "package": "prometheus", "channel": "beta", "catalog": "community-operators",
+  "installPlanApproval": "Automatic",
+  "expectedCSV": "prometheusoperator.0.79.0", "expectedVersion": "0.79.0",
+  "target": {"group": "operators.coreos.com", "version": "v1alpha1",
+             "resource": "subscriptions", "namespace": "monitoring",
+             "name": "prometheus"},
+  "installTarget": { "namespace": "monitoring", "operatorGroups": [ … ],
+                     "requiredInstallMode": "OwnNamespace", "ready": true, "detail": "…" },
+  "consequences": [ … ],
+  "partial": false, "unavailable": []
+}
+```
+
+**Nothing here overwrites a §1.5 key, and the two near-misses are named on
+purpose.** `target` is §1.5's own — the group-version-resource this write
+addressed, and what the audit row is filed under. §16.5's namespace verdict
+rides alongside it as `installTarget`, recomputed at write time. `warnings` is
+likewise §1.5's own, carrying the API server's `Warning:` headers for this
+create; §16's list is `consequences` (§16.6), in §16.5's shape.
+
+Both were briefly the same key during development, and both were wrong for the
+same reason: a response that reuses a §1.5 name for a different value is one a
+generic mutation client reads without noticing, and the value it silently loses
+here would be a deprecation notice about the very object being created.
+
+`diff.before` is `null`, so the diff is the whole Subscription as an addition —
+which is the disclosure mechanism: the catalog, the channel and the approval
+strategy are on screen before the confirming call.
+
+It delegates to `app.admin.apply.create_from_yaml`, which is what routes it
+through the single funnel — one gate, one preflight on `create subscriptions` in
+the target namespace, one `dryRun=All` projection, one diff, one audit row. There
+is no §16-specific write path. What §16 adds is the audit *sentence*:
+`subscribe to prometheus channel beta from catalog community-operators (Automatic
+approval)`, because the question the trail is asked is who put third-party
+software on this cluster, and `create Subscription prometheus` does not answer
+it.
+
+> **`applied: true` means the Subscription object exists. That is all it means.**
+>
+> It is not a claim that an operator is installed, that a ClusterServiceVersion
+> was created, that anything is running, or that anything will be. OLM resolves
+> the Subscription afterwards, on its own schedule, and only if the namespace has
+> exactly one OperatorGroup of a scope the operator supports, the catalog is
+> reachable, the CSV's dependencies resolve, and — under `Manual` approval —
+> somebody approves the InstallPlan. `expectedCSV` and `expectedVersion` are what
+> OLM is *expected* to install, carried so a client can say what to look for
+> next; neither is evidence that it did. §16.4 is where that question is actually
+> answered, and a client must send the operator there rather than letting a green
+> toast imply an installation.
+
+### 16.8 The gates
+
+Two, both required for a real write: `ADMIN_ALLOW_MUTATIONS` and
+`ADMIN_PORTAL_INSTALL_ENABLED` (off by default). Refusals are
+`403 mutations_disabled` — never `rbac_denied`, because the operator's
+permissions are not what is stopping this and telling them otherwise sends them
+to edit a ClusterRole that is already correct — and they are **audited** as
+`outcome: "denied"`, written directly because `mutate()` is never reached and a
+refusal that left no row is a hole in the trail at exactly the moment somebody
+asks who tried.
+
+The gate is checked **before the catalog is read**, the way §14's install gates
+before it builds: a caller whose deployment forbids this gets
+`mutations_disabled` rather than a `404` about a package they were never going to
+be allowed to subscribe to.
+
+Both gates are answered together as `enabled` / `enabledDetail` on §16.3, §16.4
+and §16.5, in §14's shape, so a client can disable the Subscribe control **with
+the reason** from the first paint (§11.4) rather than offering it and taking a
+403.
+
+The second gate exists on its own because of what a Subscription hands over. OLM
+grants the operator's ClusterServiceVersion whatever RBAC it asks for — routinely
+cluster-wide — and that grant is made by OLM, not by the caller. An operator may
+reasonably want every other write in this console without wanting it to be the
+place third-party software enters their cluster.
+
+**Dry runs are permitted with the feature gate off**, and so is §16.5's plan.
+This is §14.6's departure from §5.5, for §14.6's reason: what the projection *is*
+decides it. A node debug pod's projected manifest is a working recipe for a
+privileged pod on a deployment that switched that feature off. A Subscription's
+projection is the caller's own request rendered as an object, plus the contents
+of a catalog the cluster already publishes — nothing privileged, and an operator
+deciding whether to set `ADMIN_PORTAL_INSTALL_ENABLED` has to be able to read
+what it would let the console create.
+
+### 16.9 What §16 does not do
+
+**No uninstall.** Deleting a Subscription does not remove an operator: the
+ClusterServiceVersion it created stays, and so does everything that CSV owns —
+the Deployment, the CRDs, the cluster-wide RBAC. A Remove button that deleted
+only the Subscription would report an uninstall that did not happen, which is the
+one thing this project's defect standard refuses. §16 says what removing actually
+takes and leaves both deletions to §4, where each is its own diff and its own
+audit row. The asymmetry is real: it is easier to add an operator here than to
+remove one.
+
+**No InstallPlan approval.** An outstanding one is reported (§16.4's
+`approvalRequired`) and warned about before the write (`manual_approval`), and
+approving it is an ordinary §4 write in the API explorer. Approving an InstallPlan
+is consenting to a specific resolved set of ClusterServiceVersions, and a
+one-click button on a row would be that consent given without the diff.
+
+**No OperatorGroup creation.** §16.5 reports that the namespace has none and what
+that costs; it does not create one. An OperatorGroup decides which namespaces
+every operator in that namespace may act on, including ones already installed —
+it is a scope decision about the namespace, not a step in subscribing to one
+package.
+
+**No catalog of its own.** No bundled index, no curation, no upstream fetch, no
+ranking. `certified`, `capabilityLevel` and `provider` are the publisher's own
+claims rendered verbatim (§16.3), and no badge, score or ordering of this
+console's own is layered over them.
+
+**No markdown.** A client renders `ChannelPayload.description` as **text**, never
+as markdown or HTML. It is third-party content displayed inside an authenticated
+administration console, reachable by anyone who can get a package into a catalog
+the cluster trusts — and formatted text is more persuasive than plain text at
+exactly the moment persuasion is the risk.
+
+**No OLM v1.** This section speaks OLM v0 — `operators.coreos.com` Subscriptions
+and `packages.operators.coreos.com` PackageManifests. OLM v1's
+`olm.operatorframework.io` `ClusterExtension` is a different API with a different
+model, and a cluster running only it gets `state: "unsupported"` across §16.2 and
+a calm empty portal. That is the correct answer today and a gap that will grow.

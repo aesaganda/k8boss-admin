@@ -93,15 +93,39 @@ export function LogViewer({
   height = 460,
   className,
 }) {
-  const names = useMemo(
-    () => (Array.isArray(containers) ? containers.map((c) => (typeof c === 'string' ? c : c?.name)).filter(Boolean) : null),
+  const entries = useMemo(
+    () =>
+      Array.isArray(containers)
+        ? containers
+            .map((c) => (typeof c === 'string' ? { name: c } : c))
+            .filter((c) => c?.name)
+        : null,
     [containers],
+  );
+  const names = useMemo(() => entries?.map((c) => c.name) ?? null, [entries]);
+
+  // The pod's own containers, excluding §7.4 debug containers.
+  //
+  // This — not `names` — is what decides whether the pod is ambiguous, because
+  // it is what the *API server* counts: it defaults the container only when
+  // `spec.containers` holds one, and ephemeral containers never enter that
+  // count. Keying off `names` instead would mean that attaching a debug
+  // container to a single-container pod made this viewer start refusing to pick
+  // a container it had happily picked a minute earlier — a console that broke
+  // its own log viewer as a side effect of opening a shell, and one that had
+  // become stricter than the API it is a client of.
+  //
+  // Debug containers stay in `names`, so they remain selectable: `kubectl logs
+  // pod -c debugger-x4k2p` is a thing an operator wants.
+  const ownNames = useMemo(
+    () => entries?.filter((c) => (c.kind ?? 'container') !== 'ephemeral').map((c) => c.name) ?? null,
+    [entries],
   );
 
   const [container, setContainer] = useState(
     // A single-container pod is unambiguous, so it is selected. Anything else
     // waits for the operator.
-    defaultContainer ?? (names && names.length === 1 ? names[0] : null),
+    defaultContainer ?? (ownNames && ownNames.length === 1 ? ownNames[0] : null),
   );
   const [manualContainer, setManualContainer] = useState('');
   const [tailLines, setTailLines] = useState(500);
@@ -141,7 +165,7 @@ export function LogViewer({
     }
   }, [paused]);
 
-  const ready = container != null || (names != null && names.length <= 1);
+  const ready = container != null || (ownNames != null && ownNames.length <= 1);
 
   const connect = useCallback(() => {
     if (!ready) return undefined;
@@ -308,8 +332,15 @@ export function LogViewer({
               {/* The empty option is not a default — it is the state the
                   viewer starts in and refuses to leave on its own. */}
               <FormSelectOption value="" label="Choose a container…" isDisabled />
-              {names.map((n) => (
-                <FormSelectOption key={n} value={n} label={n} />
+              {entries.map((entry) => (
+                <FormSelectOption
+                  key={entry.name}
+                  value={entry.name}
+                  // §7.4 debug containers are labelled as such: "which of these
+                  // five is the debugger" is not a question an operator should
+                  // have to answer from the name alone.
+                  label={entry.kind === 'ephemeral' ? `${entry.name} (debug)` : entry.name}
+                />
               ))}
             </FormSelect>
           </FilterBar.Field>

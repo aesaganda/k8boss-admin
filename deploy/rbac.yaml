@@ -40,6 +40,29 @@
 # confirm; unbound but with mutations enabled, every confirm returns a 403 that
 # names the exact missing grant. Both are diagnosable. What is NOT diagnosable is
 # a console that writes because a default did it quietly.
+#
+# Four features carry a THIRD gate of their own, off by default, because RBAC
+# cannot express what makes each one different from an ordinary write:
+#
+#   ADMIN_NODE_DEBUG_ENABLED     §5.5 — `create pods` is identical for an nginx
+#                                pod and for one mounting the node's root
+#                                filesystem.
+#   ADMIN_ROUTER_MANAGE_ENABLED  §14 — the console installing a proxy on the
+#                                cluster's ingress path.
+#   ADMIN_CLI_ENABLED            §15 — a shell running kubectl. The grant is
+#                                ordinary; what is not is that everything typed
+#                                there bypasses preflight, dry run, diff and the
+#                                record of what changed. Its reach is set by
+#                                ADMIN_CLI_SERVICE_ACCOUNT, which this file also
+#                                cannot constrain — see the `create pods` rule.
+#   ADMIN_PORTAL_INSTALL_ENABLED §16 — the console creating one OLM
+#                                Subscription. The grant is a single `create` of
+#                                a nine-line object; what it starts is Operator
+#                                Lifecycle Manager installing somebody else's
+#                                operator and granting it whatever its bundle
+#                                asks for — with OLM's permissions, not this
+#                                ServiceAccount's, so no rule in this file
+#                                bounds it.
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -112,6 +135,19 @@ rules:
     resources: ["pods", "pods/log"]
     verbs: ["get", "list", "watch"]
 
+  # §7.7 the pod page's Metrics tab. `metrics.k8s.io` is an aggregated API served
+  # by metrics-server, which a great many clusters do not run — and on those the
+  # tab reports `unsupported`, an ordinary fact rendered calmly, whether or not
+  # this rule is present. Where the API *is* served, withholding this makes every
+  # `usage` null with a `forbidden` entry rather than zero: a pod drawn at zero
+  # cores reads as idle, and idle is what gets something turned off.
+  #
+  # `get` and `list` and no `watch`: the tab polls a one-shot read, and a verb no
+  # code path issues is a grant with no feature behind it.
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+
   # §5 events. The events page scans a bounded window and sorts it itself,
   # because the API server offers no server-side ordering.
   - apiGroups: [""]
@@ -168,10 +204,14 @@ rules:
     resources: ["jobs", "cronjobs"]
     verbs: ["get", "list", "watch"]
 
-  # §8 Ingresses. `ingressclasses` fills the `class` column for an Ingress whose
-  # spec names none; without it the column is blank rather than wrong.
+  # §8 Ingresses, and §13's Ingress backend. `ingressclasses` fills the `class`
+  # column for an Ingress whose spec names none; without it the column is blank
+  # rather than wrong. §14 also lists them to answer "what else is serving
+  # Ingresses on this cluster" before offering to install a router — withheld,
+  # that list is `null` rather than `[]`, and the console says it does not know
+  # rather than claiming nothing else is there.
   #
-  # `networkpolicies` backs §8.1's Network policies tab and §8.2's pod isolation
+  # `networkpolicies` backs §8.3's Network Policies tab and §8.4's pod isolation
   # view. Note what the isolation view does when this is withheld: it fails, with
   # the 403 naming this resource. It does NOT degrade to a table of pods marked
   # unrestricted — "no policy selects this pod" assembled from a policy listing
@@ -180,10 +220,24 @@ rules:
     resources: ["ingresses", "ingressclasses", "networkpolicies"]
     verbs: ["get", "list", "watch"]
 
+  # §13 Routes — the OpenShift backend. Absent on every cluster that is not
+  # OpenShift, and that is an ordinary state: `route.openshift.io` then resolves
+  # to `unsupported`, the Routes page reports the backend as "not present on
+  # this cluster", and nothing is coloured red. Withholding this rule on a
+  # cluster that DOES serve Routes is different and worse — discovery is
+  # refused, the backend resolves to `unknown`, and §13 deliberately refuses to
+  # report that as absence.
+  - apiGroups: ["route.openshift.io"]
+    resources: ["routes"]
+    verbs: ["get", "list", "watch"]
+
   # §8 storage classes — `is_default` is read from the annotation on the class,
-  # so the Storage page cannot mark a default without this.
+  # so the Storage page cannot mark a default without this. `volumeattributesclasses`
+  # is a newer, still-graduating API (VolumeAttributesClass); a cluster old
+  # enough not to serve it renders the tab's `unsupported` — not this rule's
+  # absence — so there is nothing to degrade to if it is ever dropped.
   - apiGroups: ["storage.k8s.io"]
-    resources: ["storageclasses", "volumeattachments", "csidrivers"]
+    resources: ["storageclasses", "volumeattachments", "csidrivers", "volumeattributesclasses"]
     verbs: ["get", "list", "watch"]
 
   # §8 access rows. Reading RBAC is not the same privilege as holding it, but it
@@ -202,6 +256,88 @@ rules:
   - apiGroups: ["policy"]
     resources: ["poddisruptionbudgets"]
     verbs: ["get", "list", "watch"]
+
+  # §8 Configuration page — autoscaling and disruption controls. HPAs are a
+  # built-in API and will list on any cluster; VerticalPodAutoscaler is a CRD
+  # (the `autoscaling.k8s.io` VPA project, not shipped with Kubernetes), so
+  # `verticalpodautoscalers` degrades to the tab's `unsupported` state on the
+  # large majority of clusters that do not have it installed — expected, not a
+  # sign this rule is wrong.
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["autoscaling.k8s.io"]
+    resources: ["verticalpodautoscalers"]
+    verbs: ["get", "list", "watch"]
+
+  # §8 Configuration page — scheduling and workload-identity objects that carry
+  # no secret material, read purely for the browser: what priority a pod can
+  # claim, what runtime a sandboxed pod asks for, who currently holds a lease.
+  - apiGroups: ["scheduling.k8s.io"]
+    resources: ["priorityclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["node.k8s.io"]
+    resources: ["runtimeclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch"]
+
+  # §8 Configuration page — admission webhook configurations. These describe
+  # what the cluster's admission chain does to every write; reading them is a
+  # browse, not a change to what they enforce.
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["mutatingwebhookconfigurations", "validatingwebhookconfigurations"]
+    verbs: ["get", "list", "watch"]
+
+  # Gateway (beta) page. Gateway API is CRD-backed and frequently absent — on a
+  # cluster without it installed, every resource below degrades to the same
+  # `unsupported` "not present on this cluster" state §1.2 already defines for
+  # a missing Ingress controller or missing metrics.k8s.io, not an error.
+  # `backendtrafficpolicies` is deliberately not granted here: that kind's real
+  # API group depends on which Gateway API implementation a cluster runs (e.g.
+  # Envoy Gateway ships it under `gateway.envoyproxy.io`, not
+  # `gateway.networking.k8s.io`), and granting the wrong group would be a rule
+  # that looks like coverage and grants nothing.
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["gateways", "gatewayclasses", "httproutes", "grpcroutes", "referencegrants", "backendtlspolicies"]
+    verbs: ["get", "list", "watch"]
+
+  # §16 the operator portal, read half. Two API groups because OLM serves two:
+  # `packages.operators.coreos.com` is an aggregated APIService run by the OLM
+  # package server — it answers 503 when OLM is degraded rather than vanishing
+  # from discovery — and `operators.coreos.com` is a set of ordinary CRDs.
+  #
+  # `get,list` and no `watch`: every §16 read is a one-shot live listing, and a
+  # verb no code path issues is a grant with no feature behind it.
+  #
+  # A cluster that does not run OLM serves neither group, and that is an ordinary
+  # fact: every source resolves to `unsupported`, the portal says so in a calm
+  # notice and nothing is coloured red. WITHHOLDING these rules on a cluster that
+  # DOES serve them is different and worse — discovery is refused, the source
+  # resolves to `unknown`, and §16 refuses to report that as absence. The catalog
+  # is then not empty, it is unanswerable, and the page says so with a partial
+  # banner rather than reading "this cluster offers no operators", which would
+  # send somebody to add a CatalogSource that is already there.
+  - apiGroups: ["packages.operators.coreos.com"]
+    resources: ["packagemanifests"]
+    verbs: ["get", "list"]
+
+  # `subscriptions` is what fills the catalog's `installed` column, and that
+  # column is tri-state: without this rule it is null for every package, never
+  # false, because "not installed" for an operator that IS installed is how you
+  # get a second Subscription and two resolutions competing for the same CRDs.
+  # `clusterserviceversions` and `installplans` answer whether OLM actually did
+  # anything about a Subscription — withheld, each row's `phase` is null with the
+  # reason, never `Failed`, which would report a healthy operator as broken.
+  # `catalogsources` says where the packages came from and whether that registry
+  # is answering. `operatorgroups` is what the subscribe plan reads to decide
+  # whether OLM can install into the target namespace at all: withheld,
+  # `target.ready` is null and the plan warns that it could not check, rather
+  # than claiming a namespace has no OperatorGroup.
+  - apiGroups: ["operators.coreos.com"]
+    resources: ["subscriptions", "clusterserviceversions", "installplans", "catalogsources", "operatorgroups"]
+    verbs: ["get", "list"]
 
   # §4 generic browse. The resource browser reaches anything the cluster serves,
   # including CRDs the console has never heard of, so it needs to enumerate the
@@ -291,6 +427,35 @@ rules:
     resources: ["pods"]
     verbs: ["delete"]
 
+  # §5.5 node debug pods, §15 CLI pods, and §4's "create anything" from the YAML
+  # editor. One rule, because RBAC cannot tell them apart.
+  #
+  # Read that again before granting it. A SelfSubjectAccessReview answers on
+  # verb/group/resource/namespace/name/subresource and has no field-level
+  # granularity at all: there is no verb for `hostPath`, none for `hostPID`,
+  # none for `privileged`. `create pods` that succeeds for an nginx pod succeeds
+  # identically for a pod that mounts the node's root filesystem. The layer that
+  # once gated this — PodSecurityPolicy's `use` on a podsecuritypolicies
+  # resource — was removed in Kubernetes 1.25, and its replacement, Pod Security
+  # admission, is namespace-label-based rather than RBAC-based.
+  #
+  # So the controls that actually apply to a node debug pod are not here. They
+  # are ADMIN_NODE_DEBUG_ENABLED in the deployment (off by default, and the only
+  # switch this console owns) and the `pod-security.kubernetes.io/enforce` label
+  # on the namespace it creates into. Removing this rule withholds node debug
+  # pods, and withholds the YAML editor's ability to create anything, together.
+  #
+  # §15's CLI pod is the same rule and adds a second thing RBAC cannot express:
+  # there is no verb covering which ServiceAccount a pod may BIND. Whoever holds
+  # this rule can create a pod bound to any account in the namespace, including
+  # one more privileged than this ClusterRole — and a shell in that pod then has
+  # that account's permissions. The controls that actually apply are
+  # ADMIN_CLI_ENABLED and ADMIN_CLI_SERVICE_ACCOUNT in the deployment, both of
+  # which this file cannot enforce.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create"]
+
   # §7 exec — a shell inside a running container. The most dangerous grant in
   # this file after the wildcard below: it bypasses every other control here,
   # because a shell in a pod can do whatever that pod's own ServiceAccount can.
@@ -298,9 +463,38 @@ rules:
   # write in every sense that matters) and audits the session on open and close.
   # Remove this rule for a console that can read logs but not type into a
   # container; the terminal button then disables itself with the reason.
+  #
+  # It is also what §15's CLI session runs on — that feature adds no exec route
+  # of its own — so removing this withholds the masthead terminal too, while
+  # leaving the CLI pod creatable. The pair to remove for "no CLI at all" is
+  # ADMIN_CLI_ENABLED in the deployment.
   - apiGroups: [""]
     resources: ["pods/exec"]
     verbs: ["create"]
+
+  # §7.4 debug containers — `kubectl debug`'s ephemeral container, for the pod
+  # whose image is a distroless binary with no shell to exec into. A separate
+  # RBAC resource from `pods` and a separate grant from `pods/exec`: attaching a
+  # container and typing in one are different acts, and an install may
+  # reasonably want the second without the first.
+  #
+  # Close to `pods/exec` in blast radius, and for a reason worth stating: the
+  # operator chooses the image, and the container it becomes shares the pod's
+  # network namespace, its volumes, and — on request — the process namespace of
+  # an application container. `get` as well as `patch` because the console reads
+  # the subresource to build the diff it shows before writing; without it every
+  # attach fails at the preview step naming `get pods/ephemeralcontainers`,
+  # which is at least an accurate error.
+  #
+  # Note there is no delete verb to grant. The Kubernetes API has none for an
+  # ephemeral container: once attached it lives as long as the pod does, and
+  # restarting the workload is what removes it. Remove this rule for a console
+  # that can exec into what is already there but cannot add to it; the Attach
+  # button then disables itself with the reason, and the listing of what is
+  # already attached keeps working, because that reads the pod.
+  - apiGroups: [""]
+    resources: ["pods/ephemeralcontainers"]
+    verbs: ["get", "patch"]
 
   # §4/§8 config, storage and networking writes — the YAML editor and the delete
   # button on those pages. `secrets` is included because the editor offers the
@@ -315,6 +509,101 @@ rules:
   - apiGroups: ["networking.k8s.io"]
     resources: ["ingresses", "networkpolicies"]
     verbs: ["create", "update", "patch", "delete"]
+
+  # §13 writes. Three separate rules because they are three separate RBAC
+  # resources, and an install may reasonably want one without the others: an
+  # account allowed to write Ingresses is very often not allowed to write
+  # Routes. Withholding any one of them disables that backend's create button
+  # with the reason (§11.4) rather than hiding it.
+  #
+  # `routes/custom-host` is NOT optional if Routes are wanted, and it is the
+  # rule people miss. OpenShift gates *choosing a hostname* behind its own
+  # subresource, separately from creating the Route at all. Without it, the
+  # console's preflight on `create routes` passes, the API server refuses the
+  # write, and the operator is told they cannot create Routes — a permission
+  # the review just confirmed they hold. §13 preflights the subresource
+  # explicitly so the denial names this line.
+  - apiGroups: ["route.openshift.io"]
+    resources: ["routes", "routes/custom-host"]
+    verbs: ["create", "update", "patch", "delete"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["httproutes"]
+    verbs: ["create", "update", "patch", "delete"]
+
+  # §14 the shipped router. THE SECOND-LARGEST GRANT IN THIS FILE after the
+  # wildcard below — read it before applying.
+  #
+  # These are the verbs the console needs to CREATE the router's own objects.
+  # The router's ClusterRole, which these let the console create, is what can
+  # then read every Secret in the cluster: an ingress controller that terminates
+  # TLS must read certificate Secrets, and RBAC cannot scope that to "only the
+  # ones an Ingress references". The console shows that object in the diff
+  # before creating it, which is the only honest way to hand somebody a grant
+  # of that size.
+  #
+  # DELETE THESE RULES to keep the console out of the business of installing a
+  # data plane. What degrades: the Routes page's router panel reports the
+  # install action as denied with the reason, the plan stays readable (it is a
+  # pure render and touches no cluster), and every §13 exposure keeps working
+  # against whatever controller the cluster already runs.
+  - apiGroups: [""]
+    resources: ["namespaces", "serviceaccounts"]
+    verbs: ["create", "update", "patch", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingressclasses"]
+    verbs: ["create", "update", "patch", "delete"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterroles", "clusterrolebindings"]
+    verbs: ["create", "update", "patch", "delete"]
+
+  # §14, and the rule whose absence produces the most confusing failure in this
+  # whole file.
+  #
+  # `escalate` and `bind` are not ordinary verbs. Kubernetes refuses to let an
+  # identity create a ClusterRole granting permissions it does not itself hold,
+  # or bind a role it does not hold — enforced at admission, not by RBAC verb
+  # matching, and therefore INVISIBLE to a SelfSubjectAccessReview. Without
+  # these two, the console's preflight on `create clusterroles` answers "yes",
+  # object 3 of 8 then fails with 403 `attempt to grant extra privileges`, and
+  # the install is half-finished.
+  #
+  # `escalate` is a privilege-escalation primitive by design: it lets this
+  # ServiceAccount write a role granting anything, including more than it holds.
+  # It is granted here only because the console is already bound to the wildcard
+  # rule below. On a deployment that has deleted that rule, granting `escalate`
+  # re-opens what deleting it closed — so delete these two along with it.
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterroles"]
+    verbs: ["escalate"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterroles", "clusterrolebindings"]
+    verbs: ["bind"]
+
+  # §16 the operator portal — THE ONE WRITE IT MAKES, and the whole grant is
+  # this line. No `update`, no `delete`, and no verb over anything OLM creates
+  # from it.
+  #
+  # Read what it reaches, because this file cannot say it in a rule. The console
+  # creates one Subscription; Operator Lifecycle Manager then resolves it and
+  # installs the operator — its InstallPlan, its ClusterServiceVersion, its
+  # ServiceAccount, and the Roles and ClusterRoles its bundle asks for. OLM does
+  # that with ITS OWN permissions, so nothing here narrows what the installed
+  # operator ends up holding, and no SelfSubjectAccessReview can preview it. The
+  # plan names the custom resources the operator will own before the write, which
+  # is the most this console can honestly show.
+  #
+  # There is deliberately no delete verb to grant: deleting a Subscription does
+  # not uninstall an operator — the ClusterServiceVersion and everything it owns
+  # stay — so a Remove button here would report an uninstall that did not happen.
+  # Both deletions are §4's, each with its own diff and its own audit row.
+  #
+  # DELETE THIS RULE to keep the console out of installing other people's
+  # software. What degrades: the Subscribe button is disabled with the reason
+  # (§11.4), the plan stays readable — it is a pure read — and the catalog and
+  # Installed views keep working from the reader rules above.
+  - apiGroups: ["operators.coreos.com"]
+    resources: ["subscriptions"]
+    verbs: ["create"]
 
   # §4 generic write over ANYTHING the cluster serves — CRDs included.
   #

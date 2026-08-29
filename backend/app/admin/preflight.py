@@ -64,7 +64,7 @@ logger = logging.getLogger(__name__)
 #: API server, so an unbounded batch is both a way to hammer someone's control
 #: plane through this console and a reliable way to exceed the read deadline —
 #: which surfaces as "the cluster is unreachable", a diagnosis about the wrong
-#: system. The baseline registration set (§9) is 17.
+#: system. The baseline registration set (§9) is 18.
 MAX_BATCH = 64
 
 #: What the RBAC authorizer means when it allows a request without saying why,

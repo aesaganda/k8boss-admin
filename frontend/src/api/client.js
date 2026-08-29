@@ -516,6 +516,77 @@ export const nodes = {
   cordon: (name, body) => api.post(`/nodes/${encodeURIComponent(name)}/cordon`, body),
   /** body: { dryRun, gracePeriodSeconds, ignoreDaemonSets, deleteEmptyDirData, force } */
   drain: (name, body) => api.post(`/nodes/${encodeURIComponent(name)}/drain`, body),
+
+  /**
+   * Debug pods this console created for one node (§5.5).
+   *
+   * The envelope carries `enabled` — this deployment's two gates answered
+   * together — `enabledDetail`, and `namespace`, which is where a new pod would
+   * appear. The namespace is not cosmetic: an operator is about to be asked to
+   * confirm a privileged pod, and "where" is part of what they are confirming.
+   */
+  debugPods: (name) => api.get(`/nodes/${encodeURIComponent(name)}/debug`),
+
+  /**
+   * Create a debug pod on this node (§5.5).
+   * body: `{ image, writableHostFilesystem, dryRun }`.
+   *
+   * The most privileged object this console creates: pinned to the node,
+   * tolerating every taint, sharing the host PID and network namespaces, with
+   * the node's root filesystem at /host. The whole manifest comes back in the
+   * diff, which is how all of that gets disclosed before the confirming call.
+   */
+  createDebugPod: (name, body) => api.post(`/nodes/${encodeURIComponent(name)}/debug`, body),
+
+  /**
+   * Remove one (§5.5). `dryRun` is a query parameter, not a body: DELETE bodies
+   * are handled inconsistently by proxies and HTTP clients, and a `dryRun` that
+   * went missing in transit would turn a projection into a deletion.
+   *
+   * Only removes pods this console created — anything else is `404 not_found`
+   * from this route rather than a delete.
+   */
+  deleteDebugPod: (name, pod, params) =>
+    api.del(
+      `/nodes/${encodeURIComponent(name)}/debug/${encodeURIComponent(pod)}`,
+      params,
+    ),
+};
+
+/* ── §15 CLI pods — a pod with kubectl in it ────────────────────────────── */
+
+export const cli = {
+  /**
+   * The CLI pods this console created, plus what a new one would be made of.
+   *
+   * The envelope carries `enabled` — this deployment's two gates answered
+   * together — `enabledDetail`, `namespace`, `image`, `container`, and
+   * `serviceAccount`. That last one is not cosmetic and not a detail of the
+   * others: kubectl inside the pod authenticates as that account, so it is the
+   * whole of what a shell there is able to do to the cluster.
+   */
+  session: () => api.get('/cli'),
+
+  /**
+   * Create one. body: `{ image, dryRun }`.
+   *
+   * There is no ServiceAccount field, deliberately. It comes from the
+   * deployment's configuration, and letting a caller name it would hand the
+   * choice of *what this shell can do* to whoever opens the dialog. The whole
+   * manifest comes back in the diff, which is how the account gets disclosed
+   * before the confirming call.
+   */
+  create: (body) => api.post('/cli', body),
+
+  /**
+   * Remove one. `dryRun` is a query parameter, not a body: DELETE bodies are
+   * handled inconsistently by proxies and HTTP clients, and a `dryRun` that
+   * went missing in transit would turn a projection into a deletion.
+   *
+   * Only removes pods this console created — anything else is `404 not_found`
+   * from this route rather than a delete.
+   */
+  remove: (pod, params) => api.del(`/cli/${encodeURIComponent(pod)}`, params),
 };
 
 export const namespaces = {
@@ -527,14 +598,14 @@ export const events = {
   list: (params) => api.get('/events', params),
 };
 
-/* ── §8.2 Network policy ────────────────────────────────────────────────── */
+/* ── §8.4 Network policy ────────────────────────────────────────────────── */
 
 /**
  * The two reads §4's listing cannot make, because both need a pod listing.
  *
  * There is deliberately no `list` here. NetworkPolicies are listed through
  * `resources.list('networking.k8s.io', 'v1', 'networkpolicies')`, which already
- * returns the typed §8 row — the shaper is registered on the backend, so the
+ * returns the typed §8.3 row — the shaper is registered on the backend, so the
  * generic path carries the paging, the selectors and the `continue` cursor for
  * free. A second listing in this file would be a second shaping of the same
  * object, free to drift from the first and impossible to notice from outside.
@@ -545,6 +616,122 @@ export const network = {
 
   /** params: { namespace } — omit for every pod in the cluster. */
   isolation: (params) => api.get('/network/isolation', params),
+};
+
+/* ── §13 Routes — exposing a Service to the outside world ───────────────── */
+
+const routePath = (backend, namespace, name) =>
+  `/routes/${encodeURIComponent(backend)}/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}`;
+
+export const routes = {
+  /**
+   * Which of the three route backends this cluster serves, and what each can
+   * express. Read once per page: the answer drives which options the form
+   * offers and which controls it disables *with the reason* (rule 11.4).
+   */
+  capabilities: () => api.get('/routes/capabilities'),
+
+  /** params: { namespace, backend (repeatable), limit } */
+  list: (params) => api.get('/routes', params),
+
+  get: (backend, namespace, name) => api.get(routePath(backend, namespace, name)),
+
+  /**
+   * Compile an exposure into one object. **Writes nothing** — it returns a
+   * document and a `lossy[]` list, and no cluster is changed.
+   *
+   * `retry: true` is safe and is set: this is a POST, which `isReplaySafe`
+   * refuses to replay by default, but replaying a pure compilation costs
+   * nothing and a rendered form that fails on a transient 503 is a form the
+   * operator has to fill in again.
+   *
+   * body: { backend, spec, document }
+   */
+  render: (body) => request('/routes/render', { method: 'POST', body, retry: true }),
+
+  /** body: { backend, spec, document, acknowledgeLossy, dryRun } */
+  create: (body) => api.post('/routes', body),
+
+  /** body: { backend, spec, document, acknowledgeLossy, resourceVersion, dryRun } */
+  update: (backend, namespace, name, body) =>
+    api.put(routePath(backend, namespace, name), body),
+
+  /** params: { dryRun } — a query parameter, like §4's delete. */
+  remove: (backend, namespace, name, params) =>
+    api.del(routePath(backend, namespace, name), params),
+};
+
+/* ── §14 The shipped router ─────────────────────────────────────────────── */
+
+export const routerApi = {
+  /** Live read, every time. `installed` is a tri-state — null means unknown. */
+  status: (params) => api.get('/router', params),
+
+  /**
+   * The manifests an install would create. Pure and ungated, so it renders on
+   * a console where router management is switched off — which is exactly when
+   * an operator needs to read it.
+   */
+  plan: (body) => request('/router/plan', { method: 'POST', body, retry: true }),
+
+  /** body: { ...options, dryRun } — install or upgrade, same call. */
+  install: (body) => api.post('/router', body),
+
+  /** params: { namespace, ingressClassName, dryRun } */
+  uninstall: (params) => api.del('/router', params),
+};
+
+/* ── §16 The operator portal ────────────────────────────────────────────── */
+
+export const portal = {
+  /**
+   * Every package this cluster's catalogs offer.
+   *
+   * `installed` on a row is a tri-state: `null` means the Subscription listing
+   * did not answer, and it must never be rendered as "not installed" — that
+   * invites a second Subscription for an operator that already has one.
+   *
+   * params: { limit }
+   */
+  catalog: (params) => api.get('/portal/catalog', params),
+
+  /**
+   * Subscriptions joined to what OLM actually installed for each. `phase` is
+   * null both when the CSV could not be read and when OLM has installed nothing
+   * yet; `phaseDetail` is the sentence that says which.
+   *
+   * params: { namespace, limit }
+   */
+  installed: (params) => api.get('/portal/subscriptions', params),
+
+  /**
+   * The Subscription that would be created, and what will stop it. **Writes
+   * nothing** and is ungated, like §14's router plan: deciding whether to set
+   * `ADMIN_PORTAL_INSTALL_ENABLED` means reading what it would let the console
+   * create.
+   *
+   * `retry: true` for the reason `routes.render` sets it — this is a POST, so
+   * `isReplaySafe` refuses to replay it by default, replaying a pure plan costs
+   * nothing, and a transient 503 would otherwise make the operator fill the
+   * form in again.
+   *
+   * body: { package, namespace, channel, catalog, catalogNamespace,
+   *         installPlanApproval, startingCSV }
+   */
+  plan: (body) => request('/portal/subscriptions/plan', { method: 'POST', body, retry: true }),
+
+  /**
+   * Create one Subscription. `applied: true` means that object exists — it is
+   * NOT a claim that an operator is installed; OLM does that afterwards, and
+   * only if the namespace and the approval strategy let it.
+   *
+   * `acknowledgeConsequences` must name every code the plan returned or the
+   * write is refused with `422 invalid`, and `context.unacknowledged` lists the
+   * codes that were missing.
+   *
+   * body: the plan body + { acknowledgeConsequences, dryRun }
+   */
+  subscribe: (body) => api.post('/portal/subscriptions', body),
 };
 
 /* ── §9 Access preflight ────────────────────────────────────────────────── */
@@ -615,9 +802,41 @@ export const audit = {
   },
 };
 
-/* ── §7 Pod logs ────────────────────────────────────────────────────────── */
+/* ── §7 Pods — the detail reads, the logs, the streams ──────────────────── */
+
+const podPath = (namespace, name) =>
+  `/pods/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}`;
 
 export const pods = {
+  /**
+   * §7.5. The §6 PodRow plus what a detail page needs and a table has no room
+   * for: init containers, conditions, volumes, and per-container ports,
+   * resources and `last_terminated` — the field that turns "restarted 14 times"
+   * into "OOMKilled".
+   */
+  detail: (namespace, name) => api.get(podPath(namespace, name)),
+
+  /**
+   * §7.6. Every environment variable each container will see, with where it
+   * comes from.
+   *
+   * **Secret values are never in this response.** Each variable carries a
+   * `value_state` — `literal`, `resolved`, `withheld`, `unreadable` or
+   * `runtime` — and the UI branches on it, because a blank value that means "we
+   * will not show you this" and one that means "we could not read the ConfigMap"
+   * send an operator to two different places.
+   */
+  environment: (namespace, name) => api.get(`${podPath(namespace, name)}/environment`),
+
+  /**
+   * §7.7. Live CPU and memory per container, against what each one requested.
+   *
+   * A cluster with no `metrics.k8s.io` answers 200 with every `usage` at `null`
+   * and an `unsupported` entry in `unavailable[]` — not an error, and never a
+   * zero. A pod drawn at zero cores reads as idle.
+   */
+  metrics: (namespace, name) => api.get(`${podPath(namespace, name)}/metrics`),
+
   /**
    * params: { container, tailLines, previous, sinceSeconds, timestamps }
    * Returns text/plain. A multi-container pod with no `container` is a
@@ -636,6 +855,29 @@ export const pods = {
   /** WebSocket URL for an exec session (§7). `command` may repeat. */
   execUrl: (namespace, name, params) =>
     wsUrl(`/ws/pods/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/exec`, params),
+
+  /**
+   * Every debug (ephemeral) container already in this pod (§7.4).
+   *
+   * The envelope carries `supported`, which is **three-valued**: `true`,
+   * `false`, and `null` when the cluster's discovery document could not be
+   * read. A caller that treats `null` as `false` tells an operator their
+   * cluster lacks a feature it may well have, and sends them to plan an
+   * upgrade instead of to look at their API server.
+   */
+  debugContainers: (namespace, name) =>
+    api.get(`/pods/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/debug`),
+
+  /**
+   * Attach a debug container (§7.4). body:
+   * `{ image, container, targetContainer, command, tty, dryRun }`.
+   *
+   * A §1.5 mutation, so it goes through `MutationDialog` like every other
+   * write. The response adds `container` — the name that was generated — so the
+   * caller can open a terminal on it without parsing the diff.
+   */
+  attachDebugContainer: (namespace, name, body) =>
+    api.post(`/pods/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/debug`, body),
 };
 
 export default api;

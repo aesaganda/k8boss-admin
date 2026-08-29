@@ -23,7 +23,7 @@ import {
 } from '../components/ui';
 import { useCluster } from '../contexts/ClusterContext';
 import { formatBytes } from '../utils/format';
-import { ChipList, Muted, NoClusterState, ResourceTabsPage, YamlPanel } from './_parts';
+import { ChipList, genericTab, Muted, NoClusterState, ResourceTabsPage, YamlPanel } from './_parts';
 
 export default function Storage() {
   const { activeClusterId } = useCluster();
@@ -235,6 +235,18 @@ export default function Storage() {
           <YamlPanel group="storage.k8s.io" version="v1" plural="storageclasses" name={row.name} height={420} />
         ),
       },
+
+      // VolumeAttributesClass is a newer, still-graduating API (storage.k8s.io/v1,
+      // GA'd late enough that many clusters don't serve it yet). "Not present on
+      // this cluster" here is a normal, calm outcome, not a bug to chase.
+      genericTab({
+        key: 'volumeattributesclasses',
+        title: 'Volume Attributes Classes',
+        group: 'storage.k8s.io',
+        version: 'v1',
+        plural: 'volumeattributesclasses',
+        namespaced: false,
+      }),
     ],
     [],
   );

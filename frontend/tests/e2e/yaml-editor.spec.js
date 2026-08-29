@@ -257,7 +257,15 @@ test.describe('YAML editor gutter and highlighting', () => {
     const input = page.getByTestId('yaml-editor-input');
 
     await input.click();
-    await page.keyboard.press('Home');
+    // The caret is placed directly rather than with Home, which does not move
+    // it in Chromium on macOS — it scrolls the document instead, so the Tab
+    // landed at the end and the suite failed for everyone not on Linux. What
+    // this test is about is that Tab indents at the caret, not about how the
+    // caret got there.
+    await input.evaluate((el) => {
+      el.selectionStart = 0;
+      el.selectionEnd = 0;
+    });
     await page.keyboard.press('Tab');
 
     await expect(input).toHaveValue('  a: 1');

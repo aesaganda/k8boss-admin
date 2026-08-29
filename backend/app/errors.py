@@ -254,8 +254,43 @@ class UpstreamError(AdminError):
     default_message = "The cluster API server returned an error."
 
 
+class InternalError(AdminError):
+    """The console itself failed, in a way nothing below mapped to a code.
+
+    500, and deliberately not ``upstream_error``: that one says the cluster's
+    API server returned something bad, which sends an operator to look at their
+    cluster. This one says the console broke, and pointing them at a healthy
+    cluster during an incident costs them the time they had.
+
+    It exists because the alternative is worse than a bad label. An exception no
+    handler maps escapes to Starlette's ``ServerErrorMiddleware``, which sits
+    *outside* ``CORSMiddleware``, so the 500 carries no
+    ``Access-Control-Allow-Origin`` header at all. The browser then blocks the
+    response and ``fetch()`` rejects with ``TypeError: Failed to fetch`` — the
+    operator sees a network error, and whatever actually went wrong is never
+    delivered. A rendered 500 that says "the console failed" is a worse answer
+    than a mapped error and a far better one than no answer.
+
+    The message is fixed and carries nothing from the exception. A traceback
+    reaching a browser is how internal paths, library versions and occasionally
+    a credential leave the process; the detail belongs in the log beside the
+    correlation id, which is what the operator quotes.
+    """
+
+    code = "internal_error"
+    http_status = 500
+    default_message = "The console failed to handle this request."
+
+
 # Error code -> §1.2 unavailable reason. Kept next to the classes so adding a
 # class without deciding how a partial read reports it is visible here.
+#
+# ``internal_error`` is deliberately absent. It is raised by the outermost
+# middleware, never inside a ``collect()`` block, so it cannot reach an
+# ``unavailable[]`` entry — and the fallback below would label it
+# ``unreachable``, which would send an operator to check a cluster that answered
+# every question it was asked. If that ever stops being true, the fix is a new
+# reason in ``UNAVAILABLE_REASONS``, which is a contract change.
 _UNAVAILABLE_REASON: dict[str, str] = {
     "rbac_denied": "forbidden",
     "not_found": "not_found",
@@ -314,6 +349,71 @@ def _rbac_hint(context: dict[str, Any] | None) -> str:
         f"Grant `{verb}` on `{target}`{scope} to the console's ServiceAccount, "
         "then re-run the connection test."
     )
+
+
+#: Substring identifying a Pod Security admission refusal in the API server's
+#: message. Matched on the message rather than on ``Status.reason``, which is
+#: ``Forbidden`` for this and for an ordinary RBAC denial alike — which is the
+#: whole problem :func:`podsecurity_hint` exists to solve.
+_PODSECURITY_MARKER = "violates podsecurity"
+
+
+def podsecurity_hint(
+    error: AdminError, *, namespace: str | None, setting: str | None = None
+) -> AdminError:
+    """Rewrite an ``rbac_denied`` hint when Pod Security admission is the cause.
+
+    **The code is right and the advice it implies is wrong**, which is the only
+    situation worth a special case like this one. Pod Security admission refuses
+    with HTTP 403, so :func:`from_api_exception` maps it to ``rbac_denied`` —
+    correctly, because this module maps by status and not by ``Status.reason``,
+    which is ``Forbidden`` here exactly as it is for a genuine RBAC denial, and
+    which is the reason that mapping exists at all.
+
+    But the default hint then tells the operator to grant a verb, and no
+    ClusterRole they can write will ever admit the pod: what refused it is a
+    **label on the namespace**. Left alone this sends someone to argue with a
+    cluster admin about a permission they already hold — the exact
+    wrong-system misdirection ``rbac_denied`` exists to prevent.
+
+    Only the hint changes. The code, the status and the API server's own detail
+    are left exactly as they were, so a client branching on ``error`` behaves
+    identically. That is the same treatment §14 gives RBAC escalation
+    prevention, and for the same reason.
+
+    Args:
+        namespace: the namespace whose enforce label refused the pod.
+        setting: the environment variable that chooses that namespace, when the
+            caller has one. Omitted for writes with no namespace knob of their
+            own — the YAML editor's create, where the operator picked the
+            namespace themselves and the sentence about relabelling is the only
+            useful half.
+
+    Returns the error, mutated, so callers can ``raise podsecurity_hint(e, ...)``.
+
+    Discovered against a real cluster rather than in a test: a ``restricted``
+    namespace answers with ``violates PodSecurity "restricted:latest":
+    runAsNonRoot != true``, and no fake client would have said so.
+    """
+    if error.code != "rbac_denied":
+        return error
+    if _PODSECURITY_MARKER not in str(error.detail or "").lower():
+        return error
+
+    where = f"The namespace {namespace!r}" if namespace else "That namespace"
+    fix = (
+        f"Point {setting} at a namespace whose level admits this pod, or relax "
+        "the label on this one."
+        if setting
+        else "Create it in a namespace whose level admits it, or relax the label."
+    )
+    error.hint = (
+        f"This is Pod Security admission, not a missing permission. {where} "
+        "carries a `pod-security.kubernetes.io/enforce` label whose level this "
+        f"pod does not satisfy, and no RBAC grant changes that. {fix} The "
+        "message above names the exact field admission objected to."
+    )
+    return error
 
 
 def _api_exception_detail(exc: ApiException) -> str | None:

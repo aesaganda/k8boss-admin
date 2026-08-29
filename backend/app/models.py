@@ -99,6 +99,21 @@ class Cluster(Base):
     ca_certificate = Column(Text, nullable=True)
     skip_tls_verify = Column(Boolean, nullable=False, default=False)
 
+    # §13. The cluster's wildcard DNS domain — the "apps.<cluster>.example.com"
+    # that a generated exposure hostname is built under. A property of the
+    # cluster's DNS, never of the console, which is why it lives here and not in
+    # Settings: two registered clusters have two different wildcards, and one
+    # console-wide value would generate a hostname that resolves on one of them
+    # and nowhere on the other.
+    #
+    # NULL means "we do not know one", and that is not the same as "there isn't
+    # one". Both render the same way — the route dialog offers no generated
+    # hostname — because offering `shop-web.apps.example.com` on a cluster with
+    # no matching wildcard record produces an exposure that is created, looks
+    # correct, and routes nothing: §14's failure with a hostname instead of a
+    # controller.
+    app_domain = Column(String(253), nullable=True)
+
     # Last observed connectivity. Written by POST /api/clusters/{id}/test and by
     # any endpoint that successfully reaches the cluster.
     #
@@ -135,6 +150,7 @@ class Cluster(Base):
             "authentication_type": self.authentication_type,
             "has_ca_certificate": bool(self.ca_certificate),
             "skip_tls_verify": bool(self.skip_tls_verify),
+            "app_domain": self.app_domain,
             "status": self.status,
             "server_version": self.server_version,
             "last_connected": rfc3339(self.last_connected),

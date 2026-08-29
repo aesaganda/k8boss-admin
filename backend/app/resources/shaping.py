@@ -248,8 +248,13 @@ def _base64_decoded_size(value: Any) -> int:
 _BENIGN_WAITING_REASONS = frozenset({"ContainerCreating", "PodInitializing"})
 
 
-def _container_state(status: Any) -> tuple[str | None, str | None]:
+def container_state(status: Any) -> tuple[str | None, str | None]:
     """``(state, reason)`` for one container status.
+
+    Public because §7.4's debug containers need the same two words for the same
+    two facts. A second implementation would drift, and the drift would show up
+    as a debug container reported as ``running`` next to an app container
+    reported as ``Running`` — the same state, spelled two ways, in one table.
 
     ``state`` is ``Running``/``Waiting``/``Terminated``; ``reason`` is the API's
     own reason where it has one. A terminated container with no reason gets one
@@ -341,6 +346,13 @@ def pod_row(pod: Any) -> dict[str, Any]:
     has run, so nothing has restarted. That is a different null from §6's
     ``restarts_24h``, which is ``None`` when the pod *listing* failed; the
     difference is whether we are describing a pod we read or a pod we could not.
+
+    Every entry of ``containers`` carries a ``kind``: ``"container"`` for the
+    pod's own, ``"ephemeral"`` for a §7.4 debug container somebody attached.
+    Neither the ``ready`` fraction nor the ``restarts`` total counts the second
+    kind, because the kubelet does not either — a debug container has no
+    readiness and is never restarted, and letting one turn ``2/2`` into ``2/3``
+    would report a healthy pod as degraded for the duration of somebody's shell.
     """
     statuses = get_field(pod, "status", "containerStatuses", default=[]) or []
     spec_containers = get_field(pod, "spec", "containers", default=[]) or []
@@ -349,7 +361,7 @@ def pod_row(pod: Any) -> dict[str, Any]:
 
     containers = []
     for status in statuses:
-        state, reason = _container_state(status)
+        state, reason = container_state(status)
         containers.append({
             "name": get_field(status, "name"),
             "image": get_field(status, "image"),
@@ -357,6 +369,7 @@ def pod_row(pod: Any) -> dict[str, Any]:
             "restarts": int(get_field(status, "restartCount", default=0) or 0),
             "state": state,
             "reason": reason,
+            "kind": "container",
         })
     if not statuses:
         # A pod with no statuses still has a spec, and showing its containers
@@ -370,7 +383,41 @@ def pod_row(pod: Any) -> dict[str, Any]:
                 "restarts": 0,
                 "state": None,
                 "reason": None,
+                "kind": "container",
             })
+
+    # Debug containers, appended last and tagged, after `ready` and `restarts`
+    # were computed above — deliberately, and in that order.
+    #
+    # An ephemeral container is a real process running in this pod, so a console
+    # that omitted it would show an operator a pod whose container list does not
+    # match what is inside it. But it is not part of the workload: the kubelet
+    # never reports it in `containerStatuses`, it has no readiness and it is
+    # never restarted. So it must not move the `2/2` in the Ready column, and it
+    # must be distinguishable — a debug image in a list of application images,
+    # with nothing saying which is which, reads as a workload that ships a
+    # busybox sidecar.
+    ephemeral_statuses = {
+        str(get_field(status, "name")): status
+        for status in (get_field(pod, "status", "ephemeralContainerStatuses", default=[]) or [])
+        if get_field(status, "name")
+    }
+    for container in get_field(pod, "spec", "ephemeralContainers", default=[]) or []:
+        name = get_field(container, "name")
+        status = ephemeral_statuses.get(str(name)) if name else None
+        state, reason = container_state(status)
+        containers.append({
+            "name": name,
+            "image": get_field(container, "image"),
+            # Never ready, because the API gives an ephemeral container no
+            # readiness probe and the kubelet never marks one ready. False here
+            # is the fact, not a missing reading.
+            "ready": False,
+            "restarts": 0,
+            "state": state,
+            "reason": reason,
+            "kind": "ephemeral",
+        })
 
     owner_refs = get_field(pod, "metadata", "ownerReferences", default=[]) or []
     controller = next(
@@ -1173,6 +1220,7 @@ __all__ = [
     "clusterrole_row",
     "clusterrolebinding_row",
     "configmap_row",
+    "container_state",
     "get_field",
     "ingress_row",
     "label_selector_matches",

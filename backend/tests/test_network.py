@@ -1,5 +1,5 @@
 """
-NetworkPolicy: the shaper, the selector matcher, and the two §8.2 endpoints.
+NetworkPolicy: the shaper, the selector matcher, and the two §8.4 endpoints.
 
 This kind is the one where "empty is never blind" stops being a slogan about
 tables and becomes a statement about a security control, so the assertions here

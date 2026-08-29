@@ -1,5 +1,5 @@
 /**
- * The NetworkPolicy tabs (§8, §8.2).
+ * The NetworkPolicy tabs (§8.3, §8.4).
  *
  * Every assertion here is about a pair of states that a convenient rendering
  * would collapse, on the one kind where collapsing them is a wrong belief about
@@ -24,7 +24,7 @@ import { FIXTURES, mockApi } from './fixtures.js';
 
 async function openPolicies(page) {
   await page.goto('/network');
-  await page.getByRole('tab', { name: 'Network policies' }).click();
+  await page.getByRole('tab', { name: 'Network Policies' }).click();
 }
 
 test.describe('network policies', () => {
@@ -76,7 +76,7 @@ test.describe('network policies', () => {
     page,
   }) => {
     await page.goto('/network');
-    await page.getByRole('tab', { name: 'Pod isolation' }).click();
+    await page.getByRole('tab', { name: 'Pod Isolation' }).click();
 
     await expect(page.getByRole('row', { name: /legacy-batch-0/ })).toContainText('Unrestricted');
 
@@ -89,7 +89,7 @@ test.describe('network policies', () => {
 
   test('the isolation headline counts unknowns apart from unrestricted pods', async ({ page }) => {
     await page.goto('/network');
-    await page.getByRole('tab', { name: 'Pod isolation' }).click();
+    await page.getByRole('tab', { name: 'Pod Isolation' }).click();
 
     const unrestricted = page.getByTestId('metric-card').filter({ hasText: 'Ingress unrestricted' });
     await expect(unrestricted).toContainText('1');

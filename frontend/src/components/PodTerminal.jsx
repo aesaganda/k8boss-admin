@@ -32,10 +32,29 @@
  * command returned* — the session ended without the API server telling us.
  * Printing `exit 0` there would be a fabricated success for a command that may
  * have failed.
+ *
+ * **The container is chosen, never defaulted.** §7 refuses to pick one for a
+ * multi-container pod and answers `422` listing them, and the reasoning it
+ * gives about logs applies harder here: a shell in the wrong container of a
+ * payments pod looks exactly like a shell in the right one, and this one can
+ * also change things. So the picker starts empty and Open shell is disabled
+ * until the operator says which — the same refusal, made before the round trip
+ * rather than after it, and so before an audit row is written for a session
+ * that could not happen. A single-container pod is unambiguous and is selected;
+ * a caller that already knows (§7.4's debug panel) passes `container` and gets
+ * no picker at all.
  */
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-import { Alert, Button, Split, SplitItem, TextInput } from '@patternfly/react-core';
+import {
+  Alert,
+  Button,
+  FormSelect,
+  FormSelectOption,
+  Split,
+  SplitItem,
+  TextInput,
+} from '@patternfly/react-core';
 import { FitAddon } from '@xterm/addon-fit';
 import { Terminal } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
@@ -67,7 +86,21 @@ const THEMES = {
 export function PodTerminal({
   namespace,
   name,
+  /**
+   * Fixed container. When given there is no picker: the caller already knows
+   * which container this terminal is for — §7.4's debug panel opens a shell in
+   * the container it just attached, and offering a dropdown there would let an
+   * operator retarget a terminal labelled "Terminal in debugger-x4k2p".
+   */
   container = null,
+  /**
+   * `containers` from the §6 PodRow, for the picker. Entries may be plain
+   * strings or `{ name, kind }`; `kind: "ephemeral"` is a §7.4 debug container
+   * and is labelled as one, because "which of these five is the debugger" is a
+   * question an operator should not have to answer from the name alone.
+   * Absent means we do not know how many the pod has.
+   */
+  containers,
   /** Default shell. §7 takes `command` as a repeatable query parameter. */
   command = DEFAULT_COMMAND,
   height = 420,
@@ -75,6 +108,43 @@ export function PodTerminal({
 }) {
   const { mutationsEnabled, readOnly, reason: healthReason } = useHealth();
   const { theme } = useTheme();
+
+  const entries = useMemo(
+    () =>
+      Array.isArray(containers)
+        ? containers
+            .map((entry) => (typeof entry === 'string' ? { name: entry } : entry))
+            .filter((entry) => entry?.name)
+        : null,
+    [containers],
+  );
+
+  // The pod's own containers, excluding §7.4 debug containers. This — not
+  // `entries` — is what decides ambiguity, because it is what the API server
+  // counts: it defaults the container only when `spec.containers` holds one,
+  // and ephemeral containers never enter that count. Keying off `entries`
+  // instead would mean attaching a debug container to a single-container pod
+  // made this terminal start demanding a choice it had not needed before, which
+  // is this console becoming stricter than the API it is a client of.
+  const own = useMemo(
+    () => entries?.filter((entry) => (entry.kind ?? 'container') !== 'ephemeral') ?? null,
+    [entries],
+  );
+
+  const [chosen, setChosen] = useState(
+    // A single-container pod is unambiguous, so it is selected. Anything else
+    // waits for the operator: §7 refuses to default a container, and the reason
+    // it gives applies just as hard to a shell as to a log — a root shell in
+    // the wrong container of a payments pod looks exactly like a root shell in
+    // the right one.
+    () => (own && own.length === 1 ? own[0].name : null),
+  );
+
+  // The prop wins when the caller fixed one. `null` from both is only safe when
+  // the pod has exactly one container, which is the case the API server itself
+  // defaults — see `resolve_container` in app/api/logs.py.
+  const activeContainer = container ?? chosen;
+  const mustChoose = !container && own != null && own.length > 1 && !chosen;
 
   const [commandText, setCommandText] = useState(command);
   // Not connected until the operator asks. A terminal that opens a session the
@@ -147,7 +217,7 @@ export function PodTerminal({
 
     const parsedCommand = commandText.trim() ? commandText.trim().split(/\s+/) : [DEFAULT_COMMAND];
     const socket = new WebSocket(
-      podsApi.execUrl(namespace, name, { container, command: parsedCommand }),
+      podsApi.execUrl(namespace, name, { container: activeContainer, command: parsedCommand }),
     );
     socketRef.current = socket;
 
@@ -235,7 +305,7 @@ export function PodTerminal({
     // exactly this bug: the shell vanished and the operator lost their working
     // directory, their history and whatever they had half-typed.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [started, session, mutationsEnabled, namespace, name, container, sendResize]);
+  }, [started, session, mutationsEnabled, namespace, name, activeContainer, sendResize]);
 
   // Re-theme in place. `term.options.theme` is a live setter in xterm 5 and
   // repaints the existing buffer.
@@ -283,6 +353,29 @@ export function PodTerminal({
         <SplitItem>
           <StatusBadge status={pill.status} label={pill.label} />
         </SplitItem>
+        {!container && entries && entries.length > 1 && (
+          <SplitItem>
+            <FormSelect
+              value={chosen ?? ''}
+              onChange={(_event, next) => setChosen(next || null)}
+              aria-label="Container"
+              data-testid="pod-terminal-container"
+              style={{ minWidth: '14rem' }}
+            >
+              {/* Not a default — the state the terminal starts in and refuses
+                  to leave on its own. §7 will not pick a container and neither
+                  will this. */}
+              <FormSelectOption value="" label="Choose a container…" isDisabled />
+              {entries.map((entry) => (
+                <FormSelectOption
+                  key={entry.name}
+                  value={entry.name}
+                  label={entry.kind === 'ephemeral' ? `${entry.name} (debug)` : entry.name}
+                />
+              ))}
+            </FormSelect>
+          </SplitItem>
+        )}
         <SplitItem>
           {/* Editable at every phase, and applied on the next session rather
               than this one. Disabling it while connected left the operator no
@@ -303,6 +396,7 @@ export function PodTerminal({
           <Button
             variant={status === 'open' ? 'secondary' : 'primary'}
             onClick={() => setSession((n) => n + 1)}
+            isDisabled={mustChoose}
             data-testid="pod-terminal-connect"
           >
             {status === 'open' || status === 'connecting' ? 'Restart session' : started ? 'Reconnect' : 'Open shell'}
@@ -310,7 +404,20 @@ export function PodTerminal({
         </SplitItem>
       </Split>
 
-      {!started && (
+      {mustChoose && (
+        // The same refusal §7 makes on the wire, made here so it costs no round
+        // trip and no audit row. `app/api/logs.py`: *it is not defaulted:
+        // reading the wrong container's logs looks exactly like reading the
+        // right one* — and typing into the wrong container is worse, because it
+        // also changes something.
+        <Alert isInline variant="info" title="Choose a container" data-testid="pod-terminal-choose">
+          This pod has {own.length} containers. The console will not pick one for you: a shell in the
+          wrong container of this pod looks exactly like a shell in the right one, and this one can change
+          things.
+        </Alert>
+      )}
+
+      {!started && !mustChoose && (
         <Alert isInline variant="info" title="No session is open">
           Opening a shell is audited on open and on close (§7), and runs as the console’s ServiceAccount —
           not as you. Nothing is sent to the cluster until you press Open shell.

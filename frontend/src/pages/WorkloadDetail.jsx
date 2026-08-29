@@ -66,6 +66,19 @@ function buildChecks(spec, plural, namespace) {
     { id: 'delete', verb: 'delete', group: spec.group, resource: plural, namespace },
     { id: 'logs', verb: 'get', group: 'core', resource: 'pods', subresource: 'log', namespace },
     { id: 'exec', verb: 'create', group: 'core', resource: 'pods', subresource: 'exec', namespace },
+    // §7.4. `patch`, matching what `mutate` preflights — a check that named a
+    // different verb would report a permission nobody is about to exercise. The
+    // subresource is named separately because RBAC does: a ServiceAccount can hold
+    // `patch pods` and not this. Appended rather than spliced in, because
+    // `usePreflight` pairs results to checks strictly by index (§9).
+    {
+      id: 'debug',
+      verb: 'patch',
+      group: 'core',
+      resource: 'pods',
+      subresource: 'ephemeralcontainers',
+      namespace,
+    },
   ];
   if (spec.scalable) {
     checks.push({
@@ -389,6 +402,10 @@ export default function WorkloadDetail() {
                 setPodConsole({ pod: row, tab: 'logs' }),
               ),
               menuAction('Open terminal', gate('exec'), () => setPodConsole({ pod: row, tab: 'exec' })),
+          // §7.4. Its own entry rather than a step inside the terminal: the pod
+          // this is for is the one whose image has no shell, so the operator
+          // reaching for it has already found that the terminal cannot help.
+          menuAction('Debug…', gate('debug'), () => setPodConsole({ pod: row, tab: 'debug' })),
               { isSeparator: true },
               {
                 title: 'Show on its node',
@@ -712,6 +729,7 @@ export default function WorkloadDetail() {
           pod={podConsole.pod}
           initialTab={podConsole.tab}
           execGate={gate('exec')}
+          debugGate={gate('debug')}
           onClose={() => setPodConsole(null)}
         />
       )}

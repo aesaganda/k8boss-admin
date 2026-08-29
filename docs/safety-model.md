@@ -404,7 +404,219 @@ Per-permission degradation is catalogued in [`rbac.md`](rbac.md).
 
 ---
 
-## 9. The Secret reveal
+## 9. The debug container
+
+`kubectl debug`, for the pod an operator most needs to get inside and the one
+`exec` is useless against: an image built from `scratch` or `distroless`, with no
+shell to exec. Kubernetes' answer is an **ephemeral container** scheduled into
+the running pod, and the console attaches one through the same funnel as every
+other write — gate, preflight on `patch pods/ephemeralcontainers`, `dryRun=All`,
+the API server's own projected diff, confirmation, audit.
+
+Nothing about it is special-cased, and three details are load-bearing.
+
+**The refusal for an old cluster is `unsupported`, and it comes from
+discovery.** The API server answers a request for a subresource it does not
+serve with **404**, which `from_api_exception` maps — correctly, for every other
+caller — to `not_found`. An operator told "not found" about a pod they are
+looking at goes hunting for a deletion that never happened. So the question is
+asked of the core group's discovery document, where the answer is about the
+cluster rather than about the object, and §1.3 makes `unsupported` an ordinary
+fact in the UI rather than a red banner.
+
+**Discovery that could not be read is `null`, never `false`.** "This cluster
+cannot do this" and "we could not find out whether it can" send an operator to
+two different places, and only one of them is a cluster upgrade. Unknown lets the
+request proceed and the API server answer — the same posture `resolve_container`
+takes when it cannot read the pod it wanted to validate against. It is §0.1's
+rule applied to a boolean.
+
+**The patch is a strategic merge, and that is what makes it an append.**
+`spec.ephemeralContainers` has `name` as its merge key. An RFC 7386 merge patch
+replaces a list wholesale, so attaching a second debug container would delete the
+first from the manifest — an operation the API server then refuses, because an
+ephemeral container cannot be removed, with an error about the field rather than
+about the console's choice of patch type.
+
+*What §0.4 does not have to do here.* There is no `resourceVersion` on this
+write and none is needed. The merge key means two operators attaching at the same
+moment produce two containers rather than one silently overwriting the other, so
+there is no lost update for optimistic concurrency to detect. This is the one
+write in the tree where that is true, and it is a property of the merge key, not
+an exemption.
+
+*The fact that goes above the form, not in the diff.* **An ephemeral container
+cannot be removed.** The Kubernetes API has no verb for deleting one; it lives
+until the pod does, and restarting the workload is what removes it. That, rather
+than five added lines of YAML, is what the operator is consenting to — so the
+console says it in the dialog before the preview, and offers no detach button
+anywhere. A control the API server will always refuse is this document's defect
+standard applied to a button.
+
+*The blast radius, stated plainly.* The operator chooses the image, and the
+container it becomes shares the pod's network namespace, its volumes and — on
+request — the process namespace of an application container. It runs as the
+pod's own ServiceAccount. This is close to `pods/exec` in what it grants, which
+is why `pods/ephemeralcontainers` is a separate rule in `deploy/rbac.yaml` and
+why the audit sentence names the image: the question after an incident is not
+that somebody debugged a pod but *what they put inside it*.
+
+---
+
+## 9.1 The node debug pod
+
+The largest grant in this product, and the one whose safety argument cannot be
+made with RBAC.
+
+`kubectl debug node/<name>` creates a pod pinned to one machine with its root
+filesystem mounted. What that reaches is worse than the manifest makes it sound.
+Under `/host/var/lib/kubelet/pods` sit the projected ServiceAccount token and
+every mounted Secret of **every pod on that node** — each one a live bearer
+credential; `/host/var/lib/kubelet/pki` holds the node's own client certificate,
+an identity in `system:nodes`. `hostPID` adds every process's `environ` and
+`cmdline`, and `/proc/<pid>/root` reaches into other containers' mount namespaces
+— including tmpfs Secret mounts that never touch the host disk. A shell in this
+pod is, for practical purposes, root on the machine.
+
+**RBAC cannot express the difference between this pod and any other.**
+`SelfSubjectAccessReview` answers on verb, group, resource, namespace, name and
+subresource. It has no field-level granularity whatsoever: `create pods` that
+succeeds for an nginx pod succeeds identically for this one. There is no verb for
+`hostPath`, none for `hostPID`, none for `privileged`. The layer that once gated
+this — PodSecurityPolicy's `use` on a `podsecuritypolicies` resource — was
+removed in Kubernetes 1.25, and its replacement, Pod Security admission, is
+namespace-label-based rather than RBAC-based.
+
+Three consequences follow, and the design is all three:
+
+**The deployment gate is the real control, so there is one.**
+`ADMIN_NODE_DEBUG_ENABLED`, on top of `ADMIN_ALLOW_MUTATIONS`. §8 is about
+orthogonality rather than a count of switches, and this is orthogonal in exactly
+the way that section means: a deployment can want every other write and not this.
+Preflight still runs — the operator may lack `create pods` — but nobody should
+mistake it for the boundary. Withholding `create pods` from the console's
+ServiceAccount is the only RBAC answer, and it also removes the YAML editor's
+ability to create anything at all.
+
+**The dry run is refused too, uniquely.** Everywhere else in this document a
+projection is a read and is permitted in read-only mode. Here the projection is a
+working manifest for a privileged pod, complete with the namespace that admits
+it. A deployment that has switched this off has not consented to handing one out.
+
+**The gate refusal is audited.** The funnel audits its own gate; this refusal
+never reaches the funnel, so it records itself. "Who tried to put a host-mounted
+pod on a node while that was switched off" is precisely the question §7 exists
+to answer.
+
+### What the cluster still decides
+
+Pod Security admission is the control the *cluster* holds, and it is a real one.
+A namespace enforcing `baseline` or `restricted` rejects this pod outright — host
+namespaces and hostPath volumes both fail those profiles. That is why the
+namespace is configurable (`ADMIN_NODE_DEBUG_NAMESPACE`): a cluster that enforces
+`restricted` everywhere needs one deliberately labelled namespace for this to be
+possible at all, and pinning the console to it keeps the exception in one
+auditable place rather than wherever an operator's namespace selector happened to
+be. Admission runs on `dryRun=All`, so the refusal arrives at the *preview* step,
+before anything exists.
+
+### Least privilege, where it does not cost the feature
+
+Each of these is a deliberate reduction from what `kubectl debug` produces:
+
+| | `kubectl debug node/` | here |
+|---|---|---|
+| `/host` mount | read-write | **read-only** unless explicitly asked |
+| `automountServiceAccountToken` | unset (token mounted) | **false** |
+| `hostIPC` | true | **unset** |
+| `securityContext` | none (so not privileged) | none |
+| hostPath `type` | unset | `Directory` |
+
+The read-only default is the important one. Almost all node debugging reads, and
+a read-only `/host` cannot rewrite a static pod manifest or leave a binary that
+runs as root at next boot. Asking for write access flips the confirm button to
+danger and requires the node's name to be typed.
+
+*What is deliberately not reduced.* `hostPID` and `hostNetwork` stay on: they are
+most of why the feature exists, and an operator who needed them and found them
+off would turn them on without reading. They are disclosed instead — the create
+is a `create`, so `before` is null and the **entire manifest is the diff**, on
+screen before the confirming call.
+
+### The pod outlives the session, and no console can fix that
+
+`kubectl debug` has no `--rm`: it issues no delete on detach, on exit or on
+Ctrl-C, and leaked node debug pods are common. A console cannot do better
+*automatically* — a closed tab is not a signal a server can act on, and a
+restarted console pod drops whatever would have issued the DELETE. Promising
+cleanup would be a promise that fails exactly when it matters.
+
+So the console does the honest thing instead: it labels the pods it creates,
+lists them per node, states for each whether the host filesystem is writable, and
+offers a removal that goes through the funnel like any other delete. Removal
+stays available even when creating is gated off — a pod left behind after the
+switch was thrown is the one that most needs removing, and deleting it takes
+privilege away rather than granting it.
+
+This is the exact opposite of §7.4's ephemeral container, which **cannot** be
+removed because the API has no verb for it. Two features that look alike and
+differ in the one respect an operator most needs to know; the UI renders them
+differently for that reason.
+
+---
+
+## 9.2 The CLI pod, and the control this model does not have
+
+§15 creates a pod carrying `kubectl` and opens §7's shell in it. It is in this
+chapter because it looks like the two features above, and it is written out
+separately because the thing that bounds it is not the thing that bounds them.
+
+**Everything typed in that shell is outside the funnel.** No preflight naming
+the permission, no `dryRun=All`, no diff on screen, no `resourceVersion` check,
+and no audit record of what changed. §7 records that a session was opened on the
+pod, by whom, for how long and how many bytes crossed it; it cannot record the
+`kubectl delete` typed into it. Every other control in this document works by
+standing between an intention and a cluster. Here there is nothing to stand
+between: the operator is talking to the API server directly.
+
+That is the same bargain §7 strikes for a shell in any pod, and it is stated
+again because this is the pod whose entire purpose is running cluster commands.
+An operator who has learned that this console shows them a diff first will
+otherwise assume this surface does too.
+
+**The bound is the ServiceAccount, and RBAC cannot enforce which one.** kubectl
+in the pod authenticates as the account the pod binds, so a shell here can do
+exactly what that account can do — not what the console can do, and not what the
+signed-in operator can do. Kubernetes has no verb covering which ServiceAccount
+a pod may bind: `create pods` in a namespace is enough to bind any account in
+it, including one more privileged than the caller, and no ClusterRole narrows it
+afterwards.
+
+So there is exactly one control, and it is a deployment setting:
+`ADMIN_CLI_SERVICE_ACCOUNT`. It defaults to `default`, which holds no
+permissions, so kubectl in the pod is refused everything until a cluster admin
+deliberately binds a Role. The account is named in the diff the operator
+confirms, in the table, and in the audit sentence for the create — because it is
+the only fact that decides what this feature can do, and it is not visible from
+the pod's name or its image.
+
+**Two gates**, as §8 requires: `ADMIN_ALLOW_MUTATIONS` and `ADMIN_CLI_ENABLED`.
+The second exists so a deployment can have every other write in this console
+without being usable as a kubectl terminal. Unlike §9.1 the *projection* is
+permitted on a read-only console — this manifest is a pod running `sleep`, not a
+recipe for a privileged one — while the feature gate refuses the dry run too,
+because previewing the feature is offering it.
+
+**What it leaks when it is left behind is a credential.** §9.1's leaked pod
+holds a node's filesystem; this one holds a live API token for as long as it
+exists. `ADMIN_CLI_MAX_SECONDS` stops the container at a deadline and the pod
+object remains, so the bound is on the unattended-shell window and not on the
+litter. Removal is a button, for the same reason it is one in §9.1: nothing else
+will do it.
+
+---
+
+## 10. The Secret reveal
 
 A Secret's values are returned by exactly one code path, and only when **all** of
 the following hold:
@@ -428,7 +640,245 @@ the page believes they read a secret.
 
 ---
 
-## 10. What this model does not claim
+---
+
+## 11. The exposure, and the router that serves it
+
+Two features in one lane, and the safety property is the same in both: **a
+change that reaches the outside world is a claim about traffic, not about an
+object.**
+
+### 11.1 An object created is not an exposure served
+
+`POST` an Ingress to a cluster with no ingress controller and the API server
+answers 201. Nothing routes. The object sits there looking created, `admitted`
+stays `null` forever, and the operator's browser hangs on the hostname.
+
+This is the defect standard aimed at §13, so §13 answers it three ways:
+
+* `admitted` is **tri-state**, and `null` — "no router has reported" — is the
+  common value rather than an edge case. Every Ingress is `null` permanently:
+  the Ingress API has no admission condition at all, and whether a controller
+  took the object is visible only through the address it publishes.
+* A Route admitted by one shard and refused by another is **admitted with the
+  refusal named**. It is being served on one shard; a bare green badge hides the
+  half the operator came to find, and a red one sends them to debug a working
+  exposure.
+* §14 exists so the answer to "nothing is serving this" can be something other
+  than a wall.
+
+### 11.2 What a backend cannot express is named, never guessed
+
+An Ingress cannot do passthrough TLS. Two ways to get this wrong, and the
+compiler does neither:
+
+* Emit `nginx.ingress.kubernetes.io/ssl-passthrough` and hope it is nginx. It
+  works on the controller the author tested against and silently does nothing on
+  every other one.
+* Quietly write edge termination instead. The operator finds out when their mTLS
+  client stops connecting.
+
+Instead the write is refused until the caller acknowledges each dropped feature
+**by name** — the same shape as `force` on a drain, and for the same reason:
+"I read this and accept it" has to be a separate act from "go". The
+acknowledgement is a list rather than a boolean, so editing the form after
+acknowledging one consequence requires reading the new one.
+
+The no-vendor-annotation rule is enforced by a test rather than stated as
+policy. That is exactly the pressure point where "report it as lossy" gets
+reversed into "guess the controller", and a reversal would leave `lossy[]`
+claiming a feature was dropped while the object silently carried it. An
+annotation the *operator* writes is kept, because they chose it for a controller
+they know they are running.
+
+### 11.3 The form cannot eat a field
+
+The YAML document is authoritative and the form is a projection of it. Form
+edits patch into the current document; `preserved[]` names every path the form
+is not showing; and once the YAML is hand-edited the form locks and the write
+sends the document **verbatim, with no form model at all**. Without that last
+part the form's fields would be recompiled over the hand-edit at write time —
+silently undoing the change the lock existed to protect.
+
+### 11.4 `routes/custom-host` — the denial preflight would otherwise misname
+
+OpenShift gates *choosing a hostname* behind its own RBAC subresource, separate
+from creating the Route. The funnel preflights `create routes`, that review
+passes, the API server refuses the write — and the operator is told they cannot
+create Routes, a permission the review just confirmed they hold. §13 preflights
+the subresource explicitly, only for Routes and only when a hostname is actually
+set, and audits the denial because it happens outside the funnel.
+
+### 11.5 The router is manifests, not a controller
+
+§14 installs a reverse proxy. What makes that defensible is what it does *not*
+do: no reconcile loop in the console, no desired state stored, no watch. Eight
+objects, eight passes through `mutate()`, eight audit rows. Status is a live
+read.
+
+Four refusals carry the safety of it:
+
+* **Never adopt an object it did not create.** An install that finds a
+  ClusterRole of the same name without `managed-by: k8boss-admin` refuses and
+  names it — before writing anything, on a dry run as much as on a real one, and
+  the refusal is audited. An operator who asked for an install and got a silent
+  takeover of another team's object is the worst outcome this feature has.
+* **A partial install is reported as partial.** `installed` is false unless all
+  eight landed. There is no rollback: deleting what succeeded is more writes
+  nobody approved, against objects that may already be in use.
+* **Uninstall retains the Namespace.** It can hold objects the console never put
+  there, and deleting one is not recoverable.
+* **`installed` is tri-state.** `null` during an outage, never `false` — which
+  would invite installing a second proxy beside the one already running.
+
+### 11.6 Two gates, and one deliberate departure
+
+`ADMIN_ALLOW_MUTATIONS` and `ADMIN_ROUTER_MANAGE_ENABLED`, both required for a
+real write, refusals audited.
+
+**The dry run is permitted with the feature gate off** — unlike §9.1's node
+debug pods, where the projection is itself withheld. The difference is what the
+projection *is*. A node debug pod's manifest is a working recipe for a
+privileged pod on a deployment that switched the feature off. The router's
+manifests are a pinned copy of a public upstream bundle, and an operator
+deciding whether to open the gate has to be able to read what it would create.
+Withholding it would be asking somebody to enable a feature sight unseen.
+
+### 11.7 What §14 does not claim
+
+* **It does not serve HTTPRoutes.** The HAProxy Kubernetes Ingress Controller
+  implements Gateway API for TCPRoute only. Enabling the Gateway API option
+  grants the permissions and sets the controller name and an HTTPRoute is still
+  never accepted. The console says so on the page, before anyone writes one.
+* **It does not serve OpenShift Routes**, and should not: that cluster already
+  runs its own router, and a second one contending for the same hostnames is how
+  an outage starts.
+* **`upgradeAvailable` is not "a newer HAProxy exists".** It is "the installed
+  version differs from the one this console ships" — the only version claim this
+  console can make honestly, since the other would be a statement about a third
+  party's release history read out of a string baked into this repo.
+* **Preflight cannot see RBAC escalation prevention.** See
+  [`adr-0004-shipped-router.md`](adr-0004-shipped-router.md); the console
+  rewrites the *hint* on that one failure and leaves the code mapped by status.
+* **Nothing here prevents two routers contending.** The install refuses to adopt
+  another controller's objects and the default-class option is off, but an
+  operator can still run this beside nginx and write an Ingress both could
+  claim. `otherClasses[]` is what lets the page say what else is already there —
+  and it is `null`, never `[]`, when that listing failed.
+
+---
+
+## 12. The operator portal, and the install this console does not perform
+
+§16 browses the catalogs a cluster already runs and writes **one object**: an OLM
+`Subscription`. Everything that happens after that write belongs to Operator
+Lifecycle Manager — the cluster's own software, running with its own permissions.
+That division is what makes the feature defensible, and §12.5 is where it stops.
+
+### 12.1 `applied: true` is one object, not an operator
+
+A Subscription is a request. `status.installedCSV` is the only evidence anything
+was installed, and it stays empty for as long as resolution is pending, an
+InstallPlan waits for approval, or the namespace lacks the OperatorGroup OLM
+needs. §16 keeps the two apart in every shape it returns: the write response
+carries `expectedCSV` — *expected*, never a claim — and the Installed view is
+where the question is actually answered. `phase` is `null` rather than `Failed`
+whenever the ClusterServiceVersion could not be read, with `phaseDetail` saying
+which of "we did not look" and "OLM has not acted yet" it is.
+
+This is §11.1 aimed at somebody else's deployment engine. An exposure written
+into a cluster with no controller is an object that routes nothing while looking
+created; a Subscription written into a namespace with no OperatorGroup is an
+object that installs nothing while looking created.
+
+### 12.2 Three things stop an install, and all three are knowable first
+
+The plan reads them before anything is written:
+
+* **The namespace needs exactly one OperatorGroup.** None gives
+  `NoOperatorGroup`, two give `TooManyOperatorGroups`, and either way the CSV
+  fails and nothing installs.
+* **The OperatorGroup's scope has to be one the operator supports**, or OLM
+  answers `UnsupportedOperatorGroup`.
+* **`Manual` approval stops the install dead** until somebody approves the
+  InstallPlan — which this console does not do.
+
+`target.ready` is a tri-state and `null` is the ordinary third value: an
+unreadable OperatorGroup listing, a group that selects its namespaces by a label
+selector this console does not evaluate, or a catalog that published no install
+modes all leave us unable to say. `true` is returned only when every check
+actually ran and passed.
+
+### 12.3 The acknowledgement handshake
+
+Each of those becomes a `consequences[]` entry — `code`, `label`,
+`consequence`, `mitigation` — and the write is refused `422 invalid` unless
+`acknowledgeConsequences` names **every** code the plan returned;
+`context.unacknowledged` lists the missing ones.
+
+The list is *not* called `warnings`, and that is deliberate rather than
+cosmetic: §1.5's mutation response already owns a `warnings` key carrying the
+API server's own `Warning:` headers for the object being created. Overwriting it
+would drop a deprecation notice about the very Subscription being written, which
+is the one place an operator would most want to read one.
+
+Named codes rather than a boolean, the same shape as §11.2's lossy exposure and
+`force` on a drain, for the same reason: **consenting to a consequence is a
+separate act from requesting the change.** A boolean is satisfied by a tick that
+predates the consequence — a caller who acknowledged one namespace's consequences,
+changed the namespace and posted the old flag would have consented to nothing.
+The plan is recomputed inside the write rather than trusted from the caller, so
+what is checked is the consequence list that describes *this* write.
+
+The two "unknown" codes are acknowledgeable on the same terms as the rest, on
+purpose. `operator_group_unknown` and `subscriptions_unknown` say that a read did
+not happen, and letting a failed read pass silently is the swallowed `[]` this
+whole document exists to refuse.
+
+### 12.4 Two gates, and the same departure §14 made
+
+`ADMIN_ALLOW_MUTATIONS` and `ADMIN_PORTAL_INSTALL_ENABLED`, both required for a
+real write. The refusal is `mutations_disabled`, never `rbac_denied` — the
+operator's permissions are not what stopped it, and saying otherwise sends them
+to edit a ClusterRole that is already correct — and it is audited by
+`app/admin/portal.py` directly, because the funnel that audits everything else is
+never reached.
+
+**The dry run is permitted with the feature gate off**, as in §11.6 and unlike
+§9.1's node debug pods. The difference is what the projection *is*. A node debug
+pod's manifest is a working recipe for a privileged pod on a deployment that
+deliberately switched that feature off. The §16 plan is the caller's own request
+rendered as a Subscription plus the contents of a catalog the cluster already
+publishes to anyone who can read it. Nothing in it is privileged, and an operator
+deciding whether to open the gate has to be able to read what it would let the
+console create. Withholding it would be asking somebody to enable a feature sight
+unseen.
+
+### 12.5 The honest limit: what OLM grants afterwards
+
+This console preflights the write it makes — `create
+operators.coreos.com/subscriptions` on that exact namespace and name, like every
+other write in this document. **That is the only permission it can speak about.**
+
+What installs the operator is OLM, using OLM's permissions, and what OLM grants
+the operator is whatever its bundle asks for: its own ServiceAccount, Roles, and
+routinely ClusterRoles over resources this console never named. No
+`SelfSubjectAccessReview` can preview that — a review answers about *this*
+identity's verb on a resource, and the identity doing the granting is not this
+one. Nothing in `deploy/rbac.yaml` bounds it either: withholding every other rule
+in that file does not narrow what an installed operator ends up holding.
+
+So the plan shows what can honestly be shown — the channel, the CSV it resolves
+to, the install modes it declares and the custom resources it says it owns, which
+is the visible half of what installing it does to a cluster — and claims nothing
+about the rest. A page that implied it had checked the RBAC would be the defect
+standard with a signature attached.
+[`adr-0005-operator-portal.md`](adr-0005-operator-portal.md) records the argument
+on both sides.
+
+---
+
+## 13. What this model does not claim
 
 Being honest about the edges is part of the model:
 
@@ -446,6 +896,12 @@ Being honest about the edges is part of the model:
   that fills between the preview and the confirm can still make the real write
   behave differently. The window is seconds; it is not zero.
 * **`force` on a drain does not defeat a PodDisruptionBudget.** See §6.
+* **Nothing here bounds an operator OLM installs.** §16 preflights the
+  Subscription it writes and can say nothing about the RBAC OLM then grants the
+  operator; see §12.5. Nor does §16 uninstall anything — deleting a Subscription
+  leaves the ClusterServiceVersion and everything it owns in place, so there is
+  no Remove button that would report an uninstall that did not happen. Both
+  deletions are ordinary §4 writes, each with its own diff and audit row.
 * **Exec bypasses everything here.** A shell inside a container can do whatever
   that container's own ServiceAccount can, and no diff is possible for a
   keystroke. It is gated on `ADMIN_ALLOW_MUTATIONS` *and* a preflight on
@@ -469,4 +925,4 @@ Being honest about the edges is part of the model:
   because the two are one word apart in YAML and opposite in effect; a policy
   whose `podSelector` matches nothing reports `selected_pod_count: 0` and is
   flagged as inert, while a pod listing we could not make reports `null`. See
-  §8.1 of [`api-contract.md`](api-contract.md).
+  §8.3 of [`api-contract.md`](api-contract.md).

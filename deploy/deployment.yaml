@@ -91,6 +91,44 @@ spec:
             # values is a privileged READ, audited whichever way this is set.
             - name: SECRET_REVEAL_ENABLED
               value: "false"
+            # §14. OFF, and this is the third gate rather than a detail of the
+            # first: an install creates a cluster-scoped ClusterRole that can
+            # read every Secret in the cluster — what any ingress controller
+            # needs to terminate TLS, and what RBAC cannot narrow — and puts a
+            # process on this cluster's ingress path. The install PLAN stays
+            # readable with this off, because deciding whether to turn it on
+            # means reading what it would create. See adr-0004-shipped-router.md.
+            - name: ADMIN_ROUTER_MANAGE_ENABLED
+              value: "false"
+
+            # §16. OFF. The gate is not about what this console creates — one
+            # Subscription, through the ordinary funnel — but about what OLM
+            # does with it afterwards: it installs software nobody here
+            # reviewed, under whatever RBAC that operator's
+            # ClusterServiceVersion asks for, granted by OLM rather than by the
+            # caller. Browsing the catalog and reading the rendered Subscription
+            # stay available with this off, because deciding whether to turn it
+            # on means reading what it would write.
+            # See adr-0005-operator-portal.md.
+            - name: ADMIN_PORTAL_INSTALL_ENABLED
+              value: "false"
+
+            # §15. OFF, and this gate is about what the feature REMOVES rather
+            # than what it creates. A CLI pod is an ordinary pod; the shell into
+            # it is not an ordinary write. Everything typed there bypasses the
+            # funnel — no preflight naming the permission, no dry run, no diff,
+            # and no audit record of what changed. The trail can say a session
+            # was opened, by whom and for how long; it cannot say what was run.
+            #
+            # Turning this on is therefore also a decision about
+            # ADMIN_CLI_SERVICE_ACCOUNT below, which is the only thing bounding
+            # what those sessions reach. Leaving that at `default` is the safe
+            # pairing: kubectl in the pod is refused everything until somebody
+            # binds a Role to it. See docs/safety-model.md §9.2.
+            - name: ADMIN_CLI_ENABLED
+              value: "false"
+            - name: ADMIN_CLI_SERVICE_ACCOUNT
+              value: "default"
 
             # ── Console identity ──────────────────────────────────────────
             # ENABLED — the k8boss-admin-auth Secret must exist first, or the

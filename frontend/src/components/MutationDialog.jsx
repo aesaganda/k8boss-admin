@@ -111,8 +111,16 @@ const ERROR_FRAMING = {
   },
   mutations_disabled: {
     variant: 'warning',
-    title: 'This console is running read-only',
-    lead: 'The write was refused before the cluster was touched. Dry runs remain available.',
+    // Deliberately neutral. This code covers two different refusals: the global
+    // read-only switch, and a per-feature gate such as the one on §5.5's node
+    // debug pods. The old copy asserted both "this console is running read-only"
+    // and "dry runs remain available", and neither is true of a feature gate —
+    // the console writes perfectly well, and §5.5 refuses the projection too.
+    // The error's own `message` and `hint` are rendered directly below this and
+    // always name the specific switch, so nothing is lost by the framing
+    // declining to guess which case it is looking at.
+    title: 'This deployment does not permit this write',
+    lead: 'It was refused before the cluster was touched.',
   },
   conflict: {
     variant: 'warning',
@@ -135,6 +143,17 @@ const ERROR_FRAMING = {
     // The distinction the client draws between its two unreachables matters to
     // an operator deciding which component to go and look at.
     lead: 'The console is up; it could not reach this cluster’s API server. Whether the write landed is unknown.',
+  },
+  internal_error: {
+    variant: 'danger',
+    title: 'The console failed while handling this',
+    // The one thing an operator needs here is the thing the code cannot tell
+    // them. `cluster_unreachable` at least says the request never arrived;
+    // this one means the console broke somewhere between sending and
+    // answering, so the write may have landed and may not have. Saying
+    // "nothing was written" would be a guess, and it is the guess that gets a
+    // change applied twice.
+    lead: 'Whether the cluster changed is unknown — check the object before retrying. The audit trail records every write that reached the cluster, including the ones that failed.',
   },
   network_unreachable: {
     variant: 'danger',

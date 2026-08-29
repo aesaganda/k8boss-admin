@@ -1,5 +1,5 @@
 """
-Network policy endpoints (§8.2) — the two questions a listing cannot answer.
+Network policy endpoints (§8.4) — the two questions a listing cannot answer.
 
 Thin, like every router here: it parses the URL and delegates to
 :mod:`app.services.network`, which owns the rows and their nulls.
@@ -44,7 +44,7 @@ def get_policy(
     namespace: str = Path(..., description="The policy's namespace."),
     name: str = Path(..., description="The policy's name."),
 ) -> dict[str, Any]:
-    """One NetworkPolicy, plus the pods it selects (§8.2).
+    """One NetworkPolicy, plus the pods it selects (§8.4).
 
     ``selected_pods`` is ``null``, not ``[]``, when the pod listing failed or a
     selector could not be evaluated — with the reason in ``unavailable[]`` and
@@ -65,7 +65,7 @@ def get_isolation(
         ),
     ),
 ) -> dict[str, Any]:
-    """Every pod, and which NetworkPolicies select it (§8.2).
+    """Every pod, and which NetworkPolicies select it (§8.4).
 
     The rows are pods, not policies, because the question this endpoint exists
     for is which pods **nothing** selects — and a pod nothing selects appears on

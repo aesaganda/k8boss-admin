@@ -36,6 +36,7 @@ import DrainDialog from '../components/DrainDialog';
 import { nodes as nodesApi } from '../api/client';
 import { useCluster } from '../contexts/ClusterContext';
 import { formatBytes, formatCpu } from '../utils/format';
+import NodeDebugPanel from '../components/NodeDebugPanel';
 import { useAsync, useGates } from './_data';
 import { ActionButton, ChipList, Muted, NoClusterState, PodConsoleModal, menuAction } from './_parts';
 
@@ -44,6 +45,17 @@ const CHECKS = [
   { id: 'drain', verb: 'create', group: 'core', resource: 'pods', subresource: 'eviction' },
   { id: 'logs', verb: 'get', group: 'core', resource: 'pods', subresource: 'log' },
   { id: 'exec', verb: 'create', group: 'core', resource: 'pods', subresource: 'exec' },
+  // §7.4. `patch`, matching what `mutate` preflights — a check that named a
+  // different verb would report a permission nobody is about to exercise. The
+  // subresource is named separately because RBAC does: a ServiceAccount can hold
+  // `patch pods` and not this. Appended rather than spliced in, because
+  // `usePreflight` pairs results to checks strictly by index (§9).
+  { id: 'debug', verb: 'patch', group: 'core', resource: 'pods', subresource: 'ephemeralcontainers' },
+  // §5.5 node debug pods. Plain `create pods` — the privilege in this action is
+  // in the pod's *shape*, not in a subresource, which is exactly why RBAC alone
+  // cannot express it and the deployment gate exists. Appended, not spliced:
+  // `usePreflight` pairs results to checks by index (§9).
+  { id: 'nodeDebug', verb: 'create', group: 'core', resource: 'pods' },
 ];
 
 /** `9.2 cores` or the word for "we do not know", never a fabricated zero. */
@@ -281,11 +293,25 @@ export default function NodeDetail() {
               setPodConsole({ pod: row, tab: 'logs' }),
             ),
             menuAction('Open terminal', gate('exec'), () => setPodConsole({ pod: row, tab: 'exec' })),
+          // §7.4. Its own entry rather than a step inside the terminal: the pod
+          // this is for is the one whose image has no shell, so the operator
+          // reaching for it has already found that the terminal cannot help.
+          menuAction('Debug…', gate('debug'), () => setPodConsole({ pod: row, tab: 'debug' })),
           ]}
           emptyTitle="No pods are scheduled here"
           emptyDescription="The pod listing succeeded and returned nothing, so this node really is empty."
         />
       )}
+
+      <SectionHeader
+        title="Debug"
+        description={
+          'A pod on this machine with its filesystem mounted, for when the node itself is what needs ' +
+          'looking at. The most privileged thing this console creates — and the one it will not ' +
+          'clean up for you.'
+        }
+      />
+      <NodeDebugPanel node={name} gate={gate('nodeDebug')} execGate={gate('exec')} />
 
       {cordonOpen && (
         <CordonDialog
@@ -319,6 +345,7 @@ export default function NodeDetail() {
           pod={podConsole.pod}
           initialTab={podConsole.tab}
           execGate={gate('exec')}
+          debugGate={gate('debug')}
           onClose={() => setPodConsole(null)}
         />
       )}
