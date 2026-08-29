@@ -1605,6 +1605,144 @@ export const FIXTURES = {
     enabledDetail: 'This deployment permits subscribing to catalog operators.',
   },
 
+  /**
+   * §8.3 NetworkPolicy rows, chosen to be the pair that must never render alike:
+   * `deny-all` governs ingress with no rules (a total block) and does not govern
+   * egress at all (no restriction whatsoever), while `allow-metrics` shows the
+   * union rule that makes a whole direction wide open.
+   */
+  networkPolicies: {
+    items: [
+      {
+        name: 'default-deny-ingress',
+        namespace: 'prod',
+        pod_selector: { matchLabels: {}, matchExpressions: [] },
+        selects_all_pods: true,
+        policy_types: ['Ingress'],
+        policy_types_source: 'declared',
+        ingress: { governed: true, rule_count: 0, effect: 'deny_all', rules: [] },
+        egress: { governed: false, rule_count: null, effect: null, rules: [] },
+        age_seconds: 604800,
+      },
+      {
+        name: 'allow-metrics',
+        namespace: 'prod',
+        pod_selector: { matchLabels: { app: 'checkout' }, matchExpressions: [] },
+        selects_all_pods: false,
+        policy_types: ['Ingress', 'Egress'],
+        policy_types_source: 'declared',
+        ingress: {
+          governed: true,
+          rule_count: 1,
+          effect: 'restricted',
+          rules: [
+            {
+              peers: [
+                {
+                  type: 'namespace',
+                  podSelector: null,
+                  namespaceSelector: { matchLabels: { name: 'monitoring' }, matchExpressions: [] },
+                  cidr: null,
+                  except: [],
+                },
+              ],
+              allows_all_peers: false,
+              ports: [{ protocol: 'TCP', port: 9090, endPort: null }],
+              allows_all_ports: false,
+            },
+          ],
+        },
+        egress: {
+          governed: true,
+          rule_count: 1,
+          effect: 'allow_all',
+          rules: [{ peers: [], allows_all_peers: true, ports: [], allows_all_ports: true }],
+        },
+        age_seconds: 3600,
+      },
+    ],
+    continue: null,
+    remaining: null,
+    partial: false,
+    unavailable: [],
+  },
+
+  /**
+   * §8.4 pod isolation. Three rows, one per state the column has: covered,
+   * unrestricted, and unknown — the third is what an unevaluable selector
+   * produces, and it must render as an em dash rather than as "unrestricted".
+   */
+  isolation: {
+    items: [
+      {
+        name: 'checkout-7d9f8b6c4-hk2xv',
+        namespace: 'prod',
+        phase: 'Running',
+        phase_detail: null,
+        ready: '1/1',
+        restarts: 0,
+        node: 'ip-10-0-1-4',
+        labels: { app: 'checkout' },
+        host_network: false,
+        policies: ['default-deny-ingress', 'allow-metrics'],
+        ingress: { isolated: true, effect: 'restricted', policies: ['default-deny-ingress', 'allow-metrics'] },
+        egress: { isolated: true, effect: 'allow_all', policies: ['allow-metrics'] },
+        age_seconds: 86400,
+      },
+      {
+        name: 'legacy-batch-0',
+        namespace: 'prod',
+        phase: 'Running',
+        phase_detail: null,
+        ready: '1/1',
+        restarts: 0,
+        node: 'ip-10-0-1-5',
+        labels: { app: 'legacy' },
+        host_network: true,
+        policies: [],
+        ingress: { isolated: false, effect: null, policies: [] },
+        egress: { isolated: false, effect: null, policies: [] },
+        age_seconds: 7200,
+      },
+      {
+        name: 'mystery-0',
+        namespace: 'prod',
+        phase: 'Running',
+        phase_detail: null,
+        ready: '1/1',
+        restarts: 0,
+        node: 'ip-10-0-1-6',
+        labels: {},
+        host_network: false,
+        policies: [],
+        ingress: { isolated: null, effect: null, policies: [] },
+        egress: { isolated: null, effect: null, policies: [] },
+        age_seconds: 60,
+      },
+    ],
+    continue: null,
+    remaining: null,
+    partial: true,
+    unavailable: [
+      {
+        group: 'networking.k8s.io',
+        resource: 'networkpolicies',
+        namespace: 'prod',
+        reason: 'unsupported',
+        detail:
+          'A pod selector on this cluster uses a matchExpressions operator this console cannot evaluate.',
+      },
+    ],
+    namespace: null,
+    policy_count: 2,
+    summary: {
+      pod_count: 3,
+      ingress: { isolated: 1, unrestricted: 1, unknown: 1 },
+      egress: { isolated: 1, unrestricted: 1, unknown: 1 },
+      host_network: 1,
+    },
+  },
+
   emptyList: { items: [], continue: null, remaining: null, partial: false, unavailable: [] },
 
   // §13. What the exposure dialog's Service picker reads. `checkout` is
@@ -1663,6 +1801,8 @@ export async function mockApi(
     yaml = null,
     workloads = null,
     pods = null,
+    networkPolicies = null,
+    isolation = null,
     podDetail = null,
     podEnvironment = null,
     podMetrics = null,
@@ -1827,6 +1967,10 @@ export async function mockApi(
       return json({ ...base, name });
     }
     if (path === '/resources/core/v1/pods') return json(pods ?? FIXTURES.pods);
+    if (path === '/resources/networking.k8s.io/v1/networkpolicies') {
+      return json(networkPolicies ?? FIXTURES.networkPolicies);
+    }
+    if (path === '/network/isolation') return json(isolation ?? FIXTURES.isolation);
     if (path === '/resources/core/v1/services') return json(services ?? FIXTURES.services);
     // §15. The CLI pod, and the shell into it — the terminal itself is §7's
     // exec websocket, which no route here answers because Playwright never

@@ -6,7 +6,10 @@ write, shows the operator a diff, waits for a confirmation, and records what
 happened — including what failed.
 
 **What it is not.** Not a monitoring system, not a GitOps controller, and not a
-security-posture product. It holds no cluster state: every page is a live read.
+security-posture product — §8.3 correlates NetworkPolicies with the pods they
+select, which is two listings subtracted, and it never claims a policy is
+*enforced*: that belongs to the CNI plugin and no API here reports on it. It
+holds no cluster state: every page is a live read.
 
 Not a deployment engine. Two things qualify that, and they are different acts —
 do not merge them in your head or in a docstring.
@@ -42,7 +45,7 @@ of [K8Boss](https://github.com/aesaganda/k8boss) and shares no code with it —
 | `backend/app/api/` | FastAPI routers. Thin: parse, call, envelope | Logic belongs below this layer |
 | `backend/app/k8s/` | Per-request cluster context, auth strategy, client manager | `docs/architecture.md` §2 |
 | `backend/app/resources/` | Catalog (discovery), reader (generic list/get/YAML), shaping (rows), envelope | `docs/api-contract.md` §1.2, §4, §8 |
-| `backend/app/services/` | Typed read models: the unified workload row, node rows, the unified route row, the operator catalog (`portal.py`), one pod's detail, environment and usage (`pods.py`) | `docs/api-contract.md` §5, §6, §7.5–§7.7, §13, §16 |
+| `backend/app/services/` | Typed read models: the unified workload row, node rows, the unified route row, the operator catalog (`portal.py`), one pod's detail, environment and usage (`pods.py`), network policy correlation (`network.py`) | `docs/api-contract.md` §5, §6, §7.5–§7.7, §8.4, §13, §16 |
 | `backend/app/admin/` | **Every write.** The funnel, preflight, diff, apply, scale, rollout, node drain, debug containers, route compilation, the shipped router, the one operator Subscription (`portal.py`) | `docs/safety-model.md` |
 | `backend/app/audit/` | Append-only, hash-chained trail: `record()`, `query()`, `verify()`, export | `docs/api-contract.md` §10 |
 | `backend/app/identity/` | Local password hashing, opaque sessions, LDAP search-and-bind, OIDC single sign-on, sign-in throttling | `docs/api-contract.md` §12 |

@@ -57,6 +57,15 @@ const STATES = {
   warning: { color: 'orange', label: 'Warning' },
   false: { color: 'red', label: 'False' },
 
+  // §8 NetworkPolicy directions. `deny_all` is purple rather than red because a
+  // policy that denies everything is a working control, not a fault — red here
+  // would train an operator to treat their own segmentation as an error. The
+  // state NOT in this table is "not governed": that is a fact, and grey in this
+  // vocabulary means we could not find out, so the pages render it as text.
+  deny_all: { color: 'purple', label: 'Deny all' },
+  allow_all: { color: 'orange', label: 'Allow all' },
+  restricted: { color: 'blue', label: 'Restricted' },
+
   // Deliberately not running
   suspended: { color: 'purple', label: 'Suspended' },
   cordoned: { color: 'purple', label: 'Cordoned' },

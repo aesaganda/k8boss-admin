@@ -598,6 +598,26 @@ export const events = {
   list: (params) => api.get('/events', params),
 };
 
+/* ── §8.4 Network policy ────────────────────────────────────────────────── */
+
+/**
+ * The two reads §4's listing cannot make, because both need a pod listing.
+ *
+ * There is deliberately no `list` here. NetworkPolicies are listed through
+ * `resources.list('networking.k8s.io', 'v1', 'networkpolicies')`, which already
+ * returns the typed §8.3 row — the shaper is registered on the backend, so the
+ * generic path carries the paging, the selectors and the `continue` cursor for
+ * free. A second listing in this file would be a second shaping of the same
+ * object, free to drift from the first and impossible to notice from outside.
+ */
+export const network = {
+  policy: (namespace, name) =>
+    api.get(`/network/policies/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}`),
+
+  /** params: { namespace } — omit for every pod in the cluster. */
+  isolation: (params) => api.get('/network/isolation', params),
+};
+
 /* ── §13 Routes — exposing a Service to the outside world ───────────────── */
 
 const routePath = (backend, namespace, name) =>
