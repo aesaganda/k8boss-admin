@@ -35,6 +35,7 @@ from app.errors import from_api_exception
 from app.k8s.client import get_core_v1
 from app.resources import shaping
 from app.resources.envelope import collect, envelope
+from app.resources.shaping import namespace_row
 
 logger = logging.getLogger(__name__)
 
@@ -83,39 +84,6 @@ def _pod_counts() -> dict[str, int]:
         key = str(namespace)
         counts[key] = counts.get(key, 0) + 1
     return counts
-
-
-def namespace_row(namespace: Any, *, pod_count: int | None) -> dict[str, Any]:
-    """The §5 namespace row.
-
-    ``status`` is ``status.phase`` — ``Active`` or ``Terminating`` — with one
-    correction. A namespace whose deletion has been accepted carries a
-    ``deletionTimestamp`` and its phase is set to ``Terminating`` by the
-    namespace controller, but the two are written by different actors and there
-    is a window where the timestamp is set and the phase still says ``Active``.
-    A namespace reported as ``Active`` while it is being torn down is the row an
-    operator deploys into, and then spends an afternoon working out why the
-    Deployment they created disappeared. The timestamp wins.
-
-    ``labels`` and ``annotations`` are always dicts, never ``None``, so the
-    frontend can call ``Object.entries`` on them without a guard.
-    """
-    phase = shaping.get_field(namespace, "status", "phase")
-    deletion = shaping.get_field(namespace, "metadata", "deletionTimestamp")
-    status = "Terminating" if deletion else phase
-
-    created = shaping.get_field(namespace, "metadata", "creationTimestamp")
-    return {
-        "name": shaping.get_field(namespace, "metadata", "name"),
-        "status": status,
-        "labels": dict(shaping.get_field(namespace, "metadata", "labels", default={}) or {}),
-        "annotations": dict(
-            shaping.get_field(namespace, "metadata", "annotations", default={}) or {}
-        ),
-        "age_seconds": shaping.age_seconds(created),
-        "pod_count": pod_count,
-        "creationTimestamp": shaping.rfc3339(created),
-    }
 
 
 @router.get("/namespaces")

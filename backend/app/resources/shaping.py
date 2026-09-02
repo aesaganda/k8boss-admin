@@ -1178,6 +1178,173 @@ def clusterrolebinding_row(obj: Any) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- #
+# Namespaces and what governs them (§5, §17)
+# --------------------------------------------------------------------------- #
+
+#: The Pod Security admission label prefix, and the three modes it takes.
+POD_SECURITY_PREFIX = "pod-security.kubernetes.io/"
+POD_SECURITY_MODES = ("enforce", "audit", "warn")
+POD_SECURITY_LEVELS = ("privileged", "baseline", "restricted")
+
+
+def namespace_row(namespace: Any, *, pod_count: int | None) -> dict[str, Any]:
+    """The §5 namespace row.
+
+    ``status`` is ``status.phase`` — ``Active`` or ``Terminating`` — with one
+    correction. A namespace whose deletion has been accepted carries a
+    ``deletionTimestamp`` and its phase is set to ``Terminating`` by the
+    namespace controller, but the two are written by different actors and there
+    is a window where the timestamp is set and the phase still says ``Active``.
+    A namespace reported as ``Active`` while it is being torn down is the row an
+    operator deploys into, and then spends an afternoon working out why the
+    Deployment they created disappeared. The timestamp wins.
+
+    ``labels`` and ``annotations`` are always dicts, never ``None``, so the
+    frontend can call ``Object.entries`` on them without a guard.
+
+    ``pod_count`` is passed in rather than read here because a shaper is pure:
+    the caller owns the pod listing, its failure, and the ``unavailable`` entry
+    that failure produces. ``None`` means "could not count", never zero.
+    """
+    phase = get_field(namespace, "status", "phase")
+    deletion = get_field(namespace, "metadata", "deletionTimestamp")
+    status = "Terminating" if deletion else phase
+
+    created = get_field(namespace, "metadata", "creationTimestamp")
+    return {
+        "name": get_field(namespace, "metadata", "name"),
+        "status": status,
+        "labels": dict(get_field(namespace, "metadata", "labels", default={}) or {}),
+        "annotations": dict(
+            get_field(namespace, "metadata", "annotations", default={}) or {}
+        ),
+        "age_seconds": age_seconds(created),
+        "pod_count": pod_count,
+        "creationTimestamp": rfc3339(created),
+    }
+
+
+def pod_security_row(labels: Any) -> dict[str, Any]:
+    """§17 — the Pod Security admission posture a namespace declares.
+
+    Read off the namespace's labels and nothing else, which is the honest
+    limit of what an API client can know: Pod Security admission also takes a
+    cluster-wide default from the API server's ``AdmissionConfiguration`` file,
+    and no API serves that file. So a mode whose label is absent is ``None`` —
+    "this namespace declares nothing for this mode, and whatever the cluster
+    defaults to applies". It is **not** ``privileged``: a namespace with no
+    labels on a cluster whose default is ``restricted`` is restricted, and
+    reporting it as unrestricted is the kind of confident wrong answer that gets
+    a privileged workload deployed into it on the strength of a green cell.
+
+    ``labelled`` is true when any of the three mode labels is present, so the
+    UI can distinguish "declares nothing" from "declares privileged".
+
+    A label carrying a value outside the three levels is returned verbatim
+    rather than dropped: the admission plugin will refuse every pod in that
+    namespace with a message about the label, and an operator reading a blank
+    cell here would not know why.
+    """
+    labels = dict(labels or {})
+    row: dict[str, Any] = {}
+    for mode in POD_SECURITY_MODES:
+        level = labels.get(POD_SECURITY_PREFIX + mode)
+        version = labels.get(POD_SECURITY_PREFIX + mode + "-version")
+        row[mode] = str(level) if level is not None else None
+        row[mode + "Version"] = str(version) if version is not None else None
+    row["labelled"] = any(row[mode] is not None for mode in POD_SECURITY_MODES)
+    return row
+
+
+def resourcequota_row(obj: Any) -> dict[str, Any]:
+    """§17 ResourceQuota row — every hard limit beside what is used against it.
+
+    ``used`` is ``None`` when ``status.used`` carries no entry for the resource,
+    and that happens on every cluster: the quota controller writes ``status``
+    asynchronously after the object is created, so a ResourceQuota that is
+    seconds old has ``spec.hard`` and no ``status`` at all. Reporting that as
+    ``0`` would say "nothing in this namespace counts against the quota", which
+    is exactly the wrong thing to tell somebody deciding whether the next
+    Deployment will be admitted. The row carries the raw strings the API server
+    wrote as well as parsed numbers, because ``1500m`` and ``1.5`` are the same
+    quantity and a diff of the two strings would say otherwise.
+
+    ``exhausted`` is ``True`` when both sides parsed and used has reached hard,
+    ``False`` when both parsed and it has not, and ``None`` whenever either
+    side is unknown.
+    """
+    hard = dict(get_field(obj, "spec", "hard", default={}) or {})
+    used = dict(get_field(obj, "status", "used", default={}) or {})
+    resources = []
+    for resource in sorted(hard):
+        hard_raw = hard[resource]
+        used_raw = used.get(resource)
+        hard_value = parse_quantity(hard_raw)
+        used_value = parse_quantity(used_raw) if used_raw is not None else None
+        exhausted: bool | None = None
+        if hard_value is not None and used_value is not None:
+            exhausted = used_value >= hard_value
+        resources.append({
+            "resource": resource,
+            "hard": None if hard_raw is None else str(hard_raw),
+            "used": None if used_raw is None else str(used_raw),
+            "hard_value": hard_value,
+            "used_value": used_value,
+            "exhausted": exhausted,
+        })
+    scope_selector = get_field(obj, "spec", "scopeSelector", default=None)
+    return {
+        "name": get_field(obj, "metadata", "name"),
+        "namespace": get_field(obj, "metadata", "namespace"),
+        "scopes": [str(s) for s in (get_field(obj, "spec", "scopes", default=[]) or [])],
+        # A scope selector narrows which pods the quota counts, by priority
+        # class or other match expressions this console does not evaluate.
+        # Reported as a flag so the UI can say the numbers cover a subset.
+        "scoped": scope_selector is not None,
+        "resources": resources,
+        # The status was written at all. False means the controller has not
+        # reconciled this object yet and every `used` above is None for that
+        # reason rather than because the resource is absent from the quota.
+        "reconciled": get_field(obj, "status", "hard", default=None) is not None,
+        "age_seconds": age_seconds(get_field(obj, "metadata", "creationTimestamp")),
+    }
+
+
+def _quantity_map(value: Any) -> dict[str, str]:
+    """A ``{resource: quantity}`` map with every quantity as its wire string."""
+    return {str(k): str(v) for k, v in dict(value or {}).items()}
+
+
+def limitrange_row(obj: Any) -> dict[str, Any]:
+    """§17 LimitRange row.
+
+    Each ``limits[]`` entry is one ``type`` (``Container``, ``Pod``,
+    ``PersistentVolumeClaim``) with its five maps rendered as wire strings, empty
+    when the entry does not set them. Empty maps, not ``None``: a LimitRange
+    item that sets no ``default`` genuinely defaults nothing, and there is no
+    "could not read" case inside an object that has already been read.
+    """
+    limits = []
+    for item in get_field(obj, "spec", "limits", default=[]) or []:
+        limits.append({
+            "type": get_field(item, "type"),
+            "max": _quantity_map(get_field(item, "max", default={})),
+            "min": _quantity_map(get_field(item, "min", default={})),
+            "default": _quantity_map(get_field(item, "default", default={})),
+            "defaultRequest": _quantity_map(get_field(item, "defaultRequest", default={})),
+            "maxLimitRequestRatio": _quantity_map(
+                get_field(item, "maxLimitRequestRatio", default={})
+            ),
+        })
+    return {
+        "name": get_field(obj, "metadata", "name"),
+        "namespace": get_field(obj, "metadata", "namespace"),
+        "limits": limits,
+        "age_seconds": age_seconds(get_field(obj, "metadata", "creationTimestamp")),
+    }
+
+
+# --------------------------------------------------------------------------- #
 # Registry
 # --------------------------------------------------------------------------- #
 
@@ -1219,6 +1386,10 @@ __all__ = [
     "age_seconds",
     "clusterrole_row",
     "clusterrolebinding_row",
+    "limitrange_row",
+    "namespace_row",
+    "pod_security_row",
+    "resourcequota_row",
     "configmap_row",
     "container_state",
     "get_field",

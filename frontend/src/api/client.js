@@ -734,6 +734,47 @@ export const portal = {
   subscribe: (body) => api.post('/portal/subscriptions', body),
 };
 
+/* ── §17 Projects ───────────────────────────────────────────────────────── */
+
+export const projects = {
+  /**
+   * One namespace with what governs it: quota usage, limit ranges, the Pod
+   * Security posture its labels declare, role bindings and network policies.
+   *
+   * Every section is a tri-state: `quotas: null` is a listing that did not
+   * answer and must never render as "no quota" — that sends an operator to add
+   * a second one over the quota they could not see. `podSecurity.enforce: null`
+   * is "this namespace declares nothing", not "privileged": the cluster default
+   * lives in a file no API serves.
+   */
+  get: (name) => api.get(`/projects/${encodeURIComponent(name)}`),
+
+  /**
+   * The objects a project would create, and what creating them means. **Writes
+   * nothing** and is ungated, like §14's and §16's plans.
+   *
+   * `retry: true` for the reason `portal.plan` sets it: a pure plan replays
+   * for free, and a transient failure would otherwise cost the operator the
+   * form.
+   *
+   * body: { name, displayName, description, podSecurity, quota, limits,
+   *         admins, adminRole, isolateIngress }
+   */
+  plan: (body) => request('/projects/plan', { method: 'POST', body, retry: true }),
+
+  /**
+   * Create the namespace and what governs it, object by object through the
+   * funnel. `created: true` means every object landed on a real write and is
+   * never reported on a dry run; a partial create says which object failed and
+   * what grant it needed. On a dry run only the Namespace is projected by the
+   * API server — the objects inside it carry `projection: "rendered"` because
+   * the API server cannot project into a namespace that does not exist yet.
+   *
+   * body: the plan body + { acknowledgeConsequences, dryRun }
+   */
+  create: (body) => api.post('/projects', body),
+};
+
 /* ── §9 Access preflight ────────────────────────────────────────────────── */
 
 // `group` is translated to its wire spelling only when the caller supplied one.
