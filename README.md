@@ -342,6 +342,13 @@ version being that there is no undo for a deleted StatefulSet.
     stated calmly, not a red panel — and an unmeasured pod is drawn as unknown,
     never at zero, because a pod at zero cores reads as idle and idle is what
     gets something turned off.
+* **Projects** — one namespace read with what governs it, the way OpenShift's
+  project page shows it on vanilla objects: quota usage beside hard limits, limit
+  ranges, the Pod Security level its labels declare, role bindings and a network
+  policy summary. And `New project`, which is `oc new-project` for vanilla
+  Kubernetes: a namespace created together with a quota, a limit range, a
+  binding and, if asked, network isolation — five ordinary writes through the
+  funnel, each with its own diff and audit row. See §17.
 * **Namespaces, Events, Network, Config, Storage, Access** — Services, Ingresses,
   ConfigMaps, Secrets (key names and byte lengths only), PVCs, PVs,
   StorageClasses, ServiceAccounts, Roles and Bindings.
@@ -536,6 +543,40 @@ have to acknowledge by code before the write is accepted, the same shape as
 `Installed` is tri-state: a catalog row whose Subscription listing failed is
 `Unknown`, never "not installed" — which is how you would end up subscribing
 twice to an operator you already run.
+
+### Projects — a namespace and what governs it
+
+`oc new-project` on OpenShift hands a team a namespace that is already bounded,
+already survivable, already governed and already theirs. `kubectl create
+namespace` hands them a namespace, and the quota arrives after the first noisy
+neighbour. The **Namespaces** page's `New project` is the OpenShift act on
+vanilla objects: a Namespace with its Pod Security labels, a ResourceQuota, a
+LimitRange, a RoleBinding to `admin`/`edit`/`view` for the subject you name and,
+optionally, an `allow-same-namespace` NetworkPolicy — five ordinary creates
+through the same preflight, dry run, diff and audit row as every other write,
+each reported on its own. No template is stored anywhere; the form is the
+template, and nothing reconciles afterwards.
+[`docs/adr-0006-projects.md`](docs/adr-0006-projects.md) records why that is not
+a second shipped bundle.
+
+Two things the dialog is honest about that `kubectl apply` is not. The API
+server cannot project a create into a namespace that does not exist yet, so on
+the preview only the Namespace carries the API server's own diff; the four
+objects inside it are shown as the console's rendering, labelled as such, each
+with a preflight of the grant the real write will need. And every quiet failure
+is a consequence you acknowledge by name before the write is accepted: a quota
+with no LimitRange behind it refuses every pod that does not state its own
+requests, an enforced Pod Security level accepts a violating Deployment and
+never gives it a pod, and a namespace with no quota is what vanilla gives you by
+default. The console never adopts an existing namespace — a name that exists is
+refused before anything is written — and a partial create is reported as partial,
+with nothing rolled back.
+
+The namespace's own page (click its name) is the read half: every section is a
+tri-state, so a listing that was refused is a failure panel rather than an empty
+one, a quota's `used` is an em dash until the controller has written it, and a
+namespace declaring no Pod Security label is reported as declaring nothing —
+never as `privileged`, because the cluster default lives in a file no API serves.
 
 ## Architecture
 
@@ -766,6 +807,7 @@ Before enabling the optional Ingress, either enable local/LDAP auth with the
 | [`docs/rbac.md`](docs/rbac.md) | Every permission, by feature, with its degradation |
 | [`docs/adr-0001-dry-run-first.md`](docs/adr-0001-dry-run-first.md) | Why dry-run-then-confirm rather than optimistic-with-undo |
 | [`docs/adr-0002-lineage.md`](docs/adr-0002-lineage.md) | What came from K8Boss, what did not, why they stay separate |
+| [`docs/adr-0006-projects.md`](docs/adr-0006-projects.md) | Why a project is five ordinary writes and not a template engine, and where that line is |
 | [`CLAUDE.md`](CLAUDE.md) | Working agreements for anyone (or anything) changing this repository |
 
 ## License

@@ -532,7 +532,16 @@ export function MutationDialog({
               </Alert>
             )}
 
-            {phase !== 'done' && (
+            {/* Only when the response carries a diff of its own. A multi-object
+                response — the router install (§14), a project (§17) — carries
+                one diff per object and renders them through `renderExtra`, and
+                for a project some of those are the console's own rendering
+                rather than the API server's projection. Printing this sentence
+                over an empty block above them would make §0.3's promise on the
+                wrapper's behalf about diffs the wrapper has labelled otherwise.
+                `hasVerdict` above is unaffected: an absent diff still never
+                reads as "nothing would change". */}
+            {phase !== 'done' && result?.diff != null && (
               <div className="admin-confirm__diff">
                 <p className="admin-confirm__diff-label">
                   This is the difference the API server projected for this write. Nothing has been applied

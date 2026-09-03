@@ -61,6 +61,7 @@ const Overview = lazyPage('Overview', () => import('./pages/Overview'));
 const Nodes = lazyPage('Nodes', () => import('./pages/Nodes'));
 const NodeDetail = lazyPage('NodeDetail', () => import('./pages/NodeDetail'));
 const Namespaces = lazyPage('Namespaces', () => import('./pages/Namespaces'));
+const NamespaceDetail = lazyPage('NamespaceDetail', () => import('./pages/NamespaceDetail'));
 const Workloads = lazyPage('Workloads', () => import('./pages/Workloads'));
 const WorkloadDetail = lazyPage('WorkloadDetail', () => import('./pages/WorkloadDetail'));
 const Pods = lazyPage('Pods', () => import('./pages/Pods'));
@@ -101,6 +102,11 @@ function ConsoleRoutes() {
               <Route path="nodes/:name" element={<NodeDetail />} />
 
               <Route path="namespaces" element={<Namespaces />} />
+              {/* §17. One namespace with what governs it — quota usage, limit
+                  ranges, Pod Security level, role bindings, network policies.
+                  Not a Workloads page filtered by namespace: that list has one
+                  home, and this page shows the objects no other page does. */}
+              <Route path="namespaces/:name" element={<NamespaceDetail />} />
 
               <Route path="workloads" element={<Workloads />} />
               <Route

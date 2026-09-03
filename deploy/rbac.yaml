@@ -510,6 +510,23 @@ rules:
     resources: ["ingresses", "networkpolicies"]
     verbs: ["create", "update", "patch", "delete"]
 
+  # §17 projects — a namespace created together with what governs it. Five
+  # creates, each preflighted on its own: `namespaces` (granted for §14 below),
+  # `networkpolicies` (above), and these three. `rolebindings` is the one to
+  # think about: it lets the console bind a subject the operator names to the
+  # built-in `admin`, `edit` or `view` ClusterRole inside the new namespace, and
+  # the API server's escalation prevention refuses that whenever this
+  # ServiceAccount does not itself hold what the role aggregates — unless it
+  # holds `bind` on clusterroles, which the §14 block below grants. There is no
+  # `update` or `delete` here on purpose: a project is created into a namespace
+  # that does not exist and the console never adopts or removes one.
+  - apiGroups: [""]
+    resources: ["resourcequotas", "limitranges"]
+    verbs: ["create"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["rolebindings"]
+    verbs: ["create"]
+
   # §13 writes. Three separate rules because they are three separate RBAC
   # resources, and an install may reasonably want one without the others: an
   # account allowed to write Ingresses is very often not allowed to write

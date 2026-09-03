@@ -1549,6 +1549,89 @@ export const FIXTURES = {
    * replace `consequences`, because the acknowledgement handshake is keyed on
    * the codes and nothing else.
    */
+  /**
+   * §17 `GET /projects/{name}` — one namespace with what governs it.
+   *
+   * Three deliberate holes, because the page is about the difference between
+   * them: `roleBindings: null` is a listing that was refused (with the entry
+   * in `unavailable[]`), `requests.memory`'s `used: null` is a quota the
+   * controller has not recorded usage for, and `pods` is `exhausted: true` —
+   * the row that explains why the next Deployment stays at 0 of N.
+   */
+  project: {
+    name: 'prod',
+    status: 'Active',
+    labels: { 'pod-security.kubernetes.io/enforce': 'restricted', team: 'payments' },
+    annotations: { 'openshift.io/display-name': 'Production' },
+    age_seconds: 8123456,
+    pod_count: 62,
+    creationTimestamp: '2026-01-04T08:00:00Z',
+    displayName: 'Production',
+    description: null,
+    podSecurity: {
+      enforce: 'restricted',
+      enforceVersion: null,
+      audit: null,
+      auditVersion: null,
+      warn: 'baseline',
+      warnVersion: 'v1.31',
+      labelled: true,
+    },
+    quotas: [
+      {
+        name: 'project-quota',
+        namespace: 'prod',
+        scopes: [],
+        scoped: false,
+        reconciled: true,
+        age_seconds: 8123000,
+        resources: [
+          { resource: 'pods', hard: '20', used: '20', hard_value: 20, used_value: 20, exhausted: true },
+          { resource: 'requests.cpu', hard: '4', used: '1500m', hard_value: 4, used_value: 1.5, exhausted: false },
+          // Null, not zero: the controller has not recorded usage for this one.
+          { resource: 'requests.memory', hard: '8Gi', used: null, hard_value: 8589934592, used_value: null, exhausted: null },
+        ],
+      },
+    ],
+    limitRanges: [
+      {
+        name: 'project-limits',
+        namespace: 'prod',
+        age_seconds: 8123000,
+        limits: [
+          {
+            type: 'Container',
+            max: {},
+            min: {},
+            default: { cpu: '500m', memory: '512Mi' },
+            defaultRequest: { cpu: '100m', memory: '128Mi' },
+            maxLimitRequestRatio: {},
+          },
+        ],
+      },
+    ],
+    // Null, not []: the listing was refused, and "nobody is bound" is the
+    // sentence that gets a binding added on top of the one nobody could see.
+    roleBindings: null,
+    networkPolicies: {
+      count: 1,
+      names: ['allow-same-namespace'],
+      isolatesAllIngress: true,
+      isolatesAllEgress: false,
+    },
+    partial: true,
+    unavailable: [
+      {
+        group: 'rbac.authorization.k8s.io',
+        resource: 'rolebindings',
+        namespace: 'prod',
+        reason: 'forbidden',
+        detail:
+          'rolebindings.rbac.authorization.k8s.io is forbidden: User "system:serviceaccount:k8boss-admin:console" cannot list resource "rolebindings" in API group "rbac.authorization.k8s.io" in the namespace "prod"',
+      },
+    ],
+  },
+
   portalPlan: {
     package: 'prometheus',
     namespace: 'monitoring',
@@ -1790,6 +1873,125 @@ export const FIXTURES = {
 };
 
 /** Answer every /api call from the fixtures above. */
+/** The §17 objects a request renders, in the order the backend writes them. */
+function projectObjectsFor(body) {
+  const objects = [
+    { kind: 'Namespace', name: body.name, namespace: null, group: '', version: 'v1', resource: 'namespaces',
+      yaml: `apiVersion: v1\nkind: Namespace\nmetadata:\n  name: ${body.name}\n` },
+  ];
+  if (body.quota && Object.keys(body.quota).length) {
+    objects.push({ kind: 'ResourceQuota', name: 'project-quota', namespace: body.name, group: '', version: 'v1', resource: 'resourcequotas',
+      yaml: `apiVersion: v1\nkind: ResourceQuota\nmetadata:\n  name: project-quota\n  namespace: ${body.name}\n` });
+  }
+  if (body.limits?.length) {
+    objects.push({ kind: 'LimitRange', name: 'project-limits', namespace: body.name, group: '', version: 'v1', resource: 'limitranges',
+      yaml: `apiVersion: v1\nkind: LimitRange\nmetadata:\n  name: project-limits\n  namespace: ${body.name}\n` });
+  }
+  if (body.admins?.length) {
+    objects.push({ kind: 'RoleBinding', name: body.adminRole || 'admin', namespace: body.name, group: 'rbac.authorization.k8s.io', version: 'v1', resource: 'rolebindings',
+      yaml: `apiVersion: rbac.authorization.k8s.io/v1\nkind: RoleBinding\nmetadata:\n  name: ${body.adminRole || 'admin'}\n  namespace: ${body.name}\n` });
+  }
+  if (body.isolateIngress) {
+    objects.push({ kind: 'NetworkPolicy', name: 'allow-same-namespace', namespace: body.name, group: 'networking.k8s.io', version: 'v1', resource: 'networkpolicies',
+      yaml: `apiVersion: networking.k8s.io/v1\nkind: NetworkPolicy\nmetadata:\n  name: allow-same-namespace\n  namespace: ${body.name}\n` });
+  }
+  return objects;
+}
+
+/** The consequences the backend derives from what a request leaves out. */
+function projectConsequencesFor(body) {
+  const out = [];
+  const enforce = body.podSecurity?.enforce ?? null;
+  if (enforce == null) {
+    out.push({ code: 'psa_not_enforced', label: 'No Pod Security level is enforced',
+      consequence: 'Without an enforce label, whatever the cluster default is applies, and this console cannot read it.',
+      mitigation: 'Enforce baseline or restricted.' });
+  } else if (enforce !== 'privileged') {
+    out.push({ code: 'psa_enforced', label: `Pods that do not meet the ${enforce} level are refused`,
+      consequence: 'A Deployment whose template violates it is accepted, and then its ReplicaSet fails to create a single pod.',
+      mitigation: 'Set warn and audit to the same level.' });
+  }
+  if (!body.quota || !Object.keys(body.quota).length) {
+    out.push({ code: 'no_quota', label: 'Nothing bounds what this project can consume',
+      consequence: 'With no ResourceQuota, one Deployment can request every core the cluster has.',
+      mitigation: 'Set at least requests.cpu, requests.memory and pods.' });
+  }
+  if (!body.admins?.length) {
+    out.push({ code: 'no_admin', label: 'Nobody is bound to this project',
+      consequence: 'No RoleBinding is created, so only cluster-wide bindings act here.',
+      mitigation: 'Name a User, Group or ServiceAccount as its admin.' });
+  }
+  if (body.isolateIngress) {
+    out.push({ code: 'ingress_isolated', label: "Traffic from other namespaces is refused, the router's included",
+      consequence: 'An Ingress or Route to a Service here will not be served until a second policy admits the router.',
+      mitigation: "Add a policy admitting the router's namespace after creating the project." });
+  }
+  return out;
+}
+
+/** §17 `POST /projects/plan`. `exists` is true for the one namespace the list fixture already has. */
+export function projectPlanFor(body) {
+  const exists = FIXTURES.namespaces.items.some((row) => row.name === body.name);
+  return {
+    name: body.name,
+    target: {
+      exists,
+      phase: exists ? 'Active' : null,
+      detail: exists ? `${body.name} already exists; the create will be refused.` : `${body.name} does not exist and can be created.`,
+    },
+    objects: projectObjectsFor(body),
+    consequences: projectConsequencesFor(body),
+    enabled: true,
+    enabledDetail: 'This deployment permits creating projects.',
+    partial: false,
+    unavailable: [],
+  };
+}
+
+/**
+ * §17 `POST /projects`. On a dry run the Namespace is projected and the rest
+ * rendered, as the backend does; on a real write everything is server-projected
+ * and applied. `created` is derived, never echoed.
+ */
+export function projectCreateFor(body, { failKinds = [], preflightDenied = [] } = {}) {
+  const dryRun = body.dryRun !== false;
+  const objects = projectObjectsFor(body).map((object, index) => {
+    const failed = !dryRun && failKinds.includes(object.kind);
+    const rendered = dryRun && object.kind !== 'Namespace';
+    return {
+      kind: object.kind,
+      name: object.name,
+      namespace: object.namespace,
+      group: object.group,
+      resource: object.resource,
+      verb: 'create',
+      applied: !dryRun && !failed,
+      diff: failed ? null : { before: null, after: object.yaml, unified: `--- live\n+++ proposed\n@@ -0,0 +1,3 @@\n+kind: ${object.kind}\n+metadata:\n+  name: ${object.name}\n`, changed: true },
+      projection: failed ? null : rendered ? 'rendered' : 'server',
+      preflight: rendered
+        ? { allowed: !preflightDenied.includes(object.kind), reason: preflightDenied.includes(object.kind) ? 'no RBAC policy matched' : '', evaluationError: null,
+            hint: preflightDenied.includes(object.kind) ? `Grant \`create\` on \`${object.group || 'core'}/${object.resource}\` in \`${object.namespace}\` to the console's ServiceAccount.` : null }
+        : null,
+      auditId: dryRun ? (object.kind === 'Namespace' ? 9101 : null) : failed ? null : 9101 + index,
+      skipped: null,
+      error: failed
+        ? { code: 'rbac_denied', message: `${object.resource} is forbidden`, detail: null,
+            hint: `Grant \`create\` on \`${object.group || 'core'}/${object.resource}\` in \`${object.namespace}\` to the console's ServiceAccount.` }
+        : null,
+    };
+  });
+  const failed = objects.filter((o) => o.error).length;
+  return {
+    dryRun,
+    created: !dryRun && failed === 0,
+    failed,
+    skipped: 0,
+    name: body.name,
+    objects,
+    consequences: projectConsequencesFor(body),
+  };
+}
+
 export async function mockApi(
   page,
   {
@@ -1827,6 +2029,9 @@ export async function mockApi(
     portalInstalled = null,
     portalPlan = null,
     portalSubscribe = null,
+    project = null,
+    projectPlan = null,
+    projectCreate = null,
   } = {},
 ) {
   // Counted so a spec can hand back a different manifest on the second read —
@@ -2231,6 +2436,22 @@ export async function mockApi(
     if (path === '/portal/catalog') return json(portalCatalog ?? FIXTURES.portalCatalog);
     // Ordered before `/portal/subscriptions`: the plan lives under it, and a
     // router that matched the listing first would answer a plan with a table.
+    // §17 projects. The plan and the write derive their objects from the
+    // request the way the backend does, and derive `consequences` from the
+    // request's omissions rather than echoing anything the client sent — a
+    // mock that returned whatever it was asked for would let a dialog that
+    // never reads them pass.
+    if (path === '/projects/plan' && route.request().method() === 'POST') {
+      const body = JSON.parse(route.request().postData() || '{}');
+      return json(projectPlan ? projectPlan(body) : projectPlanFor(body));
+    }
+    if (path === '/projects' && route.request().method() === 'POST') {
+      const body = JSON.parse(route.request().postData() || '{}');
+      return json(projectCreate ? projectCreate(body) : projectCreateFor(body));
+    }
+    if (path.startsWith('/projects/')) {
+      return json(project ?? FIXTURES.project);
+    }
     if (path === '/portal/subscriptions/plan') {
       const body = JSON.parse(route.request().postData() || '{}');
       return json(

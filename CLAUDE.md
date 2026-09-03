@@ -45,8 +45,8 @@ of [K8Boss](https://github.com/aesaganda/k8boss) and shares no code with it —
 | `backend/app/api/` | FastAPI routers. Thin: parse, call, envelope | Logic belongs below this layer |
 | `backend/app/k8s/` | Per-request cluster context, auth strategy, client manager | `docs/architecture.md` §2 |
 | `backend/app/resources/` | Catalog (discovery), reader (generic list/get/YAML), shaping (rows), envelope | `docs/api-contract.md` §1.2, §4, §8 |
-| `backend/app/services/` | Typed read models: the unified workload row, node rows, the unified route row, the operator catalog (`portal.py`), one pod's detail, environment and usage (`pods.py`), network policy correlation (`network.py`) | `docs/api-contract.md` §5, §6, §7.5–§7.7, §8.4, §13, §16 |
-| `backend/app/admin/` | **Every write.** The funnel, preflight, diff, apply, scale, rollout, node drain, debug containers, route compilation, the shipped router, the one operator Subscription (`portal.py`) | `docs/safety-model.md` |
+| `backend/app/services/` | Typed read models: the unified workload row, node rows, the unified route row, the operator catalog (`portal.py`), one pod's detail, environment and usage (`pods.py`), network policy correlation (`network.py`), one namespace with what governs it (`projects.py`) | `docs/api-contract.md` §5, §6, §7.5–§7.7, §8.4, §13, §16, §17 |
+| `backend/app/admin/` | **Every write.** The funnel, preflight, diff, apply, scale, rollout, node drain, debug containers, route compilation, the shipped router, the one operator Subscription (`portal.py`), the project — five creates into a namespace that does not exist (`projects.py`) | `docs/safety-model.md` |
 | `backend/app/audit/` | Append-only, hash-chained trail: `record()`, `query()`, `verify()`, export | `docs/api-contract.md` §10 |
 | `backend/app/identity/` | Local password hashing, opaque sessions, LDAP search-and-bind, OIDC single sign-on, sign-in throttling | `docs/api-contract.md` §12 |
 | `backend/tests/` | pytest on SQLite. The fake Kubernetes client **raises** on an unstubbed call | — |
@@ -363,6 +363,7 @@ serving a request — and SQLite could not reproduce it.
 | `docs/adr-0003-audit-hash-chain.md` | Tamper *evidence* vs tamper prevention, and why pre-chain records are never back-filled |
 | `docs/adr-0004-shipped-router.md` | Why the console installs a router at all, why HAProxy, what it does not serve, and the boundary that keeps "not a deployment engine" true of everything else |
 | `docs/adr-0005-operator-portal.md` | Why creating an OLM Subscription is not a second thing this console installs, and where that line is |
+| `docs/adr-0006-projects.md` | Why a project is five ordinary writes into a namespace that does not exist, not a template engine, and why the dry run says whose diff each object carries |
 | `deploy/router.yaml` | The shipped router bundle, applicable by hand. **Generated** — `make router-manifest`, enforced by a test |
 | `deploy/rbac.yaml` | The shipped roles. Each rule is annotated with the contract section it serves |
 | `README.md` | The front door: quickstart, feature list, every environment variable |

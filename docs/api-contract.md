@@ -2603,3 +2603,280 @@ and `packages.operators.coreos.com` PackageManifests. OLM v1's
 `olm.operatorframework.io` `ClusterExtension` is a different API with a different
 model, and a cluster running only it gets `state: "unsupported"` across §16.2 and
 a calm empty portal. That is the correct answer today and a gap that will grow.
+
+---
+
+## 17. Projects — a namespace read with what governs it, and created with it
+
+OpenShift has a *Project*: a namespace together with the ResourceQuota, the
+LimitRange, the security posture and the RoleBindings that make it a place a
+team can be handed, and `oc new-project` creates all of them at once from a
+project request template. Vanilla Kubernetes has every one of those objects and
+neither the page nor the act. §17 is both, built out of things this console
+already does: five reads joined into one page, and five ordinary creates through
+the funnel.
+
+### 17.1 What it is, and what it is not
+
+**It is a read model and a planned multi-object write.** Nothing is stored,
+nothing reconciles, nothing is shipped or pinned: the defaults live in the
+request the client sends, and what keeps the objects there afterwards is the
+cluster. `docs/adr-0006-projects.md` records why this is five writes and not a
+template engine, and why it does not cross ADR-0004's boundary.
+
+**The console never adopts a namespace.** A project is created into a namespace
+that does not exist. One that does — whoever created it, whatever it holds — is
+refused with `409 conflict` naming it, before anything is written and on a dry
+run too, and the refusal is audited. Adding quotas, limits or bindings to an
+existing namespace is §4's job, one object and one diff at a time.
+
+**No deletion, no edit, no template.** §17 creates; it does not delete a
+namespace (that is `kubectl delete namespace`, unrecoverable, and §4's delete
+with its own confirmation), does not edit one, and holds no project template of
+its own — the request body *is* the template, and a client that wants
+organisation-wide defaults keeps them where its other defaults live.
+
+### 17.2 `GET /api/projects/{name}`
+
+The §5 namespace row, plus:
+
+```json
+{
+  "name": "payments", "status": "Active", "labels": {}, "annotations": {},
+  "age_seconds": 91234, "pod_count": 12, "creationTimestamp": "…",
+  "displayName": "Payments", "description": null,
+  "podSecurity": {
+    "enforce": "restricted", "enforceVersion": null,
+    "audit": null, "auditVersion": null,
+    "warn": "baseline", "warnVersion": "v1.31",
+    "labelled": true
+  },
+  "quotas": [{
+    "name": "project-quota", "namespace": "payments", "scopes": [], "scoped": false,
+    "reconciled": true, "age_seconds": 91000,
+    "resources": [
+      {"resource": "pods", "hard": "20", "used": "20", "hard_value": 20, "used_value": 20, "exhausted": true},
+      {"resource": "requests.memory", "hard": "8Gi", "used": null, "hard_value": 8589934592, "used_value": null, "exhausted": null}
+    ]
+  }],
+  "limitRanges": [{
+    "name": "project-limits", "namespace": "payments", "age_seconds": 91000,
+    "limits": [{"type": "Container", "max": {}, "min": {},
+                "default": {"cpu": "500m"}, "defaultRequest": {"cpu": "100m"},
+                "maxLimitRequestRatio": {}}]
+  }],
+  "roleBindings": [ RoleBindingRow ],
+  "networkPolicies": {"count": 1, "names": ["allow-same-namespace"],
+                      "isolatesAllIngress": true, "isolatesAllEgress": false},
+  "partial": false, "unavailable": []
+}
+```
+
+- **The namespace read is primary** and raises (`404 not_found`, `403
+  rbac_denied` with a hint). Everything else is a **secondary** read, collected
+  on its own: `pod_count`, `quotas`, `limitRanges`, `roleBindings` and
+  `networkPolicies` are each `null` — never `[]`, never `0` — when their listing
+  did not happen, with the reason in `unavailable[]` and `partial: true`.
+  `quotas: []` is the finding that nothing bounds the namespace; `quotas: null`
+  is not that finding, and a client must not render it as one.
+- `displayName` and `description` are the `openshift.io/display-name` and
+  `openshift.io/description` annotations, which §17.5 writes on vanilla
+  clusters deliberately: they are inert there, and a namespace created here
+  shows the same name in an OpenShift console or in tooling written for one.
+- **`podSecurity` is read off labels and stated as such.** Each mode is the
+  `pod-security.kubernetes.io/<mode>` label's value or `null`; `<mode>Version`
+  is the `-version` label or `null`; `labelled` is true when any mode label is
+  present. `null` means *this namespace declares nothing for this mode* — the
+  cluster-wide default from the API server's `AdmissionConfiguration` applies,
+  and no API serves that file, so the console cannot say what it is. It is
+  **never** rendered as `privileged`. A label carrying a value outside
+  `privileged`/`baseline`/`restricted` is returned verbatim, because admission
+  will refuse every pod in the namespace over it.
+- **`quotas[].resources[].used` is `null` until the quota controller writes
+  `status.used`**, which happens asynchronously after the object is created; a
+  ResourceQuota seconds old has `spec.hard` and no status. `reconciled` is
+  whether `status.hard` exists at all. `hard_value`/`used_value` are the
+  quantities parsed (`1500m` and `1.5` are the same quantity; the strings are
+  kept beside them because a diff of the strings would say otherwise).
+  `exhausted` is `true` when both parsed and used has reached hard, `false` when
+  both parsed and it has not, and `null` otherwise. `scoped` is true when a
+  `scopeSelector` narrows which pods the quota counts, so a client can say the
+  numbers cover a subset.
+- **`networkPolicies.isolatesAllIngress`** is `true` when some policy with an
+  *empty* `podSelector` declares `Ingress` in its policy types — the "default
+  deny" shape and the only namespace-wide statement a listing can make. `false`
+  means no such policy exists and says nothing about narrower ones. `null` means
+  a selector could not be evaluated. Every one of those is a statement about what
+  is *declared*; §8.3's rule that enforcement belongs to the CNI plugin applies
+  unchanged.
+
+### 17.3 `POST /api/projects/plan`
+
+Body:
+
+```json
+{
+  "name": "payments",
+  "displayName": "Payments", "description": "…",
+  "podSecurity": {"enforce": "restricted", "audit": "restricted", "warn": "restricted",
+                  "enforceVersion": null, "auditVersion": null, "warnVersion": null},
+  "quota": {"requests.cpu": "4", "requests.memory": "8Gi", "limits.cpu": "8", "limits.memory": "16Gi", "pods": "20"},
+  "limits": [{"type": "Container",
+              "default": {"cpu": "500m", "memory": "512Mi"},
+              "defaultRequest": {"cpu": "100m", "memory": "128Mi"}}],
+  "admins": [{"kind": "Group", "name": "payments-team"}],
+  "adminRole": "admin",
+  "isolateIngress": true
+}
+```
+
+- `name` is an RFC 1123 DNS label (`422 invalid` naming the rule otherwise).
+  `kube-` and `openshift-` prefixes are not refused; they are a consequence.
+- `podSecurity.<mode>` is one of `privileged`, `baseline`, `restricted` or
+  `null` (no label). `<mode>Version` is `latest` or `v1.<n>`, and is refused
+  without its level — a version label without a level is ignored by admission.
+- `quota` is `spec.hard` keyed by the quota resource name the API server uses
+  (`requests.cpu`, `limits.memory`, `pods`, `count/deployments.apps`,
+  `requests.nvidia.com/gpu`…). Every value must parse under the Kubernetes
+  quantity grammar and be non-negative. Empty values are fields left blank, not
+  zeros, and are dropped. An empty map creates no ResourceQuota.
+- `limits` is a list of LimitRange items, `type` one of `Container`, `Pod`,
+  `PersistentVolumeClaim`, each map validated as `quota` is. An item setting
+  nothing is refused. An empty list creates no LimitRange.
+- `admins` are RoleBinding subjects, `kind` one of `User`, `Group`,
+  `ServiceAccount`. A ServiceAccount subject's `namespace` defaults to the
+  project itself; a User or Group carrying one is refused. `adminRole` names the
+  built-in aggregated ClusterRole bound — `admin`, `edit` or `view` — and is the
+  RoleBinding's name. No subjects creates no RoleBinding.
+- `isolateIngress: true` adds the `allow-same-namespace` NetworkPolicy: every
+  pod, `Ingress` only, admitted from pods in this namespace and from nowhere
+  else — the shape OpenShift's project template ships under the same name.
+
+Response:
+
+```json
+{
+  "name": "payments",
+  "target": {"exists": false, "phase": null, "detail": "payments does not exist and can be created."},
+  "objects": [
+    {"kind": "Namespace", "name": "payments", "namespace": null, "group": "", "version": "v1", "resource": "namespaces", "yaml": "…"},
+    {"kind": "ResourceQuota", "name": "project-quota", "namespace": "payments", "group": "", "version": "v1", "resource": "resourcequotas", "yaml": "…"},
+    {"kind": "LimitRange", "name": "project-limits", "namespace": "payments", "group": "", "version": "v1", "resource": "limitranges", "yaml": "…"},
+    {"kind": "RoleBinding", "name": "admin", "namespace": "payments", "group": "rbac.authorization.k8s.io", "version": "v1", "resource": "rolebindings", "yaml": "…"},
+    {"kind": "NetworkPolicy", "name": "allow-same-namespace", "namespace": "payments", "group": "networking.k8s.io", "version": "v1", "resource": "networkpolicies", "yaml": "…"}
+  ],
+  "consequences": [ {"code": "…", "label": "…", "consequence": "…", "mitigation": "…"} ],
+  "enabled": true, "enabledDetail": "…",
+  "partial": false, "unavailable": []
+}
+```
+
+**Pure and ungated**: one namespace read, nothing written, nothing audited, and
+it renders on a read-only console — `enabled`/`enabledDetail` echo
+`ADMIN_ALLOW_MUTATIONS` so a client can disable its button with the reason.
+`target.exists` is a tri-state: `null` when the namespace read did not answer
+(collected into `unavailable[]`, and the consequence `namespace_unknown` is
+added), never `false` on a failed read.
+
+Objects are always in this order, and only the ones the request asks for are
+present. Their names are fixed — `project-quota`, `project-limits`, the role's
+name, `allow-same-namespace` — so a project created here and one created by hand
+from the same recipe collide on the object rather than silently coexisting as two
+quotas.
+
+### 17.4 `consequences[]`, and the acknowledgement that gates a write
+
+The same handshake as §13.6 and §16.6: every entry is knowable from the request
+and the one namespace read, every one describes something that goes wrong
+*silently* otherwise, and the write refuses with `422 invalid` unless every code
+present is named in `acknowledgeConsequences`. `context.unacknowledged` lists the
+codes that were missing. The list is recomputed at write time, so consent given
+for one request cannot be carried onto another.
+
+| Code | When |
+|---|---|
+| `namespace_unknown` | The plan's namespace read did not answer. The write re-reads and refuses if the namespace exists; the plan cannot say which outcome to expect |
+| `reserved_prefix` | `name` begins with `kube-` or `openshift-` |
+| `psa_not_enforced` | No `enforce` level: the cluster default applies, which the console cannot read |
+| `psa_enforced` | `enforce` is `baseline` or `restricted`: violating pods are refused, and a Deployment whose template violates it is accepted and never gets a pod |
+| `no_quota` | No ResourceQuota: nothing bounds what the namespace can consume |
+| `quota_needs_defaults` | The quota covers `requests.cpu`, `requests.memory`, `limits.cpu`, `limits.memory`, `cpu` or `memory` and no Container LimitRange item supplies the matching `defaultRequest`/`default` — so the API server refuses every pod that does not state that resource itself (`must specify requests.cpu`) |
+| `no_admin` | No subjects: only cluster-wide bindings act in the namespace |
+| `ingress_isolated` | `isolateIngress`: traffic from other namespaces is refused, the ingress controller's included, until a second policy admits it — if the CNI enforces policy at all |
+
+### 17.5 `POST /api/projects`
+
+Body: the plan body plus `acknowledgeConsequences` and `dryRun` (default
+**true**). Response:
+
+```json
+{
+  "dryRun": true, "created": false, "failed": 0, "skipped": 0, "name": "payments",
+  "objects": [
+    {"kind": "Namespace", "name": "payments", "namespace": null, "group": "", "resource": "namespaces",
+     "verb": "create", "applied": false, "projection": "server",
+     "diff": {"before": null, "after": "…", "unified": "…", "changed": true},
+     "preflight": null, "auditId": 4471, "skipped": null, "error": null},
+    {"kind": "ResourceQuota", "name": "project-quota", "namespace": "payments", "group": "", "resource": "resourcequotas",
+     "verb": "create", "applied": false, "projection": "rendered",
+     "diff": {"before": null, "after": "…", "unified": "…", "changed": true},
+     "preflight": {"allowed": true, "reason": "", "evaluationError": null, "hint": null},
+     "auditId": null, "skipped": null, "error": null}
+  ],
+  "consequences": [ … ]
+}
+```
+
+Refusals, each before anything is written and in this order: the mutations gate
+(`403 mutations_disabled`, real writes only, audited), request validation, the
+namespace read — which must answer, because "unknown" is not a state a create may
+proceed from, so its error propagates — the takeover refusal (`409 conflict`,
+audited, dry run included), and the acknowledgement check.
+
+**Each object is an ordinary create through `app.admin.apply.create_from_yaml`**
+and therefore through the funnel: its own preflight, its own diff, its own audit
+row. `applied` and `auditId` are the funnel's own, copied and never derived.
+
+**A dry run projects the Namespace and renders the rest, and says so.** The API
+server's NamespaceLifecycle admission refuses a create into a namespace that does
+not exist — `dryRun=All` included, with a 404 naming the namespace — so a dry run
+cannot project the four objects inside it. They are reported with
+`projection: "rendered"`: this console's own manifest diffed against nothing
+(`diff.before` is `null`), no audit row, and a `preflight` of the exact verb the
+real write will use (§9's `PreflightResult` fields), because the grant is the one
+thing about such an object that *can* be checked before its namespace exists and
+the one most worth knowing first. `projection: "server"` marks a diff the API
+server produced. A client must label the two differently: a rendered manifest
+has not been through admission. **§14's router install has this same shape and
+does not report it; §17 does.**
+
+**`created` is true only when `dryRun` is false and every object landed.**
+`failed` counts objects whose write failed, each with `error` in §1.3's shape and
+the funnel's hint — rewritten only on RBAC escalation prevention, the way §14
+rewrites it for ClusterRoles, to name `bind` on the ClusterRole instead of a
+verb the preflight just confirmed. On a real write, a Namespace that failed
+stops the sequence: the objects inside it are reported with `skipped` set to the
+reason, not attempted, because each would fail with a 404 naming the namespace
+and leave four audit rows saying nothing the first one did not. Any other
+failure is counted and the sequence continues, so the operator learns about every
+missing grant in one round rather than one per attempt. **There is no rollback**:
+deleting a namespace the operator just asked for is not a correction anybody
+wants made on their behalf.
+
+### 17.6 The gate
+
+`ADMIN_ALLOW_MUTATIONS` alone. Unlike §14 and §16 there is no feature switch of
+its own: nothing here is a larger commitment than the §4 YAML editor already
+offers, since every object is one the editor could create. The plan and the dry
+run are permitted with the gate shut, for §14's reason.
+
+### 17.7 What §17 does not do
+
+**No delete, no edit, no adoption.** See §17.1. **No project template stored
+anywhere**: the request body is the template. **No claim about enforcement**: a
+Pod Security label is a declaration the admission plugin acts on, a NetworkPolicy
+is a declaration the CNI may or may not act on, and a RoleBinding to a built-in
+ClusterRole grants whatever that ClusterRole aggregates *on that cluster*, which
+the plan does not enumerate. **No per-user identity**: the RoleBinding is for the
+subject the operator names, written by the console's own ServiceAccount; the
+console's user is not a cluster identity, and §17 does not pretend otherwise.
