@@ -12,21 +12,36 @@
  * backend-side, which is why a cluster upgraded from 1.5 does not show every
  * class as non-default here.
  */
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import {
+  ActionButton,
   AgeCell,
   DescriptionList,
+  menuAction,
   NullableCell,
   PageHeader,
   ResourceLink,
   StatusBadge,
 } from '../components/ui';
+import ExpandClaimDialog from '../components/ExpandClaimDialog';
 import { useCluster } from '../contexts/ClusterContext';
 import { formatBytes } from '../utils/format';
 import { ChipList, genericTab, Muted, NoClusterState, ResourceTabsPage, YamlPanel } from './_parts';
+import { useGates } from './_data';
+
+//: §20's write is a patch on the claim itself, so the action is gated on the
+//: verb the write will actually use rather than on anything in it.
+const CHECKS = [
+  { id: 'patch', verb: 'patch', group: 'core', resource: 'persistentvolumeclaims' },
+];
 
 export default function Storage() {
   const { activeClusterId } = useCluster();
+  const [expanding, setExpanding] = useState(null);
+  // Bumped after a write so the claims listing is read again: a table still
+  // showing the old requested size is the moment a console stops being believed.
+  const [refreshToken, setRefreshToken] = useState(0);
+  const { gate } = useGates(CHECKS, { enabled: activeClusterId != null });
 
   const tabs = useMemo(
     () => [
@@ -72,6 +87,22 @@ export default function Storage() {
             ),
           },
           {
+            // Beside Capacity rather than instead of it. The two agree on a
+            // settled claim and differ on one mid-expansion, and that gap is the
+            // only thing in this table that says an earlier resize has not
+            // finished — §8's capacity column alone cannot show it.
+            key: 'requested_bytes',
+            title: 'Requested',
+            sortable: true,
+            cell: (row) => (
+              <NullableCell
+                value={row.requested_bytes}
+                format={formatBytes}
+                reason="This claim's spec carries no storage request, so what it asked for is unknown. It is not the capacity beside it."
+              />
+            ),
+          },
+          {
             key: 'volume',
             title: 'Volume',
             cell: (row) =>
@@ -100,11 +131,25 @@ export default function Storage() {
           },
           { key: 'age_seconds', title: 'Age', sortable: true, cell: (row) => <AgeCell seconds={row.age_seconds} /> },
         ],
+        refreshToken,
+        actions: (row) => [
+          menuAction('Expand…', gate('patch'), () => setExpanding(row)),
+        ],
         detail: (row) => (
           <>
             <DescriptionList
               items={[
                 { label: 'Status', value: <StatusBadge status={row.status} /> },
+                {
+                  label: 'Requested',
+                  value: (
+                    <NullableCell
+                      value={row.requested_bytes}
+                      format={formatBytes}
+                      reason="This claim's spec carries no storage request. It is not the capacity below."
+                    />
+                  ),
+                },
                 {
                   label: 'Provisioned capacity',
                   value: (
@@ -120,6 +165,11 @@ export default function Storage() {
                 { label: 'Access modes', value: <ChipList values={row.access_modes} max={4} emptyText="unset" /> },
               ]}
             />
+            <div style={{ marginTop: '0.75rem' }}>
+              <ActionButton gate={gate('patch')} onClick={() => setExpanding(row)}>
+                Expand…
+              </ActionButton>
+            </div>
             <YamlPanel
               group="core"
               version="v1"
@@ -248,7 +298,7 @@ export default function Storage() {
         namespaced: false,
       }),
     ],
-    [],
+    [gate, refreshToken],
   );
 
   if (activeClusterId == null) {
@@ -261,10 +311,19 @@ export default function Storage() {
   }
 
   return (
-    <ResourceTabsPage
-      title="Storage"
-      subtitle="Claims, the volumes behind them, and the classes that provision them."
-      tabs={tabs}
-    />
+    <>
+      {expanding && (
+        <ExpandClaimDialog
+          claim={expanding}
+          onClose={() => setExpanding(null)}
+          onApplied={() => setRefreshToken((n) => n + 1)}
+        />
+      )}
+      <ResourceTabsPage
+        title="Storage"
+        subtitle="Claims, the volumes behind them, and the classes that provision them."
+        tabs={tabs}
+      />
+    </>
   );
 }

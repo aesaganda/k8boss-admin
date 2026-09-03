@@ -244,6 +244,20 @@ these grants.
 | `create operators.coreos.com/subscriptions` | §16 subscribing to a catalog operator — **the one write the portal makes** | The Subscribe button is disabled with the reason. The plan stays readable — it is a pure read — and the catalog and Installed views keep working. **What this grant does not bound is the point of the row.** The console creates one Subscription; OLM then resolves it and installs the operator, and **OLM — not this ServiceAccount — grants that operator whatever its bundle asks for**, using its own permissions. No rule in `deploy/rbac.yaml` narrows that and no `SelfSubjectAccessReview` can preview it; the plan names the custom resources the operator will own, which is the most that can honestly be shown before the write. There is no `update` or `delete` here on purpose: deleting a Subscription does not uninstall an operator — the ClusterServiceVersion and everything it owns stay — so a Remove button would report an uninstall that did not happen. This grant also needs `ADMIN_PORTAL_INSTALL_ENABLED`, a deployment gate RBAC cannot express |
 | `create ""/pods` | §5.5 node debug pods, §15 CLI pods, and §4's create from the YAML editor | All three, together — RBAC cannot separate them. **This is the grant to think hardest about, and the one RBAC is worst at describing.** A `SelfSubjectAccessReview` has no field-level granularity: there is no verb for `hostPath`, `hostPID` or `privileged`, so `create pods` for an nginx pod is the same permission as `create pods` for one that mounts the node's root filesystem. PodSecurityPolicy used to gate that and was removed in 1.25; its replacement, Pod Security admission, is namespace-label-based. The controls that really apply are `ADMIN_NODE_DEBUG_ENABLED` (off by default) and the `pod-security.kubernetes.io/enforce` label on `ADMIN_NODE_DEBUG_NAMESPACE`. Withholding this rule disables node debug pods, CLI pods *and* object creation from the editor. §15 adds a second thing RBAC cannot express here: there is no verb covering which **ServiceAccount** a pod may bind, so this grant lets the console create a pod bound to an account more privileged than the console itself — and a shell in that pod then holds that account's permissions. `ADMIN_CLI_ENABLED` and `ADMIN_CLI_SERVICE_ACCOUNT` are the only controls over it, and neither lives in RBAC |
 
+### §20 — expanding a persistent volume claim
+
+| Permission | Feature | Withheld |
+|---|---|---|
+| `patch persistentvolumeclaims` | §20 the expansion itself | The `Expand…` action is disabled with the reason, and the preflight refuses before anything is sent. `ADMIN_ALLOW_MUTATIONS` off does the same thing for a different reason, and §1.3 keeps the two apart: `mutations_disabled` says the deployment is read-only, `rbac_denied` says this service account is not permitted |
+| `get storageclasses` | §20's `allowVolumeExpansion` check | **`expansion.supported` is `null`, not `false`.** Withholding this does not block the write: reading a refused class as "expansion forbidden" would refuse what the cluster would have accepted and send an operator to fix a StorageClass that is already correct. It becomes `pvc_expansion_unknown`, acknowledged by name, and the API server decides. Already granted by the reader role for §8's StorageClass tab |
+| `list pods` in the claim's namespace | §20's `mountedBy` | **`null`, never `[]`.** "Nothing has this volume mounted" is the sentence that starts an offline resize on a volume a database has open, so a refused listing says so — `partial: true`, an `unavailable[]` entry, and `pvc_mounts_unknown` in the consequences. Already granted by the reader role for §6 |
+
+**§20 adds no permission to the shipped roles.** All three are already there:
+`patch persistentvolumeclaims` comes with the §4/§8 config-and-storage write
+rule, and both reads belong to the reader role for §8 and §6. A console that can
+edit a claim's YAML today can already grow it — §20 is the path that checks
+first and says what a green result means.
+
 ### The generic write is deliberately not granted
 
 §4 lets the resource browser *display* everything the cluster serves. The shipped

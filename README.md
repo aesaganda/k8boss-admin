@@ -365,6 +365,15 @@ version being that there is no undo for a deleted StatefulSet.
   the pods already running that do not meet it, because Pod Security admission
   returns them on a `dryRun=All` update exactly as on a real one. Nothing is
   evicted by the change and the dialog says so before you confirm. See §18.
+* **Expand a claim, with what a green result does not prove** — a
+  PersistentVolumeClaim that filled up, grown through the funnel: the preview
+  refuses a shrink by arithmetic before anything is sent, names the StorageClass
+  if it forbids expansion, and lists the pods that have the volume mounted. The
+  write changes what the claim *asks for*; the volume grows when the storage
+  provider grows it and the filesystem after that — often not until every pod
+  using it restarts. `applied: true` says the request changed, the response
+  carries the capacity it did not change, and both are on screen side by side.
+  See §20.
 * **Namespaces, Events, Network, Config, Storage, Access** — Services, Ingresses,
   ConfigMaps, Secrets (key names and byte lengths only), PVCs, PVs,
   StorageClasses, ServiceAccounts, Roles and Bindings.
