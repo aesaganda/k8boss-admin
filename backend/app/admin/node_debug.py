@@ -70,14 +70,12 @@ from typing import Any
 
 from app.admin.apply import create_fn, delete_resource
 from app.admin.images import validate_image_reference
-from app.admin.mutate import mutate
+from app.admin.mutate import FeatureGate, Switch, mutate, read_only_switch
 from app.admin.names import random_suffix
-from app.audit import recorder
 from app.config import settings
 from app.errors import (
     AdminError,
     Invalid,
-    MutationsDisabled,
     NotFound,
     podsecurity_hint,
 )
@@ -128,6 +126,51 @@ _UNSAFE_IN_NAME = re.compile(r"[^a-z0-9-]+")
 # The gate
 # --------------------------------------------------------------------------- #
 
+def _gate() -> FeatureGate:
+    """The two switches in front of a node debug pod, in the funnel's terms.
+
+    **Both withhold the dry run**, which is a deliberate departure from every
+    other write here. Elsewhere a dry run is a read and is permitted in
+    read-only mode. A node debug pod's dry run would return the projected
+    manifest — a working recipe for a privileged pod, complete with the
+    namespace that admits it — on a deployment whose operator has said this
+    feature is off. That is not a read they consented to.
+    """
+    return FeatureGate(
+        feature="a node debug pod",
+        message="Creating a node debug pod is disabled on this console.",
+        hint=(
+            "Set ADMIN_ALLOW_MUTATIONS=true and ADMIN_NODE_DEBUG_ENABLED=true to "
+            "allow it. Both are required; the second exists so this one action "
+            "can be withheld while every other write stays available."
+        ),
+        switches=(
+            read_only_switch(
+                detail=(
+                    "This console runs read-only (ADMIN_ALLOW_MUTATIONS is off), so it "
+                    "creates nothing on a cluster. Unlike every other write here, a "
+                    "dry run is refused too: the projection is a working recipe for a "
+                    "privileged pod, and a deployment that has switched this off has "
+                    "not consented to handing one out."
+                ),
+                withholds_dry_run=True,
+            ),
+            Switch(
+                "ADMIN_NODE_DEBUG_ENABLED", settings.node_debug_enabled,
+                detail=(
+                    "Node debug pods are disabled on this deployment "
+                    "(ADMIN_NODE_DEBUG_ENABLED is off). This is a separate gate from "
+                    "ADMIN_ALLOW_MUTATIONS because a pod with the node's filesystem "
+                    "mounted is a larger grant than the rest of the write surface: a "
+                    "shell in one is effectively root on the machine."
+                ),
+                withholds_dry_run=True,
+            ),
+        ),
+        enabled_detail="Node debug pods are enabled on this deployment.",
+    )
+
+
 def enabled_state() -> dict[str, Any]:
     """Whether this deployment permits node debug pods, and the sentence why.
 
@@ -137,90 +180,7 @@ def enabled_state() -> dict[str, Any]:
     two different lines of the same file, and "writes are off" is a different
     conversation from "writes are on and this one specific thing is not".
     """
-    if not settings.admin_allow_mutations:
-        return {
-            "enabled": False,
-            "detail": (
-                "This console runs read-only (ADMIN_ALLOW_MUTATIONS is off), so it "
-                "creates nothing on a cluster. Unlike every other write here, a "
-                "dry run is refused too: the projection is a working recipe for a "
-                "privileged pod, and a deployment that has switched this off has "
-                "not consented to handing one out."
-            ),
-        }
-    if not settings.node_debug_enabled:
-        return {
-            "enabled": False,
-            "detail": (
-                "Node debug pods are disabled on this deployment "
-                "(ADMIN_NODE_DEBUG_ENABLED is off). This is a separate gate from "
-                "ADMIN_ALLOW_MUTATIONS because a pod with the node's filesystem "
-                "mounted is a larger grant than the rest of the write surface: a "
-                "shell in one is effectively root on the machine."
-            ),
-        }
-    return {"enabled": True, "detail": "Node debug pods are enabled on this deployment."}
-
-
-def _require_enabled(node: str, *, dry_run: bool) -> None:
-    """Refuse before the cluster is touched, naming the setting that is off.
-
-    ``MutationsDisabled`` rather than ``RBACDenied``: the operator's permissions
-    are irrelevant to this refusal, and telling them otherwise sends them to
-    argue with a cluster admin about a ClusterRole that is already correct. This
-    is the same class ``app.api.resources`` puts the Secret reveal refusal in,
-    for the same reason.
-
-    Dry runs are refused too, which is a deliberate departure from every other
-    write here. Elsewhere a dry run is a read and is permitted in read-only mode.
-    A node debug pod's dry run would return the projected manifest — a working
-    recipe for a privileged pod, complete with the namespace that admits it — on
-    a deployment whose operator has said this feature is off. That is not a read
-    they consented to.
-    """
-    state = enabled_state()
-    if state["enabled"]:
-        return
-
-    target = {
-        "group": "", "version": "v1", "resource": "pods",
-        "namespace": settings.node_debug_namespace, "name": None,
-    }
-    error = MutationsDisabled(
-        "Creating a node debug pod is disabled on this console.",
-        detail=state["detail"],
-        hint=(
-            "Set ADMIN_ALLOW_MUTATIONS=true and ADMIN_NODE_DEBUG_ENABLED=true to "
-            "allow it. Both are required; the second exists so this one action "
-            "can be withheld while every other write stays available."
-        ),
-        context={**target, "verb": "create", "node": node},
-    )
-    # Audited as a denial, the way `mutate()` audits its own gate refusal and
-    # unlike the Secret reveal, which does not. Somebody attempting to create a
-    # privileged node pod on a console where that is switched off is a fact worth
-    # keeping: either the deployment is configured wrongly or the caller believes
-    # it is not, and both are answered by this row existing. It is also the one
-    # record that would otherwise be missing, because the funnel — which audits
-    # everything else — is never reached.
-    #
-    # Never raises: see `app.audit`. A failed INSERT must not turn a refusal into
-    # a 500, which would tell the operator the console is broken rather than that
-    # the feature is off.
-    recorder.record(
-        verb="create",
-        target=target,
-        dry_run=dry_run,
-        outcome="denied",
-        detail=f"node debug pod refused on {node} (feature disabled)",
-        error=f"{error.code}: {error.message}",
-    )
-    logger.warning(
-        "Refused a node debug pod on %s: %s", node,
-        "ADMIN_ALLOW_MUTATIONS is false" if not settings.admin_allow_mutations
-        else "ADMIN_NODE_DEBUG_ENABLED is false",
-    )
-    raise error
+    return _gate().state()
 
 
 # --------------------------------------------------------------------------- #
@@ -529,10 +489,6 @@ def create_node_debug_pod(
     resolved = _check_node(node)
     resolved_image = _check_image(image)
 
-    # Before the cluster is touched, and before the dry run: see `_require_enabled`
-    # for why a projection is refused here when every other write permits one.
-    _require_enabled(resolved, dry_run=dry_run)
-
     namespace = settings.node_debug_namespace
     name = _pod_name(resolved)
     body = build_pod(
@@ -549,6 +505,9 @@ def create_node_debug_pod(
             namespace=namespace,
             name=name,
             dry_run=dry_run,
+            # Step one of the funnel, and before the dry run: see `_gate` for why
+            # a projection is refused here when every other write permits one.
+            gate=_gate(),
             apply_fn=create_fn("", "v1", "pods", body, namespace=namespace, name=name),
             before=None,
             # The audit sentence names the node, the image and — because it is the

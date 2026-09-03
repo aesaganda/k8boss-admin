@@ -25,8 +25,10 @@ The seven controls, in the order a write meets them:
 | The drain plan | "Drained" over three pods that did not evict | [6](#6-the-drain-plan) |
 | Audit | An action with no record of who attempted it | [7](#7-audit) |
 
-And two gates that sit outside the funnel: [RBAC](#8-two-gates-not-one) and
-[the Secret reveal](#9-the-secret-reveal).
+And one gate that sits outside the funnel: [the Secret
+reveal](#9-the-secret-reveal), which guards a read. [RBAC](#8-two-gates-not-one)
+is the other axis, and the per-feature switches are inside the funnel with the
+console-wide one.
 
 ---
 
@@ -40,7 +42,8 @@ rollback, cordon, drain, create, replace, delete — goes through
 The order inside it is fixed:
 
 ```
-1. mutations gate   ADMIN_ALLOW_MUTATIONS  →  403 mutations_disabled (audited)
+1. gate             ADMIN_ALLOW_MUTATIONS  →  403 mutations_disabled (audited)
+                    + the feature's own switch, passed in as a FeatureGate
 2. preflight        SelfSubjectAccessReview →  403 rbac_denied       (audited)
 3. apply            the caller's closure, told dry_run
 4. diff             live vs. the API server's own projection
@@ -402,6 +405,27 @@ someone who read both.
 
 Per-permission degradation is catalogued in [`rbac.md`](rbac.md).
 
+**Four features add a third switch, and it is the funnel that enforces it.**
+`ADMIN_NODE_DEBUG_ENABLED` (§9.1), `ADMIN_CLI_ENABLED` (§10),
+`ADMIN_ROUTER_MANAGE_ENABLED` (§11.6) and `ADMIN_PORTAL_INSTALL_ENABLED` (§12)
+each let a deployment withhold one action while every other write stays
+available. Each is passed to `mutate()` as part of a `FeatureGate`: an ordered
+list of switches, console-wide one first, each carrying the sentence it produces
+and whether it withholds the dry run as well as the write. A refusal names the
+**first** closed switch, because "writes are off" is a different conversation
+from "writes are on and this one thing is not", and the two send an operator to
+two different lines of the same file.
+
+That it is the funnel rather than the feature is the point. Each of the four,
+and §17's project, once carried its own copy of step one — build the error, write
+the denial row, log, raise — and the copies had already drifted in wording, in
+what they recorded and in what they withheld. A copy that stopped writing its row
+would look identical from outside: same code, same status, no failing test. The
+first evidence would have been a hole in the trail, found by somebody asking who
+tried to install a router on a console where that was switched off. There is one
+constructor of `mutations_disabled` in `app/admin/` now, and a test asserts
+that.
+
 ---
 
 ## 9. The debug container
@@ -503,10 +527,11 @@ projection is a read and is permitted in read-only mode. Here the projection is 
 working manifest for a privileged pod, complete with the namespace that admits
 it. A deployment that has switched this off has not consented to handing one out.
 
-**The gate refusal is audited.** The funnel audits its own gate; this refusal
-never reaches the funnel, so it records itself. "Who tried to put a host-mounted
-pod on a node while that was switched off" is precisely the question §7 exists
-to answer.
+**The gate refusal is audited**, by the funnel, against the pod the write would
+have created. "Who tried to put a host-mounted pod on a node while that was
+switched off" is precisely the question §7 exists to answer, and it is answered
+by the same step that records every other refusal rather than by a copy of it
+this feature maintains.
 
 ### What the cluster still decides
 
@@ -600,11 +625,12 @@ confirms, in the table, and in the audit sentence for the create — because it 
 the only fact that decides what this feature can do, and it is not visible from
 the pod's name or its image.
 
-**Two gates**, as §8 requires: `ADMIN_ALLOW_MUTATIONS` and `ADMIN_CLI_ENABLED`.
-The second exists so a deployment can have every other write in this console
-without being usable as a kubectl terminal. Unlike §9.1 the *projection* is
+**Two gates**, as §8 requires: `ADMIN_ALLOW_MUTATIONS` and `ADMIN_CLI_ENABLED`,
+handed to the funnel together. The second exists so a deployment can have every
+other write in this console without being usable as a kubectl terminal. The two
+differ on the dry run and each says so on itself: unlike §9.1 the *projection* is
 permitted on a read-only console — this manifest is a pod running `sleep`, not a
-recipe for a privileged one — while the feature gate refuses the dry run too,
+recipe for a privileged one — while the feature switch withholds the dry run too,
 because previewing the feature is offering it.
 
 **What it leaks when it is left behind is a credential.** §9.1's leaked pod
@@ -776,6 +802,15 @@ projection *is*. A node debug pod's manifest is a working recipe for a
 privileged pod on a deployment that switched the feature off. The router's
 manifests are a pinned copy of a public upstream bundle, and an operator
 deciding whether to open the gate has to be able to read what it would create.
+Neither of this feature's switches is marked as withholding the preview, which
+is where that decision lives now — §8's list rather than this paragraph is what
+a reviewer compares against the other four.
+
+**The refusal happens before the eight objects are read**, which is the funnel's
+step one called early rather than a second gate: install reports every object it
+touched, so a refusal that waited for the first `mutate()` would be eight denial
+rows and eight failed objects for one attempt. The row it writes and the error it
+raises are the ones the funnel would have produced.
 Withholding it would be asking somebody to enable a feature sight unseen.
 
 ### 11.7 What §14 does not claim
@@ -874,9 +909,10 @@ whole document exists to refuse.
 `ADMIN_ALLOW_MUTATIONS` and `ADMIN_PORTAL_INSTALL_ENABLED`, both required for a
 real write. The refusal is `mutations_disabled`, never `rbac_denied` — the
 operator's permissions are not what stopped it, and saying otherwise sends them
-to edit a ClusterRole that is already correct — and it is audited by
-`app/admin/portal.py` directly, because the funnel that audits everything else is
-never reached.
+to edit a ClusterRole that is already correct — and it is audited by the funnel's
+step one, called before the catalog is read so that a caller whose deployment
+forbids this gets `mutations_disabled` rather than a 404 about a package they
+were never going to be allowed to subscribe to.
 
 **The dry run is permitted with the feature gate off**, as in §11.6 and unlike
 §9.1's node debug pods. The difference is what the projection *is*. A node debug

@@ -52,9 +52,9 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from app.audit import recorder
+from app.admin.mutate import FeatureGate, Switch, read_only_switch, require_open
 from app.config import settings
-from app.errors import Invalid, MutationsDisabled
+from app.errors import Invalid
 from app.resources import reader
 from app.resources.envelope import collect
 from app.resources.shaping import get_field
@@ -82,6 +82,43 @@ WARN_MANUAL_APPROVAL = "manual_approval"
 # The gate
 # --------------------------------------------------------------------------- #
 
+def _gate() -> FeatureGate:
+    """The two switches in front of a subscribe, in the funnel's terms.
+
+    **Neither withholds the dry run**, for the same reason §14's plan is
+    readable with its gate off: what the projection shows is the caller's own
+    request rendered as a Subscription plus the contents of a catalog the
+    cluster already publishes, and an operator deciding whether to set
+    ``ADMIN_PORTAL_INSTALL_ENABLED`` has to be able to read what it would let
+    the console create. Nothing here is privileged — unlike §5.5's node debug
+    pods, where the projected pod spec is itself the sensitive thing.
+    """
+    return FeatureGate(
+        feature="subscribing to a catalog operator",
+        message="Subscribing to catalog operators is switched off on this deployment.",
+        hint=(
+            "Set ADMIN_ALLOW_MUTATIONS and ADMIN_PORTAL_INSTALL_ENABLED on the "
+            "console deployment. The subscription plan and its diff are readable "
+            "without either."
+        ),
+        switches=(
+            read_only_switch(detail=(
+                "This deployment is read-only: ADMIN_ALLOW_MUTATIONS is off, so "
+                "no write reaches any cluster from here."
+            )),
+            Switch(
+                "ADMIN_PORTAL_INSTALL_ENABLED", settings.portal_install_enabled,
+                detail=(
+                    "Subscribing is switched off on this deployment: "
+                    "ADMIN_PORTAL_INSTALL_ENABLED is not set. Browsing the catalog "
+                    "and reading what a subscription would create are unaffected."
+                ),
+            ),
+        ),
+        enabled_detail="This deployment permits subscribing to catalog operators.",
+    )
+
+
 def enabled_state() -> dict[str, Any]:
     """Whether this deployment permits subscribing, and why not when it does not.
 
@@ -89,83 +126,23 @@ def enabled_state() -> dict[str, Any]:
     the reason. A greyed control with no explanation is the state rule 11.4
     exists to forbid.
     """
-    if not settings.admin_allow_mutations:
-        return {
-            "enabled": False,
-            "detail": (
-                "This deployment is read-only: ADMIN_ALLOW_MUTATIONS is off, so "
-                "no write reaches any cluster from here."
-            ),
-        }
-    if not settings.portal_install_enabled:
-        return {
-            "enabled": False,
-            "detail": (
-                "Subscribing is switched off on this deployment: "
-                "ADMIN_PORTAL_INSTALL_ENABLED is not set. Browsing the catalog "
-                "and reading what a subscription would create are unaffected."
-            ),
-        }
-    return {
-        "enabled": True,
-        "detail": "This deployment permits subscribing to catalog operators.",
-    }
+    return _gate().state()
 
 
-def _require_enabled(*, dry_run: bool, namespace: str, package: str) -> None:
-    """Refuse a real write when either gate is shut. Dry runs pass through.
+def _require_open(*, dry_run: bool, namespace: str, package: str) -> None:
+    """Refuse a real subscribe before the catalog is read.
 
-    The projection is permitted with the feature off for the same reason §14's
-    plan is: what it shows is the caller's own request rendered as a
-    Subscription plus the contents of a catalog the cluster already publishes,
-    and an operator deciding whether to set ``ADMIN_PORTAL_INSTALL_ENABLED`` has
-    to be able to read what it would let the console create. Nothing here is
-    privileged — unlike §5.5's node debug pods, where the projected pod spec is
-    itself the sensitive thing and the dry run is withheld too.
-
-    Raises ``MutationsDisabled`` (``mutations_disabled``), never ``RBACDenied``.
-    The operator's permissions are not what is stopping this, and telling them
-    otherwise sends them to edit a ClusterRole that is already correct.
+    Step one of the funnel, hoisted: a caller whose deployment forbids this
+    should get ``mutations_disabled`` rather than a 404 about a package name
+    they were never going to be allowed to subscribe to. The row is written
+    against the Subscription the write would create.
     """
-    if dry_run:
-        return
-    gate = enabled_state()
-    if gate["enabled"]:
-        return
-
-    target = {
-        "group": "operators.coreos.com",
-        "version": "v1alpha1",
-        "resource": "subscriptions",
-        "namespace": namespace,
-        "name": package,
-    }
-    error = MutationsDisabled(
-        "Subscribing to catalog operators is switched off on this deployment.",
-        detail=gate["detail"],
-        hint=(
-            "Set ADMIN_ALLOW_MUTATIONS and ADMIN_PORTAL_INSTALL_ENABLED on the "
-            "console deployment. The subscription plan and its diff are readable "
-            "without either."
-        ),
-        context={**target, "verb": "create"},
+    require_open(
+        _gate(),
+        verb="create", group="operators.coreos.com", version="v1alpha1",
+        plural="subscriptions", namespace=namespace, name=package,
+        dry_run=dry_run, detail=f"subscribe to {package} in {namespace}",
     )
-    # Written directly because mutate() — which audits everything else — is never
-    # reached. A refusal that left no row would be a hole in the trail at exactly
-    # the moment somebody asks who tried.
-    recorder.record(
-        verb="create",
-        target=target,
-        dry_run=dry_run,
-        outcome="denied",
-        detail=f"subscribe to {package} in {namespace}",
-        error=f"{error.code}: {error.message}",
-    )
-    logger.warning(
-        "portal subscribe refused: %s (package=%s namespace=%s)",
-        gate["detail"], package, namespace,
-    )
-    raise error
 
 
 # --------------------------------------------------------------------------- #
@@ -765,7 +742,7 @@ def subscribe(
     # builds: a caller whose deployment forbids this should get
     # ``mutations_disabled`` rather than a 404 about a package name they were
     # never going to be allowed to subscribe to anyway.
-    _require_enabled(
+    _require_open(
         dry_run=dry_run,
         namespace=request["namespace"],
         package=request["package"],

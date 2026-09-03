@@ -61,6 +61,7 @@ from app.admin import apply as apply_service
 from app.admin import preflight
 from app.admin import router_bundle
 from app.admin.diff import build_diff
+from app.admin.mutate import FeatureGate, Switch, read_only_switch, require_open
 from app.admin.router_bundle import (
     MANAGED_BY,
     NAME,
@@ -71,7 +72,7 @@ from app.admin.router_bundle import (
 )
 from app.audit import recorder
 from app.config import settings
-from app.errors import AdminError, Conflict, MutationsDisabled, NotFound
+from app.errors import AdminError, Conflict, NotFound
 from app.resources import reader
 from app.resources.envelope import collect
 from app.resources.shaping import get_field
@@ -86,6 +87,49 @@ MANAGED_BY_LABEL = "app.kubernetes.io/managed-by"
 # The gate
 # --------------------------------------------------------------------------- #
 
+def _gate(action: str) -> FeatureGate:
+    """The two switches in front of a router write, in the funnel's terms.
+
+    **Neither withholds the dry run**, which is a deliberate difference from
+    §5.5's node debug pods, where the projection is itself withheld. The
+    difference is what the projection *is*. A node debug pod's manifest is a
+    working recipe for a privileged pod on a deployment whose operator switched
+    that feature off. The router's manifests are a pinned copy of a public
+    upstream bundle; showing them to an operator who is deciding whether to
+    turn the gate on is the point, not a leak. So the plan and its diff render
+    on a console where this is off, and only the confirming call is refused.
+    """
+    return FeatureGate(
+        feature=f"router {action}",
+        message=f"Router {action} is disabled on this console.",
+        hint=(
+            "Set ADMIN_ALLOW_MUTATIONS=true and ADMIN_ROUTER_MANAGE_ENABLED=true "
+            "to allow it. Both are required; the second exists so this one "
+            "feature can be withheld while every other write stays available."
+        ),
+        switches=(
+            read_only_switch(detail=(
+                "This console runs read-only (ADMIN_ALLOW_MUTATIONS is off), so it "
+                "writes nothing to a cluster. The install plan and its diff are "
+                "still available: reading what would be created is a read."
+            )),
+            Switch(
+                "ADMIN_ROUTER_MANAGE_ENABLED", settings.router_manage_enabled,
+                detail=(
+                    "Managing the shipped router is disabled on this deployment "
+                    "(ADMIN_ROUTER_MANAGE_ENABLED is off). It has its own gate because "
+                    "installing it creates a cluster-scoped RBAC grant that can read "
+                    "every Secret in the cluster, and puts a process on the cluster's "
+                    "ingress path — a larger commitment than the rest of the write "
+                    "surface, and one a deployment may reasonably want to withhold "
+                    "while allowing everything else."
+                ),
+            ),
+        ),
+        enabled_detail="Router management is enabled on this deployment.",
+    )
+
+
 def enabled_state() -> dict[str, Any]:
     """Whether this deployment permits router management, and the sentence why.
 
@@ -93,81 +137,24 @@ def enabled_state() -> dict[str, Any]:
     reason* (rule 11.4). The two gates are separate because they send an
     operator to two different lines of the same file.
     """
-    if not settings.admin_allow_mutations:
-        return {
-            "enabled": False,
-            "detail": (
-                "This console runs read-only (ADMIN_ALLOW_MUTATIONS is off), so it "
-                "writes nothing to a cluster. The install plan and its diff are "
-                "still available: reading what would be created is a read."
-            ),
-        }
-    if not settings.router_manage_enabled:
-        return {
-            "enabled": False,
-            "detail": (
-                "Managing the shipped router is disabled on this deployment "
-                "(ADMIN_ROUTER_MANAGE_ENABLED is off). It has its own gate because "
-                "installing it creates a cluster-scoped RBAC grant that can read "
-                "every Secret in the cluster, and puts a process on the cluster's "
-                "ingress path — a larger commitment than the rest of the write "
-                "surface, and one a deployment may reasonably want to withhold "
-                "while allowing everything else."
-            ),
-        }
-    return {"enabled": True, "detail": "Router management is enabled on this deployment."}
+    return _gate("install").state()
 
 
-def _require_enabled(action: str, *, dry_run: bool, namespace: str) -> None:
-    """Refuse a real router write before the cluster is touched.
+def _require_open(action: str, *, dry_run: bool, namespace: str) -> None:
+    """Refuse a real router write before anything is read or built.
 
-    **Dry runs are permitted**, which is a deliberate difference from §5.5's node
-    debug pods, where the projection is itself withheld. The difference is what
-    the projection *is*. A node debug pod's manifest is a working recipe for a
-    privileged pod on a deployment whose operator switched that feature off. The
-    router's manifests are a pinned copy of a public upstream bundle; showing
-    them to an operator who is deciding whether to turn the gate on is the point,
-    not a leak. So the plan and its diff render on a console where this is off,
-    and only the confirming call is refused.
+    Step one of the funnel, hoisted: install reads eight objects and reports
+    each one, so a refusal that waited for the first ``mutate()`` would be
+    eight denial rows and eight failed objects for one attempt. The row is
+    written against the Deployment, the object the bundle exists to create.
     """
-    if dry_run:
-        return
-    state = enabled_state()
-    if state["enabled"]:
-        return
-
-    target = {
-        "group": "apps", "version": "v1", "resource": "deployments",
-        "namespace": namespace, "name": NAME,
-    }
-    error = MutationsDisabled(
-        f"Router {action} is disabled on this console.",
-        detail=state["detail"],
-        hint=(
-            "Set ADMIN_ALLOW_MUTATIONS=true and ADMIN_ROUTER_MANAGE_ENABLED=true "
-            "to allow it. Both are required; the second exists so this one "
-            "feature can be withheld while every other write stays available."
-        ),
-        context={**target, "verb": "create", "action": action},
+    require_open(
+        _gate(action),
+        verb="create", group="apps", version="v1", plural="deployments",
+        namespace=namespace, name=NAME, dry_run=dry_run,
+        detail=f"router {action} refused (switched off)",
+        context={"action": action},
     )
-    # Audited as a denial, for the same reason the funnel audits its own gate
-    # refusal: somebody attempting to install a cluster-wide ingress controller
-    # on a console where that is switched off is a fact worth keeping, and the
-    # funnel — which audits everything else — is never reached.
-    recorder.record(
-        verb="create",
-        target=target,
-        dry_run=dry_run,
-        outcome="denied",
-        detail=f"router {action} refused (feature disabled)",
-        error=f"{error.code}: {error.message}",
-    )
-    logger.warning(
-        "Refused router %s: %s", action,
-        "ADMIN_ALLOW_MUTATIONS is false" if not settings.admin_allow_mutations
-        else "ADMIN_ROUTER_MANAGE_ENABLED is false",
-    )
-    raise error
 
 
 # --------------------------------------------------------------------------- #
@@ -538,7 +525,7 @@ def install(payload: dict[str, Any], *, dry_run: bool = True) -> dict[str, Any]:
     see the module docstring and :func:`_rendered_outcome`.
     """
     options = router_bundle.validate_options(payload)
-    _require_enabled("install", dry_run=dry_run, namespace=options.namespace)
+    _require_open("install", dry_run=dry_run, namespace=options.namespace)
 
     objects = router_bundle.build(options)
     # Before anything is written, and on a dry run too: a takeover the operator
@@ -629,7 +616,7 @@ def uninstall(payload: dict[str, Any], *, dry_run: bool = True) -> dict[str, Any
         resolved["namespace"] = installed_namespace
 
     options = router_bundle.validate_options(resolved)
-    _require_enabled("uninstall", dry_run=dry_run, namespace=options.namespace)
+    _require_open("uninstall", dry_run=dry_run, namespace=options.namespace)
 
     objects = [
         item for item in reversed(router_bundle.build(options))

@@ -76,14 +76,12 @@ from typing import Any
 
 from app.admin.apply import create_fn, delete_resource
 from app.admin.images import validate_image_reference
-from app.admin.mutate import mutate
+from app.admin.mutate import FeatureGate, Switch, mutate, read_only_switch
 from app.admin.names import random_suffix
-from app.audit import recorder
 from app.config import settings
 from app.errors import (
     AdminError,
     Invalid,
-    MutationsDisabled,
     NotFound,
     podsecurity_hint,
 )
@@ -124,7 +122,7 @@ _LIST_LIMIT = 200
 # --------------------------------------------------------------------------- #
 
 #: The sentence ``ADMIN_CLI_ENABLED`` being off produces, in one place because
-#: both :func:`enabled_state` and :func:`_require_enabled` say it, and an
+#: both :func:`enabled_state` and the gate's refusal say it, and an
 #: operator reading the disabled button's tooltip and the 403 that follows a
 #: forced request should not be given two different explanations of one switch.
 _FEATURE_OFF_DETAIL = (
@@ -136,6 +134,42 @@ _FEATURE_OFF_DETAIL = (
 )
 
 
+def _gate() -> FeatureGate:
+    """The two switches in front of a CLI pod, in the funnel's terms.
+
+    They differ on the dry run, and the difference is stated on each switch. A
+    read-only console still **projects** this pod, because inspecting what
+    would be created is a read and §1.6 permits it — unlike §5.5, whose
+    projection is a working recipe for a privileged pod. The feature switch
+    withholds the dry run too: a deployment that switched this off has decided
+    the console is not a kubectl terminal, and offering a preview of one is
+    offering the feature.
+    """
+    return FeatureGate(
+        feature="a CLI pod",
+        message="Starting a CLI session is disabled on this console.",
+        hint=(
+            "Set ADMIN_ALLOW_MUTATIONS=true and ADMIN_CLI_ENABLED=true to allow "
+            "it. Both are required; the second exists so this one action can be "
+            "withheld while every other write stays available."
+        ),
+        switches=(
+            read_only_switch(detail=(
+                "This console runs read-only (ADMIN_ALLOW_MUTATIONS is off), so it "
+                "creates nothing on a cluster. The pod can still be previewed — "
+                "reading what would be created is a read — but a shell could not "
+                "be opened in it, because §7 gates exec with the writes for the "
+                "same reason: a shell can do everything a write can."
+            )),
+            Switch(
+                "ADMIN_CLI_ENABLED", settings.cli_enabled,
+                detail=_FEATURE_OFF_DETAIL, withholds_dry_run=True,
+            ),
+        ),
+        enabled_detail="CLI pods are enabled on this deployment.",
+    )
+
+
 def enabled_state() -> dict[str, Any]:
     """Whether this deployment permits CLI pods, and the sentence why.
 
@@ -145,79 +179,7 @@ def enabled_state() -> dict[str, Any]:
     two different lines of the same file, and "writes are off" is a different
     conversation from "writes are on and this one specific thing is not".
     """
-    if not settings.admin_allow_mutations:
-        return {
-            "enabled": False,
-            "detail": (
-                "This console runs read-only (ADMIN_ALLOW_MUTATIONS is off), so it "
-                "creates nothing on a cluster. The pod can still be previewed — "
-                "reading what would be created is a read — but a shell could not "
-                "be opened in it, because §7 gates exec with the writes for the "
-                "same reason: a shell can do everything a write can."
-            ),
-        }
-    if not settings.cli_enabled:
-        return {"enabled": False, "detail": _FEATURE_OFF_DETAIL}
-    return {"enabled": True, "detail": "CLI pods are enabled on this deployment."}
-
-
-def _require_enabled(*, dry_run: bool) -> None:
-    """Refuse the feature gate before the cluster is touched, naming the setting.
-
-    **This checks ``ADMIN_CLI_ENABLED`` only.** ``ADMIN_ALLOW_MUTATIONS`` is
-    :func:`mutate`'s to enforce, and it already refuses a real write on a
-    read-only console with this same error class and audits the refusal.
-    Checking it here as well would put two denial rows in the trail for one
-    attempt and make the count of "who tried" wrong.
-
-    That split also gives the two gates the behaviour each should have. A
-    read-only console still **projects** this pod, because inspecting what would
-    be created is a read and §1.6 permits it — unlike §5.5, whose projection is
-    a working recipe for a privileged pod. The feature gate refuses the dry run
-    too: a deployment that switched this off has decided the console is not a
-    kubectl terminal, and offering a preview of one is offering the feature.
-
-    ``MutationsDisabled`` rather than ``RBACDenied``: the operator's permissions
-    are irrelevant to this refusal, and telling them otherwise sends them to
-    argue with a cluster admin about a ClusterRole that is already correct.
-    """
-    if settings.cli_enabled:
-        return
-
-    target = {
-        "group": "", "version": "v1", "resource": "pods",
-        "namespace": settings.cli_namespace, "name": None,
-    }
-    error = MutationsDisabled(
-        "Starting a CLI session is disabled on this console.",
-        detail=_FEATURE_OFF_DETAIL,
-        hint=(
-            "Set ADMIN_ALLOW_MUTATIONS=true and ADMIN_CLI_ENABLED=true to allow "
-            "it. Both are required; the second exists so this one action can be "
-            "withheld while every other write stays available."
-        ),
-        context={**target, "verb": "create"},
-    )
-    # Audited as a denial, the way `mutate()` audits its own gate refusal.
-    # Somebody attempting to start a kubectl terminal on a console where that is
-    # switched off is a fact worth keeping: either the deployment is configured
-    # wrongly or the caller believes it is not, and both are answered by this row
-    # existing. It is also the one record that would otherwise be missing,
-    # because the funnel — which audits everything else — is never reached.
-    #
-    # Never raises: see `app.audit`. A failed INSERT must not turn a refusal into
-    # a 500, which would tell the operator the console is broken rather than that
-    # the feature is off.
-    recorder.record(
-        verb="create",
-        target=target,
-        dry_run=dry_run,
-        outcome="denied",
-        detail="CLI pod refused (feature disabled)",
-        error=f"{error.code}: {error.message}",
-    )
-    logger.warning("Refused a CLI pod: ADMIN_CLI_ENABLED is false.")
-    raise error
+    return _gate().state()
 
 
 # --------------------------------------------------------------------------- #
@@ -436,10 +398,6 @@ def create_cli_pod(
     """
     resolved_image = _check_image(image)
 
-    # Before the cluster is touched. See `_require_enabled` for which of the two
-    # gates refuses a projection and why they differ.
-    _require_enabled(dry_run=dry_run)
-
     namespace = settings.cli_namespace
     service_account = settings.cli_service_account
     name = _pod_name()
@@ -457,6 +415,9 @@ def create_cli_pod(
             namespace=namespace,
             name=name,
             dry_run=dry_run,
+            # Step one of the funnel. See `_gate` for which of the two switches
+            # withholds the projection and why they differ.
+            gate=_gate(),
             apply_fn=create_fn("", "v1", "pods", body, namespace=namespace, name=name),
             before=None,
         # The audit sentence names the ServiceAccount, because that — not the

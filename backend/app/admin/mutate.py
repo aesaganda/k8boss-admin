@@ -14,10 +14,13 @@ module in a way a reviewer can see.
 
 The order is load-bearing, top to bottom:
 
-1. **The mutations gate.** ``ADMIN_ALLOW_MUTATIONS=false`` refuses a real write
-   *before the cluster is touched* (§1.6). A dry run is permitted in read-only
-   mode — inspecting what would change is a read, and that is what makes the
-   console useful in an audit posture.
+1. **The gate.** ``ADMIN_ALLOW_MUTATIONS=false`` refuses a real write *before
+   the cluster is touched* (§1.6), and so does a feature's own switch —
+   ``ADMIN_NODE_DEBUG_ENABLED`` and the three like it — which the caller hands
+   in as a :class:`FeatureGate` rather than checks for itself. A dry run is
+   permitted in read-only mode — inspecting what would change is a read, and
+   that is what makes the console useful in an audit posture — unless the
+   gate says its projection is the sensitive thing (§5.5, §15).
 2. **Preflight.** ``SelfSubjectAccessReview`` for this exact target, so a denial
    names the missing grant rather than relaying a bare "forbidden" (§0.2). It
    runs for dry runs too: the API server requires the same permission to project
@@ -32,11 +35,21 @@ The order is load-bearing, top to bottom:
 Nothing else in the response may be read as evidence that a cluster changed: a
 successful dry run returns a full projected object, a resourceVersion and a diff,
 and a UI that read those as success would report a change that did not happen.
+
+The feature switches live here for the same reason the four promises do. Five
+features once carried their own copy of step one — build the error, write the
+denial row, log, raise — each with its own wording, its own target and its own
+answer to whether a dry run is withheld, and each a row the next refactor could
+drop without a failing test. A :class:`FeatureGate` is that policy as data, and
+the step that enforces it is this one function, so a sixth feature gets its
+denial row by construction and the one difference that is real — which switch
+withholds the preview — is stated where a reviewer can compare all five.
 """
 
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from kubernetes.client.rest import ApiException
@@ -120,6 +133,168 @@ def _audit(
         error=None if error is None else f"{error.code}: {error.message}",
     )
 
+# --------------------------------------------------------------------------- #
+# The gate
+# --------------------------------------------------------------------------- #
+
+@dataclass(frozen=True)
+class Switch:
+    """One deployment setting that can refuse a write, and what it says when it does.
+
+    ``enabled`` is read from ``settings`` by whoever builds the switch, at
+    request time and never at import time. A switch that remembered the value
+    it saw when the module loaded would go on refusing writes the operator has
+    since allowed — or, worse, go on allowing writes they have since forbidden.
+
+    ``withholds_dry_run`` is the one policy decision a switch carries. §1.6's
+    rule is that a dry run is a read, so a closed switch still permits it: an
+    operator deciding whether to open the switch has to be able to see what it
+    would let the console write. Two features override that, because their
+    projection *is* the sensitive thing — a node debug pod's manifest is a
+    working recipe for a privileged pod (§5.5), and a CLI pod's is the offer of
+    a kubectl terminal (§15) — and there the switch withholds the preview too.
+    Which switch does which is stated as data, on the switch, rather than as a
+    docstring on each feature's own copy of the gate; that is what makes the
+    difference something a reviewer can compare across all five.
+    """
+
+    setting: str
+    enabled: bool
+    detail: str | None = None
+    withholds_dry_run: bool = False
+
+
+@dataclass(frozen=True)
+class FeatureGate:
+    """The switches in front of one feature's writes, evaluated at step one.
+
+    ``switches`` is ordered: the console-wide ``ADMIN_ALLOW_MUTATIONS`` first,
+    then the feature's own. A refusal names the *first* closed switch, and that
+    is the one the operator has to change first — "writes are off" is a
+    different conversation from "writes are on and this one thing is not", and
+    the two send an operator to two different lines of the same file.
+
+    ``message`` is the headline of the refusal and ``hint`` the sentence naming
+    every setting it takes to open the gate; both are the feature's own words,
+    because the error is read by someone who clicked a button, not by someone
+    reading this module. ``enabled_detail`` is what :meth:`state` says when
+    every switch is open.
+    """
+
+    feature: str
+    switches: tuple[Switch, ...]
+    message: str | None = None
+    hint: str | None = None
+    enabled_detail: str = "Writes are enabled on this deployment."
+
+    def closed(self, *, dry_run: bool) -> Switch | None:
+        """The switch that refuses this call, or ``None`` when it may proceed."""
+        for switch in self.switches:
+            if switch.enabled:
+                continue
+            if dry_run and not switch.withholds_dry_run:
+                continue
+            return switch
+        return None
+
+    def state(self) -> dict[str, Any]:
+        """The ``gate`` object a feature's status endpoint returns: ``enabled`` and ``detail``.
+
+        Reported to the UI rather than only enforced, so a button is disabled
+        *with the reason* (rule 11.4) instead of offered and answered with a
+        403. This answers "may I write", so it names the first closed switch
+        whether or not that switch would also withhold a dry run; the dry run
+        gets its own answer from the dry run.
+        """
+        for switch in self.switches:
+            if not switch.enabled:
+                return {"enabled": False, "detail": switch.detail}
+        return {"enabled": True, "detail": self.enabled_detail}
+
+
+def read_only_switch(
+    *, detail: str | None = None, withholds_dry_run: bool = False,
+) -> Switch:
+    """``ADMIN_ALLOW_MUTATIONS`` as a :class:`Switch`, read now.
+
+    Every gate starts with this one. ``detail`` is the feature's own sentence
+    about what a read-only console still offers of it — the install plan and
+    its diff, the projected pod — because that differs per feature, and one
+    generic sentence would promise a preview that §5.5 withholds.
+    """
+    return Switch(
+        "ADMIN_ALLOW_MUTATIONS", settings.admin_allow_mutations,
+        detail=detail, withholds_dry_run=withholds_dry_run,
+    )
+
+
+def _default_gate() -> FeatureGate:
+    """The gate every write has when its caller names none: read-only, or not."""
+    return FeatureGate(feature="this write", switches=(read_only_switch(),))
+
+
+def _require_open(
+    gate: FeatureGate, *, verb: str, target: dict[str, Any], dry_run: bool,
+    detail: str | None, context: dict[str, Any] | None = None,
+) -> None:
+    """Step one: refuse on the first closed switch, audited, before the cluster is touched.
+
+    ``mutations_disabled`` and never ``rbac_denied``, whichever switch closed:
+    the operator's permissions are irrelevant to this refusal, and telling them
+    otherwise sends them to argue with a cluster admin about a ClusterRole that
+    is already correct.
+    """
+    switch = gate.closed(dry_run=dry_run)
+    if switch is None:
+        return
+    error = MutationsDisabled(
+        gate.message, detail=switch.detail, hint=gate.hint,
+        context={**target, "verb": verb, **(context or {})},
+    )
+    # Audited as a denial. Someone attempting a write against a console where
+    # that write is switched off is a fact worth keeping: either the deployment
+    # is configured wrongly or the caller believes it is not, and both are
+    # answered by this row existing. Never raises — see `app.audit`.
+    _audit(verb=verb, target=target, dry_run=dry_run, outcome="denied",
+           detail=detail, error=error)
+    logger.warning(
+        "Refused %s (%s %s/%s): %s is false.",
+        gate.feature, verb, target["resource"], target["name"], switch.setting,
+    )
+    raise error
+
+
+def require_open(
+    gate: FeatureGate,
+    *,
+    verb: str,
+    group: str,
+    version: str,
+    plural: str,
+    namespace: str | None,
+    name: str | None,
+    dry_run: bool,
+    detail: str | None,
+    subresource: str | None = None,
+    context: dict[str, Any] | None = None,
+) -> None:
+    """Step one of :func:`mutate`, hoisted for a writer that must refuse before it reads.
+
+    §14's install reads eight objects, §16's subscribe reads a catalog and §17's
+    create reads the namespace before the first ``apply_fn`` exists. For each, a
+    refusal that waited for the first :func:`mutate` would arrive late: after a
+    404 about a package the caller was never going to be allowed to subscribe
+    to, or — for a loop over eight objects that reports each one — as eight
+    denial rows and eight failed objects for one attempt. So they call this
+    first, with the target the real write would have. It is the same function
+    :func:`mutate` runs at step one and not a second gate: the row it writes and
+    the error it raises are the ones the funnel would have written and raised.
+    """
+    _require_open(
+        gate, verb=verb, dry_run=dry_run, detail=detail, context=context,
+        target=_target(group, version, plural, namespace, name, subresource),
+    )
+
 
 def mutate(
     *,
@@ -134,6 +309,7 @@ def mutate(
     before: dict[str, Any] | None = None,
     subresource: str | None = None,
     detail: str | None = None,
+    gate: FeatureGate | None = None,
 ) -> dict[str, Any]:
     """Run one mutation through the gate, the preflight, the diff and the trail.
 
@@ -152,12 +328,17 @@ def mutate(
         detail: the human sentence for the audit row — "replicas 3 -> 5". The
             diff digest proves *what* changed; this says it in a form that fits
             in a table.
+        gate: the feature's own switches, when it has any (§5.5, §14, §15, §16,
+            §17). Evaluated here at step one, so the refusal is audited against
+            this write's real target and a feature cannot forget the row.
+            ``None`` means the write has only the console-wide switch.
 
     Returns:
         The §1.5 mutation response.
 
     Raises:
-        MutationsDisabled: a real write while the console is read-only.
+        MutationsDisabled: a real write while the console is read-only, or any
+            write a feature's own switch refuses.
         RBACDenied: preflight refused.
         AdminError: anything the apply itself raised, re-raised after being
             audited. Failures are recorded before they propagate, because the
@@ -166,20 +347,10 @@ def mutate(
     """
     target = _target(group, version, plural, namespace, name, subresource)
 
-    # 1. The mutations gate — before the cluster is touched (§1.6).
-    if not dry_run and not settings.admin_allow_mutations:
-        error = MutationsDisabled(context={**target, "verb": verb})
-        # Audited as a denial. Someone attempting production writes against a
-        # read-only console is a fact worth keeping: either the deployment is
-        # configured wrongly or the caller believes it is not read-only, and both
-        # are answered by this row existing.
-        _audit(verb=verb, target=target, dry_run=dry_run, outcome="denied",
-               detail=detail, error=error)
-        logger.warning(
-            "Refused %s %s/%s: ADMIN_ALLOW_MUTATIONS is false.",
-            verb, plural, name,
-        )
-        raise error
+    # 1. The gate — before the cluster is touched (§1.6). The caller's, when the
+    #    feature has a switch of its own; the read-only switch alone otherwise.
+    _require_open(gate or _default_gate(), verb=verb, target=target,
+                  dry_run=dry_run, detail=detail)
 
     # 2. Preflight (§0.2). A clean denial and a review that could not be
     #    evaluated are different errors, and preflight.require keeps them apart —
@@ -240,4 +411,4 @@ def mutate(
     }
 
 
-__all__ = ["ApplyFn", "mutate"]
+__all__ = ["ApplyFn", "FeatureGate", "Switch", "mutate", "read_only_switch", "require_open"]
