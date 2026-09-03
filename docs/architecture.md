@@ -216,9 +216,14 @@ out who scaled the payments service to zero.
 So `app/admin/mutate.py` is one function with one order, and it is the only
 place in the codebase that calls an `apply_fn`:
 
-1. **The mutations gate.** `ADMIN_ALLOW_MUTATIONS=false` refuses a real write
-   *before the cluster is touched*, and records the attempt as a denial. Dry-run
-   is permitted in read-only mode — previewing a change is a read.
+1. **The gate.** `ADMIN_ALLOW_MUTATIONS=false` refuses a real write *before the
+   cluster is touched*, and records the attempt as a denial. So does a feature's
+   own switch — `ADMIN_NODE_DEBUG_ENABLED` and the three like it — which the
+   caller passes in as a `FeatureGate` rather than checking itself, so the
+   refusal is audited against the write's real target and no feature can forget
+   the row. Dry-run is permitted in read-only mode — previewing a change is a
+   read — unless the gate says its projection is the sensitive thing, which is
+   true of exactly two features and stated on their switches.
 2. **Preflight.** `SelfSubjectAccessReview` for this exact
    verb/group/resource/namespace/name/subresource, so a denial names the missing
    grant rather than relaying a bare "forbidden". It runs for dry runs too,

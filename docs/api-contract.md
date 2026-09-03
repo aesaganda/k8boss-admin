@@ -171,6 +171,22 @@ instead of offering them and failing.
 Dry-run is still permitted in read-only mode — inspecting what *would* change is
 a read. This is deliberate: it makes the console useful in an audit posture.
 
+Four features add a switch of their own on top of this one —
+`ADMIN_NODE_DEBUG_ENABLED` (§5.5), `ADMIN_CLI_ENABLED` (§15),
+`ADMIN_ROUTER_MANAGE_ENABLED` (§14) and `ADMIN_PORTAL_INSTALL_ENABLED` (§16) —
+so a deployment can withhold one action while every other write stays available.
+All of them are enforced at the same step, by the same function, and every
+refusal is `403 mutations_disabled` audited as `outcome: "denied"` against the
+object the write would have touched. A refusal names the **first** closed switch:
+`ADMIN_ALLOW_MUTATIONS` when that is off, because it is the one to change first.
+
+**Two of those switches withhold the dry run as well**, and they are the
+exception rather than the rule: §5.5's projected pod manifest is a working recipe
+for a privileged pod and §15's is the offer of a kubectl terminal, so previewing
+either is offering the feature. Everywhere else a closed switch still projects,
+because an operator deciding whether to open one has to be able to read what it
+would let the console write.
+
 ---
 
 ## 2. Health and capability
@@ -441,8 +457,9 @@ call.
   what would change is a read; here the projection *is* a working manifest for a
   privileged pod, and a deployment that switched this off has not consented to
   handing one out.
-- **The gate refusal is audited** as `outcome: "denied"`, because the funnel that
-  records every other refusal is never reached.
+- **The gate refusal is audited** as `outcome: "denied"` by the funnel, against
+  the pod the write would have created, and whichever of the two switches
+  refused.
 - **PodSecurity admission decides whether this is possible at all.** A namespace
   enforcing `baseline` or `restricted` rejects the pod (host namespaces, hostPath
   volume). Admission runs on `dryRun=All`, so the refusal arrives at the preview
@@ -1910,6 +1927,11 @@ departure from §5.5's node debug pods. The difference is what the projection
 deployment that switched the feature off; the router's manifests are a pinned
 copy of a public upstream bundle, and reading them is the whole point.
 
+The gate is checked **before the eight objects are read**, which is §1.6's step
+one called early rather than a second gate: this endpoint reports every object it
+touched, and a refusal that waited for the first write would be eight denial rows
+and eight failed objects for one attempt.
+
 ---
 
 ## 15. The CLI session
@@ -2008,16 +2030,16 @@ call.
 - **Two gates.** `ADMIN_ALLOW_MUTATIONS` **and** `ADMIN_CLI_ENABLED`. Either off
   is `403 mutations_disabled` whose `hint` names both.
 - **The dry run is permitted on a read-only console** and refused by the feature
-  gate — the two behave differently on purpose. §1.6's ordinary rule applies to
-  the first, because this projection is a pod running `sleep` bound to an account
-  named in the deployment's own configuration and inspecting it discloses nothing
-  new. The second refuses both, because a deployment that switched this off has
-  decided the console is not a kubectl terminal, and offering a preview of one is
-  offering the feature.
-- **The feature-gate refusal is audited** as `outcome: "denied"`, because the
-  funnel that records every other refusal is never reached. The mutations gate is
-  *not* audited here — `mutate()` already did, and two rows for one attempt makes
-  the count of "who tried" wrong in the one table that exists to answer it.
+  gate — the two switches behave differently on purpose, and each says which it
+  is. §1.6's ordinary rule applies to the first, because this projection is a pod
+  running `sleep` bound to an account named in the deployment's own configuration
+  and inspecting it discloses nothing new. The second withholds both, because a
+  deployment that switched this off has decided the console is not a kubectl
+  terminal, and offering a preview of one is offering the feature.
+- **The refusal is audited** as `outcome: "denied"`, once per attempt, by the
+  funnel's step one — whichever of the two switches refused. Two rows for one
+  attempt would make the count of "who tried" wrong in the one table that exists
+  to answer it.
 - **This endpoint always creates.** Reusing a Running pod is the client's
   decision, made from §15.3, because a POST that sometimes creates and sometimes
   does not cannot report `applied` honestly.
@@ -2560,9 +2582,9 @@ Two, both required for a real write: `ADMIN_ALLOW_MUTATIONS` and
 `403 mutations_disabled` — never `rbac_denied`, because the operator's
 permissions are not what is stopping this and telling them otherwise sends them
 to edit a ClusterRole that is already correct — and they are **audited** as
-`outcome: "denied"`, written directly because `mutate()` is never reached and a
-refusal that left no row is a hole in the trail at exactly the moment somebody
-asks who tried.
+`outcome: "denied"` against the Subscription the write would have created,
+because a refusal that left no row is a hole in the trail at exactly the moment
+somebody asks who tried.
 
 The gate is checked **before the catalog is read**, the way §14's install gates
 before it builds: a caller whose deployment forbids this gets
@@ -2852,11 +2874,13 @@ Body: the plan body plus `acknowledgeConsequences` and `dryRun` (default
 }
 ```
 
-Refusals, each before anything is written and in this order: the mutations gate
-(`403 mutations_disabled`, real writes only, audited), request validation, the
-namespace read — which must answer, because "unknown" is not a state a create may
-proceed from, so its error propagates — the takeover refusal (`409 conflict`,
-audited, dry run included), and the acknowledgement check.
+Refusals, each before anything is written and in this order: the gate
+(`403 mutations_disabled`, real writes only, audited — §1.6's step one called
+before the namespace is read, because five objects are written and each is
+reported), request validation, the namespace read — which must answer, because
+"unknown" is not a state a create may proceed from, so its error propagates — the
+takeover refusal (`409 conflict`, audited, dry run included), and the
+acknowledgement check.
 
 **Each object is an ordinary create through `app.admin.apply.create_from_yaml`**
 and therefore through the funnel: its own preflight, its own diff, its own audit

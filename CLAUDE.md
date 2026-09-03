@@ -186,8 +186,19 @@ the trail is withheld as `partial`, which is never rendered as a pass. See
 Everything that changes a cluster goes through it, in this order:
 
 ```
-1. mutations gate   2. preflight   3. apply   4. diff   5. audit
+1. gate   2. preflight   3. apply   4. diff   5. audit
 ```
+
+Step one is `ADMIN_ALLOW_MUTATIONS` **and** the feature's own switch, when it has
+one. `ADMIN_NODE_DEBUG_ENABLED`, `ADMIN_CLI_ENABLED`, `ADMIN_ROUTER_MANAGE_ENABLED`
+and `ADMIN_PORTAL_INSTALL_ENABLED` are handed to `mutate()` as a `FeatureGate` —
+an ordered list of `Switch`es, each carrying the sentence it produces and whether
+it withholds the dry run — and are **not** checked by the feature. Five features
+once carried their own copy of that step, and a copy that stopped writing its
+denial row would have shown up first as a hole in the audit trail. The two
+switches that withhold a preview (§5.5's node debug pod and §15's CLI pod, whose
+projections are themselves the sensitive thing) say so as data, in one place a
+reviewer can compare.
 
 The four promises above could be a convention every write endpoint follows. They
 are not, because a convention followed by twelve endpoints is a convention nine
@@ -197,7 +208,7 @@ test. The first evidence is a hole in the audit trail, found by someone trying t
 establish who scaled the payments service to zero.
 
 **If you are adding a write, you are writing an `apply_fn` and a call to
-`mutate()`.** If that feels like it does not fit, the answer is almost never a
+`mutate()`** — plus a `FeatureGate` if it has a switch of its own. If that feels like it does not fit, the answer is almost never a
 second path — say so in your report instead.
 
 ---

@@ -59,9 +59,9 @@ from typing import Any
 from app.admin import apply as apply_service
 from app.admin import preflight
 from app.admin.diff import build_diff
+from app.admin.mutate import FeatureGate, read_only_switch, require_open
 from app.audit import recorder
-from app.config import settings
-from app.errors import AdminError, Conflict, Invalid, MutationsDisabled, NotFound
+from app.errors import AdminError, Conflict, Invalid, NotFound
 from app.k8s.quantities import parse_quantity
 from app.resources import reader
 from app.resources.envelope import collect
@@ -149,54 +149,51 @@ class ProjectObject:
 # The gate
 # --------------------------------------------------------------------------- #
 
-def enabled_state() -> dict[str, Any]:
-    """Whether this deployment can create a project, and the sentence why not.
+def _gate() -> FeatureGate:
+    """The one switch in front of a project create, in the funnel's terms.
 
-    One gate, not two: unlike §14 and §16 there is no feature switch of its
+    One switch, not two: unlike §14 and §16 there is no feature switch of its
     own, because nothing here is a larger commitment than the §4 YAML editor
     already offers. Every object is one the editor could create; this endpoint
-    adds the plan, the checks and the per-object report in front of them.
+    adds the plan, the checks and the per-object report in front of them. The
+    dry run is not withheld: the plan, the projected Namespace and the rendered
+    objects are reads.
     """
-    if not settings.admin_allow_mutations:
-        return {
-            "enabled": False,
-            "detail": (
+    return FeatureGate(
+        feature="creating a project",
+        message="Creating a project is disabled on this console.",
+        hint="Set ADMIN_ALLOW_MUTATIONS=true on the console deployment to allow it.",
+        switches=(
+            read_only_switch(detail=(
                 "This console runs read-only (ADMIN_ALLOW_MUTATIONS is off), so "
                 "it writes nothing to a cluster. The plan, the projected Namespace "
                 "and the rendered objects are still available: reading what "
                 "would be created is a read."
-            ),
-        }
-    return {"enabled": True, "detail": "This deployment permits creating projects."}
-
-
-def _require_enabled(*, dry_run: bool, name: str) -> None:
-    """Refuse a real write before the cluster is touched. Dry runs pass through."""
-    if dry_run:
-        return
-    state = enabled_state()
-    if state["enabled"]:
-        return
-    target = {"group": "", "version": "v1", "resource": "namespaces", "namespace": None, "name": name}
-    error = MutationsDisabled(
-        "Creating a project is disabled on this console.",
-        detail=state["detail"],
-        hint="Set ADMIN_ALLOW_MUTATIONS=true on the console deployment to allow it.",
-        context={**target, "verb": "create"},
+            )),
+        ),
+        enabled_detail="This deployment permits creating projects.",
     )
-    # Written directly because the funnel — which audits everything else — is
-    # never reached. A refusal that left no row would be a hole in the trail at
-    # exactly the moment somebody asks who tried.
-    recorder.record(
-        verb="create",
-        target=target,
-        dry_run=dry_run,
-        outcome="denied",
+
+
+def enabled_state() -> dict[str, Any]:
+    """Whether this deployment can create a project, and the sentence why not."""
+    return _gate().state()
+
+
+def _require_open(*, dry_run: bool, name: str) -> None:
+    """Refuse a real create before the namespace is read.
+
+    Step one of the funnel, hoisted: five objects are written and each is
+    reported, so a refusal that waited for the first ``mutate()`` would be one
+    denial row and four skipped objects for a write that was never allowed. The
+    row is written against the Namespace, the object everything else goes into.
+    """
+    require_open(
+        _gate(),
+        verb="create", group="", version="v1", plural="namespaces",
+        namespace=None, name=name, dry_run=dry_run,
         detail=f"project {name}: create refused",
-        error=f"{error.code}: {error.message}",
     )
-    logger.warning("project create refused: %s (name=%s)", state["detail"], name)
-    raise error
 
 
 # --------------------------------------------------------------------------- #
@@ -926,7 +923,7 @@ def create(
     """
     request = validate_request(payload)
     name = request["name"]
-    _require_enabled(dry_run=dry_run, name=name)
+    _require_open(dry_run=dry_run, name=name)
 
     objects = build_objects(request)
 

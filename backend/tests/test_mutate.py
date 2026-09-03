@@ -16,15 +16,27 @@ The two assertions that matter most:
 * **A refused write is still recorded.** An audit trail holding only the writes
   that worked answers "what changed" but not "who tried", and the second is the
   question asked after an incident.
+* **A feature's own switch is the funnel's step one, not the feature's.** Five
+  features once carried a copy of it. The tests below are what stops a sixth
+  from carrying a sixth copy, and what makes the one difference that is real —
+  which switch withholds the preview — comparable across all five in one place.
 """
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
+from app.admin import cli_pod
+from app.admin import node_debug
+from app.admin import portal as portal_admin
+from app.admin import projects as projects_admin
+from app.admin import router as router_admin
 from app.admin.diff import digest
-from app.admin.mutate import mutate
+from app.admin.mutate import FeatureGate, Switch, mutate, read_only_switch, require_open
 from app.audit import recorder
+from app.config import settings
 from app.errors import Conflict, Invalid, MutationsDisabled, RBACDenied, UpstreamError
 from tests.conftest import obj
 
@@ -121,6 +133,388 @@ def test_a_write_refused_by_the_gate_is_still_audited(db_engine, fake_k8s):
     assert row["dry_run"] is False
     assert "mutations_disabled" in row["error"]
     assert row["target"]["name"] == "checkout"
+
+
+# --------------------------------------------------------------------------- #
+# The feature switches (§5.5, §14, §15, §16, §17)
+# --------------------------------------------------------------------------- #
+#
+# The console-wide switch above is one of these; a feature's own is the rest.
+# They are tested here, on the funnel, because that is now the only place any of
+# them is enforced — the five features hand in a `FeatureGate` and get step one
+# by construction.
+
+def gate(*switches, **kwargs):
+    return FeatureGate(feature="a test write", switches=switches, **kwargs)
+
+
+OPEN = Switch("ADMIN_ALLOW_MUTATIONS", True, detail="writes are on")
+SHUT = Switch("ADMIN_FEATURE_ENABLED", False, detail="the feature is off")
+SHUT_AND_SILENT = Switch(
+    "ADMIN_FEATURE_ENABLED", False, detail="the feature is off",
+    withholds_dry_run=True,
+)
+
+
+def test_a_feature_switch_refuses_a_real_write_the_console_wide_one_would_allow(
+    db_engine, fake_k8s, allow_mutations,
+):
+    """The whole point of a second switch: every other write works, this one does
+    not, and the refusal names the setting that is off rather than an RBAC grant
+    the operator already holds."""
+    allow(fake_k8s)
+    apply_fn = applier()
+
+    with pytest.raises(MutationsDisabled) as caught:
+        run(fake_k8s, apply_fn, dry_run=False,
+            gate=gate(OPEN, SHUT, hint="Set ADMIN_FEATURE_ENABLED=true.",
+                      message="the feature is switched off on this deployment"))
+
+    assert caught.value.code == "mutations_disabled"
+    assert caught.value.message == "the feature is switched off on this deployment"
+    assert caught.value.detail == "the feature is off"
+    assert "ADMIN_FEATURE_ENABLED" in caught.value.hint
+    assert apply_fn.calls == [], "the cluster must not be touched"
+    assert fake_k8s.authorization_v1.calls == [], "nor asked whether we may"
+
+
+def test_a_closed_feature_switch_still_permits_the_dry_run(db_engine, fake_k8s,
+                                                           allow_mutations):
+    """§1.6's rule, and the default: inspecting what a switch would let the
+    console write is a read, and an operator deciding whether to open it has to
+    be able to see that."""
+    allow(fake_k8s)
+    apply_fn = applier()
+
+    response = run(fake_k8s, apply_fn, dry_run=True, gate=gate(OPEN, SHUT))
+
+    assert apply_fn.calls == [True]
+    assert response["applied"] is False
+
+
+def test_a_switch_that_withholds_the_projection_refuses_the_dry_run_too(
+    db_engine, fake_k8s, allow_mutations,
+):
+    """§5.5 and §15's departure, and the only thing that distinguishes them from
+    the other three: the projection *is* the sensitive thing — a working recipe
+    for a privileged pod, the offer of a kubectl terminal — so previewing the
+    feature is offering it."""
+    allow(fake_k8s)
+    apply_fn = applier()
+
+    with pytest.raises(MutationsDisabled):
+        run(fake_k8s, apply_fn, dry_run=True, gate=gate(OPEN, SHUT_AND_SILENT))
+
+    assert apply_fn.calls == []
+    (row,) = audit_rows()
+    assert row["outcome"] == "denied"
+    assert row["dry_run"] is True, (
+        "the refused preview is still an attempt, and the row that records it "
+        "says it was a preview — a trail that recorded it as a real write would "
+        "over-report what was tried"
+    )
+
+
+def test_the_refusal_names_the_first_closed_switch_not_the_last(db_engine, fake_k8s):
+    """Both are off; "writes are off" is the one to change first, and it is a
+    different conversation from "writes are on and this one thing is not"."""
+    allow(fake_k8s)
+
+    with pytest.raises(MutationsDisabled) as caught:
+        run(fake_k8s, applier(), dry_run=False,
+            gate=gate(Switch("ADMIN_ALLOW_MUTATIONS", False, detail="writes are off"), SHUT))
+
+    assert caught.value.detail == "writes are off"
+
+
+def test_a_refused_write_leaves_exactly_one_denial_row(db_engine, fake_k8s):
+    """Two switches shut, one attempt, one row. Two rows for one attempt makes
+    the count of "who tried" wrong in the one table that exists to answer it."""
+    allow(fake_k8s)
+
+    with pytest.raises(MutationsDisabled):
+        run(fake_k8s, applier(), dry_run=False,
+            gate=gate(Switch("ADMIN_ALLOW_MUTATIONS", False), SHUT))
+
+    assert len(audit_rows()) == 1
+
+
+def test_the_denial_row_carries_the_write_target_and_its_sentence(db_engine, fake_k8s):
+    """What was attempted, not that something was. The row is assembled from the
+    write's own target and detail, so the trail says which object somebody tried
+    to touch on a console where that was switched off."""
+    allow(fake_k8s)
+
+    with pytest.raises(MutationsDisabled):
+        run(fake_k8s, applier(), dry_run=False, detail="replicas 3 -> 5",
+            gate=gate(SHUT))
+
+    (row,) = audit_rows()
+    assert row["outcome"] == "denied"
+    assert row["verb"] == "patch"
+    assert row["target"]["resource"] == "deployments"
+    assert row["target"]["namespace"] == "prod"
+    assert row["target"]["name"] == "checkout"
+    assert row["detail"] == "replicas 3 -> 5"
+    assert "mutations_disabled" in row["error"]
+
+
+def test_a_switch_reads_its_setting_when_the_gate_is_built(db_engine, monkeypatch):
+    """Never at import time. A switch that remembered the value it saw when the
+    module loaded would go on allowing writes the operator has since forbidden."""
+    monkeypatch.setattr(settings, "admin_allow_mutations", False)
+    assert read_only_switch().enabled is False
+
+    monkeypatch.setattr(settings, "admin_allow_mutations", True)
+    assert read_only_switch().enabled is True
+
+
+def test_state_answers_may_i_write_not_may_i_preview(db_engine):
+    """What the UI disables a button on. It names the first closed switch whether
+    or not that switch would also withhold a preview — a control offered with no
+    explanation is the state rule 11.4 exists to forbid."""
+    assert gate(OPEN, SHUT).state() == {"enabled": False, "detail": "the feature is off"}
+    assert gate(OPEN, OPEN, enabled_detail="all on").state() == {
+        "enabled": True, "detail": "all on",
+    }
+
+
+def test_the_hoisted_gate_writes_the_row_the_funnel_would_have(db_engine, fake_k8s):
+    """§14, §16 and §17 refuse before they read, because a refusal that waited
+    for the first `mutate()` would arrive after a 404 about a package the caller
+    was never going to be allowed to subscribe to — or, for a loop that reports
+    each object, as one denial row and four skipped objects. `require_open` is
+    the funnel's own step one called early, and this is what says so: the row and
+    the error are the ones the funnel would have produced."""
+    allow(fake_k8s)
+    shut = gate(SHUT, message="Nope.", hint="Set ADMIN_FEATURE_ENABLED=true.")
+
+    with pytest.raises(MutationsDisabled) as hoisted:
+        require_open(
+            shut, verb="patch", group="apps", version="v1", plural="deployments",
+            namespace="prod", name="checkout", dry_run=False, detail="replicas 3 -> 5",
+        )
+    hoisted_row = audit_rows()[0]
+
+    with pytest.raises(MutationsDisabled) as funnelled:
+        run(fake_k8s, applier(), dry_run=False, detail="replicas 3 -> 5", gate=shut)
+    funnelled_row = audit_rows()[0]
+
+    for field in ("verb", "target", "outcome", "detail", "error", "dry_run"):
+        assert hoisted_row[field] == funnelled_row[field], field
+    assert hoisted.value.code == funnelled.value.code
+    assert hoisted.value.message == funnelled.value.message
+    assert hoisted.value.hint == funnelled.value.hint
+
+
+# --------------------------------------------------------------------------- #
+# The five features, compared in one place
+# --------------------------------------------------------------------------- #
+
+FEATURE_GATES = {
+    "router install": (lambda: router_admin._gate("install"), "ADMIN_ROUTER_MANAGE_ENABLED"),
+    "router uninstall": (lambda: router_admin._gate("uninstall"), "ADMIN_ROUTER_MANAGE_ENABLED"),
+    "portal subscribe": (portal_admin._gate, "ADMIN_PORTAL_INSTALL_ENABLED"),
+    "node debug pod": (node_debug._gate, "ADMIN_NODE_DEBUG_ENABLED"),
+    "CLI pod": (cli_pod._gate, "ADMIN_CLI_ENABLED"),
+    "project create": (projects_admin._gate, None),
+}
+
+#: The two features whose *projection* is the sensitive thing, and therefore the
+#: only two whose switches withhold a dry run. Written out rather than derived,
+#: because the point of this list is that adding a third is a decision somebody
+#: made in this file rather than a default a new feature inherited.
+WITHHOLDS_THE_PREVIEW = {"node debug pod", "CLI pod"}
+
+
+@pytest.mark.parametrize("feature", sorted(FEATURE_GATES))
+def test_every_feature_gate_starts_with_the_console_wide_switch(feature, db_engine):
+    """`ADMIN_ALLOW_MUTATIONS` first, always. It is the one an operator has to
+    change first, and a gate that named its own switch while writes were off
+    would send them to the wrong line of the same file."""
+    build, _ = FEATURE_GATES[feature]
+    first = build().switches[0]
+
+    assert first.setting == "ADMIN_ALLOW_MUTATIONS"
+    assert first.detail, "and it says what a read-only console still offers of this feature"
+
+
+@pytest.mark.parametrize("feature", sorted(FEATURE_GATES))
+def test_every_feature_gate_names_its_own_setting_when_that_is_the_one_that_is_off(
+    feature, db_engine, monkeypatch, allow_mutations,
+):
+    """Writes are on and this one thing is not: the sentence has to name the
+    switch that is off, because it is the only one the operator has left to
+    change."""
+    build, setting = FEATURE_GATES[feature]
+    if setting is None:
+        assert build().state()["enabled"] is True, (
+            "§17 has no switch of its own: with writes on, it is open"
+        )
+        return
+
+    gate_now = build()
+    field = {
+        "ADMIN_ROUTER_MANAGE_ENABLED": "router_manage_enabled",
+        "ADMIN_PORTAL_INSTALL_ENABLED": "portal_install_enabled",
+        "ADMIN_NODE_DEBUG_ENABLED": "node_debug_enabled",
+        "ADMIN_CLI_ENABLED": "cli_enabled",
+    }[setting]
+    assert [s.setting for s in gate_now.switches] == ["ADMIN_ALLOW_MUTATIONS", setting]
+
+    monkeypatch.setattr(settings, field, False)
+    state = build().state()
+    assert state["enabled"] is False
+    assert setting in state["detail"]
+    assert setting in build().hint
+
+    monkeypatch.setattr(settings, field, True)
+    assert build().state()["enabled"] is True
+
+
+#: What each feature's refusal headline has to say it is refusing. The default
+#: ``MutationsDisabled`` message names ``ADMIN_ALLOW_MUTATIONS`` and nothing
+#: else, so a gate that supplies no message tells an operator whose *feature*
+#: switch is off to go and change a variable that is already true.
+REFUSAL_NAMES = {
+    "router install": "router install",
+    "router uninstall": "router uninstall",
+    "portal subscribe": "subscribing",
+    "node debug pod": "node debug pod",
+    "CLI pod": "CLI session",
+    "project create": "project",
+}
+
+
+@pytest.mark.parametrize("feature", sorted(FEATURE_GATES))
+def test_every_refusal_leads_with_the_thing_it_refused(feature, db_engine):
+    """The headline of the 403, and the first line the operator reads.
+
+    Without it the refusal falls back to ``MutationsDisabled``'s default — "this
+    console is running read-only, writes are disabled by ADMIN_ALLOW_MUTATIONS"
+    — which for a feature switch names the wrong setting entirely and sends
+    somebody to change a variable that is already true.
+
+    This is here because it is the one field of a refusal nothing else asserted.
+    Detail and hint are checked above and by each feature's own tests; dropping
+    the message passed all 1287 of them.
+    """
+    build, _ = FEATURE_GATES[feature]
+    message = build().message
+
+    assert message, "no headline means the generic read-only one, naming the wrong switch"
+    assert REFUSAL_NAMES[feature].lower() in message.lower(), (
+        f"the headline {message!r} never says it is {REFUSAL_NAMES[feature]} that "
+        "is off, so the operator is told something is disabled and not what"
+    )
+
+
+def test_the_hoisted_gate_keeps_the_context_its_caller_added(db_engine):
+    """`require_open`'s ``context`` is why §14 can say *which* router action was
+    refused. It is the only caller-supplied field on the refusal envelope, so
+    nothing else would notice it going missing."""
+    with pytest.raises(MutationsDisabled) as caught:
+        require_open(
+            gate(SHUT, message="Router install is disabled on this console."),
+            verb="create", group="apps", version="v1", plural="deployments",
+            namespace="k8boss-router", name="k8boss-admin-router",
+            dry_run=False, detail="router install refused (switched off)",
+            context={"action": "install"},
+        )
+
+    assert caught.value.context["action"] == "install"
+    assert caught.value.context["resource"] == "deployments", "and the target survives it"
+
+
+@pytest.mark.parametrize("feature", sorted(FEATURE_GATES))
+def test_only_the_two_features_whose_projection_is_the_secret_withhold_a_preview(
+    feature, db_engine,
+):
+    """The one policy difference among the five, asserted for all five in one
+    place rather than described in five docstrings that can disagree.
+
+    A node debug pod's projected manifest is a working recipe for a privileged
+    pod and a CLI pod's is the offer of a kubectl terminal, so a deployment that
+    switched either off did not consent to the preview either. Everywhere else
+    the projection is the operator's own request or a public upstream bundle,
+    and §1.6's rule stands: reading what would change is a read."""
+    build, _ = FEATURE_GATES[feature]
+    withholds = any(s.withholds_dry_run for s in build().switches)
+
+    assert withholds is (feature in WITHHOLDS_THE_PREVIEW)
+
+
+#: Both switches, both features whose switches disagree about the preview, and
+#: the dry-run flag: 16 combinations and what the gate must do with each.
+#:
+#: Written out as a table because the interesting cell is easy to state and easy
+#: to lose in a refactor. A read-only console **still projects a CLI pod** (§15 —
+#: the manifest is a pod running `sleep`) and **refuses to project a node debug
+#: pod** (§5.5 — the manifest is a working recipe for a privileged one). That one
+#: asymmetry is why `withholds_dry_run` sits on the *switch* and not on the
+#: feature, and a change that moved it up a level would still pass every other
+#: test in this file.
+GATE_MATRIX = [
+    # feature, ADMIN_ALLOW_MUTATIONS, the feature's switch, dry_run, refused
+    ("node debug pod", True, True, True, False),
+    ("node debug pod", True, True, False, False),
+    ("node debug pod", True, False, True, True),
+    ("node debug pod", True, False, False, True),
+    ("node debug pod", False, True, True, True),
+    ("node debug pod", False, True, False, True),
+    ("node debug pod", False, False, True, True),
+    ("node debug pod", False, False, False, True),
+    ("CLI pod", True, True, True, False),
+    ("CLI pod", True, True, False, False),
+    ("CLI pod", True, False, True, True),
+    ("CLI pod", True, False, False, True),
+    ("CLI pod", False, True, True, False),   # the asymmetry: §15 still projects
+    ("CLI pod", False, True, False, True),
+    ("CLI pod", False, False, True, True),
+    ("CLI pod", False, False, False, True),
+]
+
+_SETTING_FIELD = {
+    "ADMIN_NODE_DEBUG_ENABLED": "node_debug_enabled",
+    "ADMIN_CLI_ENABLED": "cli_enabled",
+}
+
+
+@pytest.mark.parametrize("feature,mutations,switch,dry_run,refused", GATE_MATRIX)
+def test_the_two_switches_refuse_exactly_where_the_contract_says(
+    feature, mutations, switch, dry_run, refused, db_engine, monkeypatch,
+):
+    build, setting = FEATURE_GATES[feature]
+    monkeypatch.setattr(settings, "admin_allow_mutations", mutations)
+    monkeypatch.setattr(settings, _SETTING_FIELD[setting], switch)
+
+    closed = build().closed(dry_run=dry_run)
+
+    assert (closed is not None) is refused
+    if refused:
+        assert not closed.enabled, "a switch that is on never refuses"
+        assert closed.detail, "and a refusal without a sentence is rule 11.4's forbidden state"
+
+
+def test_no_feature_builds_its_own_refusal_outside_the_funnel(db_engine):
+    """The regression this fold exists to prevent.
+
+    Five features once had their own copy of step one — build the error, write
+    the denial row, log, raise — and the first evidence that a sixth had skipped
+    the row would have been a hole in the trail, found by somebody asking who
+    tried to install a router on a console where that was switched off. There is
+    one constructor now, in the funnel, and this is what keeps it that way."""
+    admin = Path(__file__).resolve().parent.parent / "app" / "admin"
+    builders = sorted(
+        path.name for path in admin.glob("*.py")
+        if "MutationsDisabled(" in path.read_text()
+    )
+
+    assert builders == ["mutate.py"], (
+        "a write that refuses on its own builds its own error, its own audit row "
+        "and its own answer to whether a dry run is withheld; hand `mutate()` a "
+        "FeatureGate instead"
+    )
 
 
 # --------------------------------------------------------------------------- #
