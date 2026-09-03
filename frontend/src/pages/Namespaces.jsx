@@ -7,13 +7,20 @@
  * listing fails, so a cluster where the console lacks `list pods` shows a column
  * of dashes rather than a cluster that appears to be running nothing.
  *
- * Clicking a row sets the console's namespace scope and opens Workloads. There
- * is no namespace detail page, and inventing one that repeated Workloads
- * filtered by namespace would be a second place for the same list to disagree
- * with the first.
+ * Clicking a row sets the console's namespace scope and opens Workloads. The
+ * name is a link to the namespace's own page (§17), which is deliberately not a
+ * Workloads page filtered by namespace — that list has one home — but the
+ * objects no other page shows together: quota usage, limit ranges, the Pod
+ * Security level, role bindings and network policies. The two destinations are
+ * different questions ("what runs here" versus "what governs here"), so the row
+ * and the name go to different places on purpose.
+ *
+ * "New project" is §17's write: a namespace created together with what governs
+ * it, the way `oc new-project` instantiates a project request template. It is
+ * gated on `create namespaces` and disabled with the reason, never hidden.
  */
 import { useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { Button } from '@patternfly/react-core';
 import SyncAltIcon from '@patternfly/react-icons/dist/esm/icons/sync-alt-icon';
 import {
@@ -26,22 +33,30 @@ import {
   StatusBadge,
   Toolbar,
 } from '../components/ui';
+import NewProjectDialog from '../components/NewProjectDialog';
 import { namespaces as namespacesApi } from '../api/client';
 import { useCluster } from '../contexts/ClusterContext';
 import { useNamespace } from '../contexts/NamespaceContext';
-import { useAsync } from './_data';
-import { LabelsCell, Muted, NoClusterState } from './_parts';
+import { useAsync, useGates } from './_data';
+import { ActionButton, LabelsCell, Muted, NoClusterState } from './_parts';
+
+// `create namespaces` is the first of the five verbs a project needs and the
+// one every project needs; the other four are preflighted per object by the
+// dialog's own dry run, where a denial names the object it belongs to.
+const CHECKS = [{ id: 'create', verb: 'create', group: 'core', resource: 'namespaces' }];
 
 export default function Namespaces() {
   const { activeClusterId } = useCluster();
   const { selected, setSelected, refresh: refreshScope } = useNamespace();
   const navigate = useNavigate();
   const [search, setSearch] = useState('');
+  const [creating, setCreating] = useState(false);
 
   const { data, loading, error, reload } = useAsync(() => namespacesApi.list(), {
     key: `namespaces:${activeClusterId}`,
     enabled: activeClusterId != null,
   });
+  const { gate } = useGates(CHECKS, { enabled: activeClusterId != null });
 
   const rows = data?.items ?? [];
 
@@ -53,7 +68,16 @@ export default function Namespaces() {
         sortable: true,
         cell: (row) => (
           <span>
-            {row.name}
+            {/* stopPropagation: the row click scopes the console and opens
+                Workloads; the name opens the namespace's own page. Letting the
+                click bubble would do both, and the second navigation wins. */}
+            <Link
+              to={`/namespaces/${encodeURIComponent(row.name)}`}
+              onClick={(event) => event.stopPropagation()}
+              data-testid="namespace-link"
+            >
+              {row.name}
+            </Link>
             {row.name === selected && <Muted> · current scope</Muted>}
           </span>
         ),
@@ -115,6 +139,11 @@ export default function Namespaces() {
       <PageHeader
         title="Namespaces"
         subtitle={loading ? 'Reading the cluster…' : `${rows.length} namespaces`}
+        actions={[
+          <ActionButton key="create" gate={gate('create')} variant="primary" onClick={() => setCreating(true)}>
+            New project…
+          </ActionButton>,
+        ]}
       />
 
       <PartialBanner unavailable={data?.unavailable} />
@@ -124,7 +153,7 @@ export default function Namespaces() {
           <SearchInput value={search} onChange={setSearch} placeholder="Filter by name or label…" />
         </Toolbar.Item>
         <Toolbar.Item>
-          <Muted>Selecting a row scopes the whole console to that namespace.</Muted>
+          <Muted>Selecting a row scopes the whole console to that namespace; the name opens what governs it.</Muted>
         </Toolbar.Item>
         <Toolbar.Spacer />
         <Toolbar.Item>
@@ -160,6 +189,16 @@ export default function Namespaces() {
         emptyTitle="No namespaces"
         emptyDescription="The listing succeeded and returned none. On a real cluster that cannot happen — check the banner above."
       />
+
+      {creating && (
+        <NewProjectDialog
+          onClose={() => setCreating(false)}
+          onApplied={() => {
+            reload();
+            refreshScope();
+          }}
+        />
+      )}
     </>
   );
 }
