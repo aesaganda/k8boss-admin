@@ -1042,6 +1042,46 @@ declaring nothing, never as `privileged`: the cluster-wide default lives in the
 API server's `AdmissionConfiguration` file, which no API serves, so the console
 cannot know what applies and says so instead of picking the reassuring answer.
 
+### 13.7 Setting the level, with the pods that would violate it
+
+§18 is the one write in this document whose *preview* is the feature. Six labels
+on one namespace, one merge patch, the ordinary funnel — and the reason it exists
+rather than being left to §4's YAML editor is what the API server says back.
+
+**Pod Security admission evaluates the pods already in the namespace when the
+labels change, and reports what it finds as `Warning:` headers — on `dryRun=All`
+exactly as on a real write.** So the preview of "enforce restricted" carries the
+API server's own list of the workloads in that namespace that do not meet it, by
+name and by the field that fails, before anything is confirmed. This console does
+not compute that list, and does not parse it: it is rendered verbatim, one line
+per header, because a summary of somebody else's admission decision is a summary
+that can be wrong about which pods are affected.
+
+**The thing that must be said out loud is that nothing is evicted.** Admission
+runs when a pod is *created*. Raising the enforce level does not stop, restart or
+reschedule anything already running: a workload whose pods violate the new level
+keeps the pods it has and fails to make more, so it stays Available until
+something replaces a pod and then sits below its replica count with a
+`FailedCreate` event and no pod to inspect. An operator who reads
+`enforce: restricted` as "the workloads in front of me are now restricted" is
+wrong about their own cluster, which is this document's defect standard exactly.
+So it is a consequence acknowledged by name (`psa_does_not_evict`), not a
+paragraph in a doc.
+
+**Removing a label is not setting `privileged`, and the request can say which.**
+`null` removes the declaration and hands the namespace back to the cluster's own
+Pod Security default — which lives in a file on the API server that no API
+serves. The console cannot say what will apply afterwards, and
+`psa_enforcement_removed` says that rather than implying everything is admitted.
+
+**One acknowledgement here is the client's, and the response says so.** The
+admission warnings only exist on a response, and this console holds no state
+between the preview and the confirm, so it cannot refuse a write on the grounds
+that nobody read them. The dialog blocks Confirm until an operator ticks a box,
+and states plainly that this one is the dialog asking rather than the backend
+enforcing. Every *other* acknowledgement on this write is recomputed server-side
+against the namespace as it is at write time, and refused if unnamed.
+
 ## 14. What this model does not claim
 
 Being honest about the edges is part of the model:
@@ -1072,6 +1112,11 @@ Being honest about the edges is part of the model:
   `create pods/exec`, and the session is audited on open and close — but within
   the session, the console is a terminal and nothing more. Withholding
   `pods/exec` is the only real control.
+* **Setting a Pod Security level changes what is admitted next, not what is
+  running.** §18 patches six labels; no pod is evicted, restarted or
+  rescheduled, and `applied: true` there means the labels changed and nothing
+  more. The pods the API server named in its admission warnings keep running
+  under a level their spec does not meet until something replaces them.
 * **A project is created, not managed.** §17 writes five objects and stops.
   Nothing watches them, nothing restores a quota somebody edits away, and the
   console's user is not a cluster identity — the RoleBinding is for whichever

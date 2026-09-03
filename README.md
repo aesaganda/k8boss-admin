@@ -349,6 +349,11 @@ version being that there is no undo for a deleted StatefulSet.
   Kubernetes: a namespace created together with a quota, a limit range, a
   binding and, if asked, network isolation — five ordinary writes through the
   funnel, each with its own diff and audit row. See §17.
+* **Pod Security, set with the pods that would break** — change a namespace's
+  admission level and the preview carries the API server's own warnings naming
+  the pods already running that do not meet it, because Pod Security admission
+  returns them on a `dryRun=All` update exactly as on a real one. Nothing is
+  evicted by the change and the dialog says so before you confirm. See §18.
 * **Namespaces, Events, Network, Config, Storage, Access** — Services, Ingresses,
   ConfigMaps, Secrets (key names and byte lengths only), PVCs, PVs,
   StorageClasses, ServiceAccounts, Roles and Bindings.
@@ -577,6 +582,31 @@ tri-state, so a listing that was refused is a failure panel rather than an empty
 one, a quota's `used` is an em dash until the controller has written it, and a
 namespace declaring no Pod Security label is reported as declaring nothing —
 never as `privileged`, because the cluster default lives in a file no API serves.
+
+### Setting the Pod Security level, and seeing what it breaks first
+
+`Set level…` on that page is six labels and one merge patch through the funnel,
+and §4's YAML editor could already write them. What it could not do is answer
+the question you have first.
+
+Pod Security admission evaluates the pods **already running** in a namespace
+when its labels change, and returns what it finds as `Warning:` headers — on a
+`dryRun=All` update exactly as on a real one. So the preview of "enforce
+restricted" comes back carrying the API server's own list of the workloads in
+that namespace that do not meet it, by name and by the field that fails, before
+anything is confirmed. The console renders it verbatim and blocks Confirm until
+you have ticked that you read it; it does not parse that list into a table,
+because a summary of somebody else's admission decision is a summary that can be
+wrong about which pods are affected.
+
+The sentence the dialog will not let you skip is that **nothing is evicted**.
+Admission runs when a pod is created. Raising the level stops nothing that is
+running: a workload whose pods violate it keeps them and fails to make more, so
+it stays Available until something replaces a pod and then sits below its
+replica count with a `FailedCreate` event and no pod to look at. Removing a
+label is not the same as setting `privileged` either — it hands the namespace
+back to a cluster default that lives in a file no API serves, and the console
+says it cannot tell you what that is rather than guessing.
 
 ## Architecture
 
