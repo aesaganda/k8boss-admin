@@ -20,6 +20,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, Path
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.api.bodies import MutationBody
 from app.admin import podsecurity as podsecurity_admin
 from app.admin import projects as projects_admin
 from app.services import projects as projects_service
@@ -83,7 +84,7 @@ class ProjectRequest(BaseModel):
     isolateIngress: bool = False  # noqa: N815
 
 
-class ProjectWriteRequest(ProjectRequest):
+class ProjectWriteRequest(MutationBody, ProjectRequest):
     """The plan's body plus the two fields that make it a write."""
 
     acknowledgeConsequences: list[str] = Field(  # noqa: N815
@@ -92,14 +93,6 @@ class ProjectWriteRequest(ProjectRequest):
             "Every consequence code the plan returned. Named rather than a "
             "boolean: a caller that acknowledged one set and then changed the "
             "request has to read the new one."
-        ),
-    )
-    dry_run: bool = Field(
-        True,
-        alias="dryRun",
-        description=(
-            "Project the Namespace through the API server, render the objects "
-            "inside it, and write nothing."
         ),
     )
 
@@ -126,7 +119,7 @@ class PodSecurityPlanRequest(BaseModel):
     )
 
 
-class PodSecurityWriteRequest(PodSecurityPlanRequest):
+class PodSecurityWriteRequest(MutationBody, PodSecurityPlanRequest):
     """The plan's body plus the two fields that make it a write."""
 
     acknowledgeConsequences: list[str] = Field(  # noqa: N815
@@ -134,15 +127,6 @@ class PodSecurityWriteRequest(PodSecurityPlanRequest):
         description=(
             "Every consequence code the plan returned, named. Recomputed "
             "server-side against the namespace as it is at write time."
-        ),
-    )
-    dry_run: bool = Field(
-        True,
-        alias="dryRun",
-        description=(
-            "Send the patch with dryRun=All. The API server projects the "
-            "namespace and Pod Security admission returns, as Warning headers, "
-            "the pods already in it that do not meet the new level."
         ),
     )
 

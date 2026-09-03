@@ -291,6 +291,56 @@ def test_detail_assembles_pods_conditions_services_and_rollout(client, fake_k8s)
     assert body["unavailable"] == []
 
 
+def test_a_selector_the_console_cannot_render_is_not_reported_as_no_pods(
+    client, fake_k8s,
+):
+    """§0.1 in its purest form, and it left no trace at all.
+
+    `label_selector_string` returns None for a matchExpressions operator it
+    cannot express — correctly, because building a broader query than the
+    workload asked for would list somebody else's pods under it. But the caller
+    then skipped the listing entirely, so `pods` came back `[]` with
+    `partial: false` and an empty `unavailable`: the page said this workload has
+    no pods, with no banner, over a workload that may have hundreds.
+    """
+    deployment = _deployment()
+    deployment.spec.selector = obj(
+        match_labels={},
+        match_expressions=[obj(key="tier", operator="GreaterThan", values=["2"])],
+    )
+    fake_k8s.apps_v1.returns("read_namespaced_deployment", deployment)
+    fake_k8s.core_v1.returns("list_namespaced_service", obj(items=[]))
+
+    body = client.get("/api/workloads/deployments/prod/checkout").json()
+
+    assert body["partial"] is True, "an empty table with no banner is the defect"
+    entry = next(e for e in body["unavailable"] if e["resource"] == "pods")
+    assert entry["reason"] == "unrenderable"
+    assert "matchExpressions" in entry["detail"]
+    assert fake_k8s.core_v1.called("list_namespaced_pod") == [], (
+        "and nothing was listed: a query broader than the selector would put "
+        "other workloads' pods under this one"
+    )
+
+
+def test_an_empty_selector_says_it_selects_everything_rather_than_nothing(
+    client, fake_k8s,
+):
+    """Kubernetes treats an empty LabelSelector as matching every pod in the
+    namespace. Reporting that as "no pods" inverts it exactly."""
+    deployment = _deployment()
+    deployment.spec.selector = obj(match_labels={}, match_expressions=[])
+    fake_k8s.apps_v1.returns("read_namespaced_deployment", deployment)
+    fake_k8s.core_v1.returns("list_namespaced_service", obj(items=[]))
+
+    body = client.get("/api/workloads/deployments/prod/checkout").json()
+
+    assert body["partial"] is True
+    entry = next(e for e in body["unavailable"] if e["resource"] == "pods")
+    assert entry["reason"] == "unrenderable"
+    assert "every pod in the namespace" in entry["detail"]
+
+
 def test_detail_restarts_are_null_when_the_pods_could_not_be_listed(client, fake_k8s):
     """The detail endpoint derives `restarts_24h` itself, and had no test for it.
 

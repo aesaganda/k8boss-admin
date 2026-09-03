@@ -258,6 +258,17 @@ individually. A drain over three pods the API server refused returns
 "Drained" over three stuck pods is the sentence that gets a machine terminated
 with a database still on it.
 
+**And the audit row says the same thing.** A drain is one funnel call performing
+many writes: the cordon patch, which the funnel preflights and diffs, and then
+one eviction per pod inside its `apply_fn`. So the row's outcome is `applied` the
+moment the cordon lands, whatever the evictions did — the response was honest and
+for a while the record that outlives it was not. The sentence is now resolved
+when the row is written rather than before the call, and carries the counts:
+`drain node-5: evicted 12, 3 refused, node NOT drained`. A refusal before the
+evictions ran — the gate, the preflight, the blocked-pods `422` — says only what
+was attempted, because "evicted 0" over a drain that never started would be a
+worse claim than the fixed sentence it replaced.
+
 *What `force` is, and is not.* `force` means "I have read this plan and I accept
 it": it lets execution proceed past the blocked entries. It does **not** give the
 console power it does not have. A PodDisruptionBudget is enforced by the API
@@ -397,11 +408,26 @@ of the four combinations:
 | yes | true | Writes reach the cluster |
 
 The first three are all diagnosable states with a clear message. What is *not*
-diagnosable is a console that writes because a default did it quietly — which is
-why `deploy/rbac.yaml` ships the writer ClusterRole defined but its
-ClusterRoleBinding commented out, and `deploy/deployment.yaml` ships
-`ADMIN_ALLOW_MUTATIONS: "false"`. Enabling writes takes two edits in two files by
-someone who read both.
+diagnosable is a console that writes because a default did it quietly. Enabling
+writes is therefore two edits in two files — the writer `ClusterRoleBinding` in
+`deploy/rbac.yaml` and `ADMIN_ALLOW_MUTATIONS` in `deploy/deployment.yaml` — and
+`ADMIN_ALLOW_MUTATIONS=false` alone stops every write immediately without
+touching RBAC.
+
+**The manifests in this repository have both edits made.** They ship the writer
+binding applied, `ADMIN_ALLOW_MUTATIONS: "true"`, and — deliberately, on request
+— a wildcard `apiGroups: ["*"] / resources: ["*"]` write rule in the writer role.
+`kubectl apply -f rbac.yaml` therefore produces a console that can write to every
+cluster it is registered against, unrestricted. Both files say so in their own
+headers, in those words: it is cluster-admin wearing a different name, it
+includes write over RBAC itself, and it makes the console's ServiceAccount a
+privilege-escalation path for anyone who can reach its port. That is what makes
+`AUTH_ENABLED` load-bearing rather than optional on this deployment, and it is
+why the header enumerates exactly what is live — a comment that misdescribes its
+own YAML sends an operator hunting for a binding that was never there. A
+deployment that wants the bounded console deletes the wildcard rule and keeps the
+typed verbs the features below actually need; `rbac.md` is what each of those
+costs.
 
 Per-permission degradation is catalogued in [`rbac.md`](rbac.md).
 
@@ -750,9 +776,18 @@ silently undoing the change the lock existed to protect.
 OpenShift gates *choosing a hostname* behind its own RBAC subresource, separate
 from creating the Route. The funnel preflights `create routes`, that review
 passes, the API server refuses the write — and the operator is told they cannot
-create Routes, a permission the review just confirmed they hold. §13 preflights
-the subresource explicitly, only for Routes and only when a hostname is actually
-set, and audits the denial because it happens outside the funnel.
+create Routes, a permission the review just confirmed they hold. §13 names the
+subresource explicitly, only for Routes and only when a hostname is actually set.
+
+**The funnel reviews it, and the ordering is the point.** §13 decides whether
+the grant applies; `mutate()` checks it, in step 2, after step 1. This once ran
+before the funnel, which put it ahead of the mutations gate: on a read-only
+console a Route with a hostname was refused `rbac_denied`, sending somebody to
+edit a ClusterRole when the deployment could not write at all. §1 exists to keep
+those two answers apart, and a check that runs before it undoes that for one
+endpoint. The denial is audited against the subresource that was refused, not
+the object — the same misattribution, in the trail, is still a
+misattribution.
 
 ### 11.5 The router is manifests, not a controller
 
@@ -1091,6 +1126,16 @@ Being honest about the edges is part of the model:
   the port private or put an authenticating proxy in front. Built-in local/LDAP
   auth removes that limitation, but does not replace Kubernetes preflight or the
   deployment-wide mutation gate.
+* **The console's users are not cluster identities.** Every call to a cluster is
+  made as that cluster's one registered credential, so §2's preflight answers
+  about the console rather than about the operator reading it — correct about
+  whether the write will succeed, correct about the wrong subject — and the
+  cluster's own audit log records the ServiceAccount for every write this
+  console makes. Two operators with different console roles have identical power
+  over every registered cluster. [`adr-0007-impersonation.md`](adr-0007-impersonation.md)
+  records what impersonating the operator would fix, why the grant it needs is
+  cluster-admin by proxy, and the conditions under which it could be built. It
+  is proposed, not accepted, and nothing implements it.
 * **There is no undo.** This is the reason the whole flow is dry-run-first rather
   than optimistic-with-rollback; see [`adr-0001-dry-run-first.md`](adr-0001-dry-run-first.md).
   A deleted StatefulSet's PersistentVolumeClaims are not recreated by any button

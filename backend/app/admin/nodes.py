@@ -503,6 +503,10 @@ def drain_node(
     # apply_fn owns the plan and the results; this is how they get back out to
     # the response, since mutate's contract is about the object being changed.
     outcome: dict[str, Any] = {}
+    #: Whether the eviction loop ran to completion, which `outcome` cannot say
+    #: on its own. Kept out of `outcome` because that dict is merged into the
+    #: §1.5 response and this is bookkeeping, not something the API promises.
+    progress: dict[str, bool] = {"evictions_ran": False}
 
     def apply_fn(dry: bool) -> tuple[dict[str, Any] | None, list[str]]:
         preflight.require("create", "", "pods", subresource="eviction")
@@ -601,7 +605,47 @@ def drain_node(
         outcome["evicted"] = evicted
         outcome["failed"] = failed
         outcome["drained"] = failed == 0
+        # Only here, after the loop. `outcome["evicted"]` is initialised to 0
+        # with the plan, so it cannot distinguish "no eviction succeeded" from
+        # "no eviction was attempted" — and an audit sentence reading
+        # "evicted 0" over a drain refused before it started is a worse lie than
+        # the fixed sentence it replaced.
+        progress["evictions_ran"] = True
         return node_after, warnings
+
+    def _drain_detail() -> str:
+        """The audit sentence, written when the row is — not before the evictions.
+
+        A drain is one funnel call that performs many writes: the cordon patch
+        the funnel preflights and diffs, and then one eviction per pod inside
+        ``apply_fn``. The row's outcome is therefore ``applied`` as soon as the
+        cordon lands, whatever the evictions did — and a trail saying "drain
+        node-5, applied" over a node that drained nothing is exactly the claim
+        §1.5's ``drained: false`` exists to stop the *response* making. The
+        response was honest and the record that outlives it was not.
+
+        So the counts go in the sentence, resolved at audit time. `evicted`
+        being absent means the evictions never ran — a refusal at the gate, at
+        the preflight, or the blocked-pods `Invalid` raised before the cordon —
+        and the sentence says only what was attempted, because nothing else
+        happened.
+        """
+        line = (
+            f"drain {name}"
+            + (" (dry run)" if dry_run else "")
+            + (", force" if force else "")
+        )
+        if dry_run or not progress["evictions_ran"]:
+            return line
+        line += f": evicted {outcome['evicted']}"
+        if outcome["failed"]:
+            # Named rather than counted into the success: "drained" over pods
+            # the API server refused is the sentence that gets a machine
+            # terminated with a database on it.
+            line += f", {outcome['failed']} refused, node NOT drained"
+        if outcome.get("skipped"):
+            line += f", {outcome['skipped']} skipped"
+        return line
 
     result = mutate(
         verb="patch",
@@ -617,11 +661,7 @@ def drain_node(
         # core/nodes — the funnel issues a real SelfSubjectAccessReview and there
         # is no `drain` verb for an authorizer to match. The audit row's detail
         # says what it actually was.
-        detail=(
-            f"drain {name}"
-            + (" (dry run)" if dry_run else "")
-            + (", force" if force else "")
-        ),
+        detail=_drain_detail,
     )
     result.update(outcome)
     return result

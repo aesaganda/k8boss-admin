@@ -72,6 +72,21 @@ logger = logging.getLogger(__name__)
 #: server's ``Warning:`` headers, verbatim (§1.5).
 ApplyFn = Callable[[bool], "tuple[dict[str, Any] | None, list[str]]"]
 
+#: The audit sentence, or a callable producing it when the row is written.
+#:
+#: A plain string for almost every write, because what will change is known
+#: before the call. A callable for the one write whose true sentence is only
+#: available afterwards: §5.4's drain evicts N pods *inside* its ``apply_fn``,
+#: and how many the API server refused is not knowable until they have been
+#: tried. A fixed sentence there records "drain node-5" with outcome ``applied``
+#: over a node that drained nothing — the honesty §1.5's ``drained: false``
+#: gives the response, missing from the trail that outlives it.
+#:
+#: It is resolved in :func:`_audit`, so it is resolved on **every** terminal
+#: state including the refusals, and must therefore be safe to call before the
+#: apply has run.
+Detail = "str | Callable[[], str | None] | None"
+
 
 def _target(
     group: str, version: str, plural: str, namespace: str | None, name: str | None,
@@ -117,15 +132,21 @@ def _resource_version(after: dict[str, Any] | None, before: dict[str, Any] | Non
 
 def _audit(
     *, verb: str, target: dict[str, Any], dry_run: bool, outcome: str,
-    detail: str | None, diff_digest: str | None = None, error: AdminError | None = None,
+    detail: "str | Callable[[], str | None] | None",
+    diff_digest: str | None = None, error: AdminError | None = None,
 ) -> int | None:
-    """One audit row. Never raises — see :mod:`app.audit`."""
+    """One audit row. Never raises — see :mod:`app.audit`.
+
+    ``detail`` is resolved here rather than at the call site, so a write whose
+    sentence is only true after the apply gets the same treatment on the
+    failure paths as on the success one. See :data:`Detail`.
+    """
     return recorder.record(
         verb=verb,
         target=target,
         dry_run=dry_run,
+        detail=detail() if callable(detail) else detail,
         outcome=outcome,
-        detail=detail,
         diff_digest=diff_digest,
         # code *and* message: the code is what an incident review filters on, the
         # message is what a human reads. Storing only one of them means either
@@ -235,7 +256,8 @@ def _default_gate() -> FeatureGate:
 
 def _require_open(
     gate: FeatureGate, *, verb: str, target: dict[str, Any], dry_run: bool,
-    detail: str | None, context: dict[str, Any] | None = None,
+    detail: "str | Callable[[], str | None] | None",
+    context: dict[str, Any] | None = None,
 ) -> None:
     """Step one: refuse on the first closed switch, audited, before the cluster is touched.
 
@@ -274,7 +296,7 @@ def require_open(
     namespace: str | None,
     name: str | None,
     dry_run: bool,
-    detail: str | None,
+    detail: "str | Callable[[], str | None] | None",
     subresource: str | None = None,
     context: dict[str, Any] | None = None,
 ) -> None:
@@ -308,8 +330,9 @@ def mutate(
     apply_fn: ApplyFn,
     before: dict[str, Any] | None = None,
     subresource: str | None = None,
-    detail: str | None = None,
+    detail: "str | Callable[[], str | None] | None" = None,
     gate: FeatureGate | None = None,
+    also_requires: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Run one mutation through the gate, the preflight, the diff and the trail.
 
@@ -327,11 +350,22 @@ def mutate(
             the audit target.
         detail: the human sentence for the audit row — "replicas 3 -> 5". The
             diff digest proves *what* changed; this says it in a form that fits
-            in a table.
+            in a table. A callable is resolved when the row is written, for a
+            write whose sentence is only true afterwards; see :data:`Detail`.
         gate: the feature's own switches, when it has any (§5.5, §14, §15, §16,
             §17). Evaluated here at step one, so the refusal is audited against
             this write's real target and a feature cannot forget the row.
             ``None`` means the write has only the console-wide switch.
+        also_requires: subresources of *this* object that the write needs the
+            same verb on, beyond the verb on the object itself. §13's
+            ``routes/custom-host`` is the case: OpenShift gates *choosing a
+            hostname* behind its own RBAC subresource, so a ServiceAccount can
+            hold ``create routes``, pass the review above, and still have the
+            API server refuse the write — leaving the operator told they cannot
+            create Routes, a permission the review just confirmed. Checked here
+            rather than by the caller so it happens **after** the gate: a
+            read-only console must answer ``mutations_disabled``, not send
+            somebody to fix a ClusterRole that was never the obstacle.
 
     Returns:
         The §1.5 mutation response.
@@ -355,14 +389,28 @@ def mutate(
     # 2. Preflight (§0.2). A clean denial and a review that could not be
     #    evaluated are different errors, and preflight.require keeps them apart —
     #    both are audited, because both mean the write did not happen.
-    try:
-        preflight.require(
-            verb, group, plural, namespace=namespace, name=name, subresource=subresource
-        )
-    except AdminError as e:
-        _audit(verb=verb, target=target, dry_run=dry_run, outcome="denied",
-               detail=detail, error=e)
-        raise
+    #
+    #    Each `also_requires` subresource is reviewed too, and a denial there is
+    #    audited against *that* subresource rather than the object: a row saying
+    #    `create routes` was denied, when what was refused was
+    #    `routes/custom-host`, is the misattribution this whole check exists to
+    #    prevent, repeated in the trail.
+    for required, audited in [
+        (subresource, target),
+        *(
+            (extra, _target(group, version, plural, namespace, name, extra))
+            for extra in also_requires
+        ),
+    ]:
+        try:
+            preflight.require(
+                verb, group, plural,
+                namespace=namespace, name=name, subresource=required,
+            )
+        except AdminError as e:
+            _audit(verb=verb, target=audited, dry_run=dry_run, outcome="denied",
+                   detail=detail, error=e)
+            raise
 
     # 3. Apply. The only step that reaches the cluster.
     try:
@@ -411,4 +459,4 @@ def mutate(
     }
 
 
-__all__ = ["ApplyFn", "FeatureGate", "Switch", "mutate", "read_only_switch", "require_open"]
+__all__ = ["ApplyFn", "Detail", "FeatureGate", "Switch", "mutate", "read_only_switch", "require_open"]

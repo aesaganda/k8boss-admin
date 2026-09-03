@@ -15,7 +15,7 @@ server, and nothing here decides whether a write is allowed.
 
 One thing *is* decided here, and only here: the wire shapes. ``dryRun`` defaults
 to true on every write body, spelled both ways, for the reason §6's
-``_MutationBody`` gives — a client that forgot the field must get a projection,
+``MutationBody`` gives — a client that forgot the field must get a projection,
 and a client that sent ``dry_run`` must not silently get one when it asked for a
 write.
 """
@@ -28,6 +28,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, Path, Query
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.api.bodies import MutationBody
 from app.admin import router as router_service
 from app.admin import routes as routes_admin
 from app.services import routes as routes_service
@@ -45,18 +46,6 @@ BackendKey = Literal["openshift", "ingress", "gateway"]
 # --------------------------------------------------------------------------- #
 # Request bodies
 # --------------------------------------------------------------------------- #
-
-class _MutationBody(BaseModel):
-    """Shared base for every §1.5 write body. See §6's copy for why."""
-
-    model_config = ConfigDict(populate_by_name=True)
-
-    dry_run: bool = Field(
-        True,
-        alias="dryRun",
-        description="Send dryRun=All to the API server and return the projected diff.",
-    )
-
 
 class TargetModel(BaseModel):
     """One Service an exposure sends traffic to."""
@@ -155,7 +144,7 @@ class RenderRequest(BaseModel):
     )
 
 
-class _ExposureWrite(_MutationBody):
+class _ExposureWrite(MutationBody):
     """Shared body for creating and replacing an exposure.
 
     ``spec`` is optional and its absence is meaningful: with a ``document`` and
@@ -222,7 +211,7 @@ class RouterOptionsRequest(BaseModel):
     image: str | None = Field(None, max_length=512)
 
 
-class RouterInstallRequest(_MutationBody, RouterOptionsRequest):
+class RouterInstallRequest(MutationBody, RouterOptionsRequest):
     pass
 
 

@@ -763,11 +763,23 @@ an install and not a configuration:
   PVCs/PVs/StorageClasses, Ingresses, RBAC objects, PodDisruptionBudgets, CRD
   definitions, plus API discovery and `create selfsubjectaccessreviews` (which
   creates nothing — it is how preflight asks).
-* **`k8boss-admin-writer`** — defined, **binding commented out**. Adds the write
-  verbs: `*/scale`, `patch` on workload kinds, `patch nodes`, `create
+* **`k8boss-admin-writer`** — **bound in these manifests**, and carrying a
+  wildcard `apiGroups: ["*"] / resources: ["*"]` write rule that was opted into
+  deliberately. Its typed rules are the write verbs the features use: `*/scale`,
+  `patch` on workload kinds, `patch nodes`, `patch namespaces`, `create
   pods/eviction`, `delete pods`, `create pods/exec`, `get,patch
   pods/ephemeralcontainers`, and create/update/delete on the config, storage and
   networking resources.
+
+  **Read `deploy/rbac.yaml`'s header before applying it.** It enumerates exactly
+  what is live and says plainly what the wildcard rule means: cluster-admin
+  wearing a different name, including write over RBAC itself, which makes the
+  console's ServiceAccount a privilege-escalation path for anyone who can reach
+  its port. `deploy/deployment.yaml` ships `ADMIN_ALLOW_MUTATIONS: "true"` to
+  match, and `AUTH_ENABLED` is load-bearing rather than optional as a result.
+  Delete the wildcard rule to get the bounded console the typed rules describe;
+  set `ADMIN_ALLOW_MUTATIONS=false` to stop every write immediately without
+  touching RBAC.
 
 Two rules are worth knowing before you apply anything:
 
@@ -838,6 +850,7 @@ Before enabling the optional Ingress, either enable local/LDAP auth with the
 | [`docs/adr-0001-dry-run-first.md`](docs/adr-0001-dry-run-first.md) | Why dry-run-then-confirm rather than optimistic-with-undo |
 | [`docs/adr-0002-lineage.md`](docs/adr-0002-lineage.md) | What came from K8Boss, what did not, why they stay separate |
 | [`docs/adr-0006-projects.md`](docs/adr-0006-projects.md) | Why a project is five ordinary writes and not a template engine, and where that line is |
+| [`docs/adr-0007-impersonation.md`](docs/adr-0007-impersonation.md) | **Proposed.** Why the console acts as one ServiceAccount per cluster, what impersonating the operator would fix and cost, and the conditions it would have to meet |
 | [`CLAUDE.md`](CLAUDE.md) | Working agreements for anyone (or anything) changing this repository |
 
 ## License

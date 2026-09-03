@@ -49,7 +49,7 @@ from kubernetes.client.rest import ApiException
 from app.errors import Invalid, NotFound, from_api_exception
 from app.k8s.client import get_apps_v1, get_batch_v1, get_core_v1
 from app.models import rfc3339 as _rfc3339_datetime
-from app.resources.envelope import collect, envelope
+from app.resources.envelope import collect, envelope, unavailable_entry
 from app.resources.shaping import phase_detail, pod_row
 
 logger = logging.getLogger(__name__)
@@ -1435,6 +1435,30 @@ def get_workload_detail(plural: str, namespace: str, name: str) -> dict:
                 verb="list", group="", resource="pods", namespace=namespace,
             ):
                 pods = _list_pods(namespace, label_selector=label_selector)
+        else:
+            # No query was built, so no listing happened — and `pods` must stay
+            # `None` and say so. Rendering the empty list here is the §0.1 defect
+            # in its purest form: the page prints "this workload has no pods"
+            # over a workload that may have hundreds, and an operator reading it
+            # during an incident concludes the ReplicaSet is making none.
+            #
+            # Two ways to get here, and the sentence distinguishes them because
+            # they need different things done about them.
+            unavailable.append(unavailable_entry(
+                "", "pods", "unrenderable",
+                namespace=namespace,
+                detail=(
+                    "This workload's selector matches every pod in the "
+                    "namespace, so the pods listed under it would not be its "
+                    "own. Kubernetes treats an empty LabelSelector as selecting "
+                    "everything."
+                    if selector is not None and selector_is_empty(selector)
+                    else "This workload's selector uses a matchExpressions "
+                    "operator this console cannot render as a labelSelector "
+                    "query, so its pods were not listed. Every pod in the "
+                    "namespace is on the Pods page."
+                ),
+            ))
 
     restarts = None if pods is None else sum(restarts_in_window(pod, now=now) for pod in pods)
 
@@ -1448,6 +1472,10 @@ def get_workload_detail(plural: str, namespace: str, name: str) -> dict:
     return {
         "workload": workload_row(obj, spec.kind, restarts_24h=restarts, now=now),
         "spec": _spec_block(obj, spec.kind),
+        # `[]` even when nothing was listed, paired with `partial` and the
+        # `unavailable` entry that names the pod read — the convention this
+        # payload already follows, and what §1.1 requires an empty list to be
+        # accompanied by. The banner is the signal, not the list's type.
         "pods": _pod_rows(pods or []),
         "conditions": _conditions_block(obj),
         "services": _matching_services(services or [], template_labels),

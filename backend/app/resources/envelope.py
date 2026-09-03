@@ -48,7 +48,21 @@ logger = logging.getLogger(__name__)
 #: these, so the set is fixed by the contract and adding to it is a contract
 #: change, not an implementation detail.
 UNAVAILABLE_REASONS: frozenset[str] = frozenset(
-    {"forbidden", "not_found", "unreachable", "timeout", "not_registered", "unsupported"}
+    {
+        "forbidden",
+        "not_found",
+        "unreachable",
+        "timeout",
+        "not_registered",
+        "unsupported",
+        # The read was never attempted, because this console could not build the
+        # query that would answer it — §6's workload detail meets this when a
+        # LabelSelector uses an operator it cannot render, or selects
+        # everything. Distinct from `unsupported`, which says the *cluster* does
+        # not serve something and is rendered as an ordinary fact; this one is a
+        # limit of the console and the section is genuinely unknown.
+        "unrenderable",
+    }
 )
 
 # HTTP statuses that mean "the API server ran out of time", as distinct from
@@ -149,7 +163,7 @@ def envelope(
     }
 
 
-def reason_for_error(error: AdminError) -> str:
+def reason_for_error(error: AdminError) -> str | None:
     """Map an :class:`~app.errors.AdminError` to its §1.2 reason token.
 
     Mostly delegates to ``AdminError.unavailable_reason``, with one refinement
@@ -160,6 +174,10 @@ def reason_for_error(error: AdminError) -> str:
     so the UI can tell an operator to check the network in one case and to narrow
     their query in the other; collapsing them here would throw away a distinction
     the transport layer went to the trouble of making.
+
+    ``None`` when the error is not a statement about whether we could read —
+    see :attr:`app.errors.AdminError.unavailable_reason`. A caller holding a
+    ``None`` must propagate the error rather than invent a token for it.
     """
     if error.context.get("cause") == "timeout":
         return "timeout"
@@ -197,6 +215,17 @@ def collect(
     the same class of confidently wrong answer this whole module exists to
     prevent, pointed at the wrong system.
 
+    **An ``AdminError`` that is not a statement about availability propagates
+    too**, and for exactly that reason. ``invalid`` and ``conflict`` mean the
+    cluster answered and the request this console built was wrong; §12's
+    authentication codes are about the person signed in, not a cluster read.
+    None of them can honestly be rendered as "we could not look at this", so
+    :func:`reason_for_error` returns ``None`` for them and this re-raises rather
+    than picking the nearest token. The previous behaviour — a fallback to
+    ``unreachable`` — turned every such bug into a degraded column with a
+    sentence about somebody's network in it, which is where a bug of that shape
+    lives forever.
+
     Yields a :class:`Collected` describing what happened, for the callers that
     need to say something about it beyond leaving a ``None`` behind.
     """
@@ -205,10 +234,16 @@ def collect(
     try:
         yield state
     except AdminError as e:
+        reason = reason_for_error(e)
+        if reason is None:
+            # Not a statement about whether we could read. See the docstring:
+            # rendering it as one would hide a defect in this process behind a
+            # sentence about the cluster.
+            raise
         state.failed = True
         state.error = e
         state.entry = unavailable_entry(
-            group, resource, reason_for_error(e), detail=e.detail or e.message,
+            group, resource, reason, detail=e.detail or e.message,
             namespace=namespace,
         )
         sink.append(state.entry)
@@ -227,6 +262,10 @@ def collect(
         # failed" is the right answer), but for a partial read the operator-
         # facing distinction that matters is timeout versus unreachable.
         reason = "timeout" if status in _TIMEOUT_STATUSES else reason_for_error(mapped)
+        if reason is None:
+            # A 422 or 409 from a secondary read: the API server answered, and
+            # what it refused was the request we built. Same reasoning as above.
+            raise mapped from e
         state.failed = True
         state.error = mapped
         state.entry = unavailable_entry(

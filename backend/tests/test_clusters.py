@@ -417,6 +417,69 @@ def test_overview_collects_every_sub_object(client, registered_cluster, healthy_
     assert body["unavailable"] == []
 
 
+def test_the_overview_and_the_nodes_page_agree_on_what_is_requested(
+    client, registered_cluster, healthy_cluster,
+):
+    """One algorithm, asserted from both ends.
+
+    §2's overview used to sum `spec.containers` alone, on the reasoning that
+    init containers have finished by the time a pod is Running. True of an
+    ordinary init container; false of a **sidecar** — an init container with
+    `restartPolicy: Always`, which runs for the pod's whole life — and false of
+    `spec.overhead`, which the scheduler charges and no container carries. A
+    cluster running a service mesh has a sidecar in every pod, so the two pages
+    reported two different numbers for the same quantity, and the overview was
+    the low one: the direction that reads as headroom.
+    """
+    from app.services.nodes import requested_total
+
+    pods = [
+        obj(status=obj(phase="Running"), spec=obj(
+            containers=[obj(resources=obj(requests={"cpu": "500m", "memory": "512Mi"}))],
+            # A service-mesh sidecar: never finishes, always charged.
+            initContainers=[obj(
+                restartPolicy="Always",
+                resources=obj(requests={"cpu": "100m", "memory": "128Mi"}),
+            )],
+            # The RuntimeClass's own cost. A Kata sandbox is not free.
+            overhead={"cpu": "250m", "memory": "120Mi"},
+        )),
+    ]
+    healthy_cluster.core_v1.returns("list_pod_for_all_namespaces", obj(items=pods))
+
+    body = client.get(f"/api/clusters/{registered_cluster.id}/overview").json()
+
+    assert body["requested"] == requested_total(pods), (
+        "the overview must not compute this a second way"
+    )
+    assert body["requested"]["cpu_cores"] == 0.85, "500m app + 100m sidecar + 250m overhead"
+    assert body["requested"]["memory_bytes"] == (512 + 128 + 120) * 2 ** 20
+
+
+def test_a_quantity_the_console_cannot_parse_nulls_its_dimension_not_the_page(
+    client, registered_cluster, healthy_cluster,
+):
+    """§5's rule, now applied here too: a value that will not parse makes its
+    dimension `null` rather than dropping out of the sum.
+
+    Dropping it produces a smaller number, and a smaller number here reads as
+    headroom — which sends somebody to schedule onto a cluster that cannot take
+    it. The pod phase counts beside it are unaffected: one unreadable quantity
+    costs one number, not the page.
+    """
+    healthy_cluster.core_v1.returns("list_pod_for_all_namespaces", obj(items=[
+        obj(status=obj(phase="Running"), spec=obj(containers=[
+            obj(resources=obj(requests={"cpu": "not-a-quantity", "memory": "512Mi"})),
+        ])),
+    ]))
+
+    body = client.get(f"/api/clusters/{registered_cluster.id}/overview").json()
+
+    assert body["requested"]["cpu_cores"] is None
+    assert body["requested"]["memory_bytes"] == 512 * 2 ** 20
+    assert body["pods"]["total"] == 1, "and the phase counts still answered"
+
+
 def test_one_failing_collector_nulls_its_own_key_and_says_so(
     client, registered_cluster, healthy_cluster
 ):

@@ -904,9 +904,12 @@ def test_a_route_with_a_hostname_preflights_the_custom_host_subresource(
     assert caught.value.context.get("subresource") == "custom-host"
 
 
-def test_that_denial_is_audited_even_though_it_is_outside_the_funnel(
+def test_that_denial_is_audited_against_the_subresource_that_was_refused(
     monkeypatch, fake_k8s, allow_mutations, db_session,
 ):
+    """A row saying `create routes` was denied, when what was refused was
+    `routes/custom-host`, is the misattribution this check exists to prevent —
+    repeated in the trail, where it is read later and by somebody else."""
     from app.errors import RBACDenied
     from app.models import AuditRecord
 
@@ -919,6 +922,60 @@ def test_that_denial_is_audited_even_though_it_is_outside_the_funnel(
     record = db_session.query(AuditRecord).order_by(AuditRecord.id.desc()).first()
     assert record.outcome == "denied"
     assert "checkout.example.com" in record.detail
+    assert record.target["subresource"] == "custom-host"
+    assert record.target["resource"] == "routes"
+
+
+def test_a_read_only_console_says_so_rather_than_naming_the_missing_grant(
+    monkeypatch, fake_k8s, db_session,
+):
+    """The ordering the funnel exists to fix.
+
+    This check used to run *before* `mutate()`, so it ran before the mutations
+    gate. On a read-only console a Route carrying a hostname came back
+    `403 rbac_denied`, sending an operator to widen a ClusterRole when the
+    deployment was simply not permitted to write at all — the wrong-system error
+    §1.3 gives `mutations_disabled` its own code to prevent. `allow_mutations` is
+    deliberately absent from this test's fixtures.
+    """
+    from app.errors import MutationsDisabled
+
+    stub_discovery(monkeypatch)
+    _deny_custom_host(fake_k8s)
+
+    with pytest.raises(MutationsDisabled):
+        admin_routes.create_route("openshift", exposure(), dry_run=False)
+
+    assert fake_k8s.authorization_v1.calls == [], (
+        "and the review is never even asked: the gate refuses before the "
+        "cluster is touched, which is what step one being step one means"
+    )
+
+
+def test_the_replace_path_checks_the_subresource_too(
+    monkeypatch, fake_k8s, allow_mutations,
+):
+    """Changing a Route's hostname needs the grant as much as setting it did."""
+    from app.errors import RBACDenied
+
+    stub_discovery(monkeypatch)
+    _deny_custom_host(fake_k8s)
+    monkeypatch.setattr(
+        admin_routes.apply_service.reader, "get_resource",
+        lambda *a, **kw: {
+            "apiVersion": "route.openshift.io/v1", "kind": "Route",
+            "metadata": {"name": "checkout", "namespace": "prod", "resourceVersion": "3"},
+            "spec": {"host": "old.example.com"},
+        },
+    )
+
+    with pytest.raises(RBACDenied) as caught:
+        admin_routes.update_route(
+            "openshift", "prod", "checkout", exposure(),
+            resource_version="3", dry_run=True,
+        )
+
+    assert caught.value.context.get("subresource") == "custom-host"
 
 
 def test_a_route_with_no_hostname_does_not_need_the_custom_host_grant(

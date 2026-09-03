@@ -24,6 +24,7 @@ import logging
 from fastapi import APIRouter, Path, Query
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.api.bodies import MutationBody
 from app.admin.rollout import rollback_workload, rollout_history
 from app.admin.scale import restart_workload, scale_workload, suspend_workload
 from app.errors import Invalid
@@ -43,28 +44,7 @@ router = APIRouter(prefix="/api", tags=["workloads"])
 # Request bodies
 # --------------------------------------------------------------------------- #
 
-class _MutationBody(BaseModel):
-    """Shared base for every §1.5 write body.
-
-    ``dryRun`` defaults to **true**, and the alias accepts ``dry_run`` as well.
-    Both halves are safety, not convenience: a client that forgets the field gets
-    a dry run rather than a write, and a client that sends the snake_case
-    spelling is understood instead of silently falling back to the default —
-    which, for a field named ``dryRun``, would mean the caller asking for a real
-    write and receiving a dry run reported as ``applied: false``. That is the one
-    misunderstanding in this API that costs an operator an incident.
-    """
-
-    model_config = ConfigDict(populate_by_name=True)
-
-    dry_run: bool = Field(
-        True,
-        alias="dryRun",
-        description="Send dryRun=All to the API server and return the projected diff.",
-    )
-
-
-class ScaleRequest(_MutationBody):
+class ScaleRequest(MutationBody):
     replicas: int = Field(
         ...,
         ge=0,
@@ -78,11 +58,11 @@ class ScaleRequest(_MutationBody):
     )
 
 
-class RestartRequest(_MutationBody):
+class RestartRequest(MutationBody):
     """No fields beyond ``dryRun`` — a restart has no parameters."""
 
 
-class SuspendRequest(_MutationBody):
+class SuspendRequest(MutationBody):
     suspend: bool = Field(
         ...,
         # Required, with no default. Defaulting to true would let an empty body
@@ -93,7 +73,7 @@ class SuspendRequest(_MutationBody):
     )
 
 
-class RollbackRequest(_MutationBody):
+class RollbackRequest(MutationBody):
     revision: int = Field(
         ...,
         ge=1,

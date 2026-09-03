@@ -57,7 +57,7 @@ from typing import Any
 
 from kubernetes.client.rest import ApiException
 
-from app.admin.apply import read_object
+from app.resources.reader import read_object
 from app.errors import NotFound
 from app.k8s.client import get_core_v1
 from app.resources import catalog, shaping
@@ -84,7 +84,8 @@ _METRICS_FALLBACK_VERSION = "v1beta1"
 def _read_pod(namespace: str, name: str) -> dict[str, Any]:
     """The live pod, as a plain dict.
 
-    Through :func:`app.admin.apply.read_object` rather than the generic reader,
+    Through :func:`app.resources.reader.read_object` rather than
+    :func:`~app.resources.reader.get_resource`,
     for the reason that function documents: group, version and scope are already
     known here, so a discovery round trip to re-learn "core/v1 pods is
     namespaced" would be paid on every request for nothing. ``read_object`` also
