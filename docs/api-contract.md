@@ -151,6 +151,15 @@ Every write body accepts `dryRun` (bool, default **true**). Every write response
 - `diff.changed: false` on a dry-run means the write is a no-op. The UI offers
   "nothing would change" rather than a confirm button.
 - `warnings` carries the API server's `Warning:` headers verbatim.
+- **A Secret's diff never carries a value.** For `""/secrets`, every `data`
+  entry on both sides is rendered as `<redacted, N bytes>` — the key and its
+  decoded size — with `, changed` appended on the `proposed` side when the value
+  differs from the live one, so `changed` still reports a real edit. A key that
+  is added or removed shows as a hunk; one whose value is unchanged produces
+  none. `stringData` in a submitted manifest is redacted by plaintext length.
+  This holds for a delete's `diff.before`, a replace, and the fresh diff on a
+  `409`, and the audit digest is over the redacted text. §8's reveal gate is the
+  only path that returns a value.
 
 ### 1.6 Read-only mode
 
@@ -331,7 +340,9 @@ Query `namespace`, `propagationPolicy` (`Background`|`Foreground`|`Orphan`,
 default `Background`), `dryRun` (default **true**).
 
 A delete dry-run returns `diff.before` = the live object and `diff.after` = `null`
-with `changed: true`, so the confirm dialog can show exactly what disappears.
+with `changed: true`, so the confirm dialog can show exactly what disappears. For
+a Secret, "the live object" is the redacted rendering §1.5 describes: the keys
+and their sizes, never a value.
 
 ---
 

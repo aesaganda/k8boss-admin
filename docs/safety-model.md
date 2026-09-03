@@ -638,6 +638,25 @@ listing and hiding the values in CSS. The bytes are then in the browser, in the
 network tab, and in any logging proxy between the two — and nobody who looked at
 the page believes they read a secret.
 
+**The mutation diff is the other channel a value could leave by, and it never
+carries one.** Every write of a Secret passes the live object through the funnel
+as the left side of its diff — a delete, a replace, the fresh diff a 409 carries
+— and the live object holds every value. Until this was closed, a *dry-run*
+delete of a Secret returned the whole object in `diff.before`: permitted in
+read-only mode, preflighted on `delete` rather than `get`, audited as an
+ordinary dry run, and gated by nothing above. So `build_diff` redacts a Secret's
+`data` on both sides before it diffs, into `<redacted, N bytes>` placeholders
+that keep the key and the decoded size and carry `changed` on the proposed side
+when the value differs from the live one. The marker is what keeps `changed`
+honest — a same-length password rotation would otherwise redact to identical
+text on both sides and be reported as a write that changes nothing, which is a
+confirm dialog with no Confirm. `stringData` in a submitted manifest is redacted
+by plaintext length, the last-applied annotation is dropped as it is on every
+diff, and the audit digest is computed over the redacted text, so the trail is
+not a place a value can be recovered from either. Keyed on the object's kind
+inside `build_diff` rather than on a flag a caller passes, so no future write
+path has to remember it.
+
 ---
 
 ---
