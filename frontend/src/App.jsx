@@ -76,6 +76,7 @@ const Events = lazyPage('Events', () => import('./pages/Events'));
 const Explorer = lazyPage('Explorer', () => import('./pages/Explorer'));
 const CustomResources = lazyPage('CustomResources', () => import('./pages/CustomResources'));
 const Portal = lazyPage('Operator portal', () => import('./pages/Portal'));
+const ClusterStatus = lazyPage('Cluster status', () => import('./pages/ClusterStatus'));
 const Clusters = lazyPage('Clusters', () => import('./pages/Clusters'));
 const Audit = lazyPage('Audit', () => import('./pages/Audit'));
 const Users = lazyPage('Users', () => import('./pages/Users'));
@@ -146,6 +147,11 @@ function ConsoleRoutes() {
                   than inside it: subscribing is what *installs* the CRDs that
                   page browses, and it is a write, not a browser. */}
               <Route path="portal" element={<Portal />} />
+
+              {/* §19. The control plane's own health. Not under "clusters",
+                  which is the registry of clusters this console can reach —
+                  this page is about the one it is pointed at right now. */}
+              <Route path="cluster-status" element={<ClusterStatus />} />
 
               <Route path="clusters" element={<Clusters />} />
               <Route path="audit" element={<Audit />} />

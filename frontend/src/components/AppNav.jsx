@@ -83,7 +83,16 @@ export default function AppNav() {
           Overview
         </RouterNavItem>
 
-        <NavSection id="cluster" title="Cluster" routes={['/nodes', '/namespaces', '/events']}>
+        <NavSection
+          id="cluster"
+          title="Cluster"
+          routes={['/cluster-status', '/nodes', '/namespaces', '/events']}
+        >
+          {/* §19. First in the section and above Nodes: it is the page that
+              answers "is the control plane itself all right", and the honest
+              order is to establish that before reading anything the control
+              plane told us about the nodes. */}
+          <RouterNavItem to="/cluster-status">Status</RouterNavItem>
           <RouterNavItem to="/nodes">Nodes</RouterNavItem>
           <RouterNavItem to="/namespaces">Namespaces</RouterNavItem>
           <RouterNavItem to="/events">Events</RouterNavItem>

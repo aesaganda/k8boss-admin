@@ -42,6 +42,7 @@ from app.middleware.auth import AuthenticationMiddleware
 from app.api.access import router as access_router
 from app.api.audit import router as audit_router
 from app.api.cli import router as cli_router
+from app.api.cluster_status import router as cluster_status_router
 from app.api.clusters import router as clusters_router
 from app.api.debug import router as debug_router
 from app.api.events import router as events_router
@@ -152,6 +153,7 @@ register_exception_handlers(app)
 app.include_router(health_router)
 app.include_router(auth_router)
 app.include_router(clusters_router)
+app.include_router(cluster_status_router)
 app.include_router(resources_router)
 app.include_router(namespaces_router)
 app.include_router(events_router)

@@ -3093,3 +3093,147 @@ warning lines, which is what the API server sent. **It does not check that the
 warnings were read** — the console holds no state between the preview and the
 confirm, so the dialog blocks Confirm until an operator ticks the box and says
 plainly that this one is the client asking, not the server enforcing.
+
+---
+
+## 19. Cluster status — the control plane's own health, from what vanilla serves
+
+### 19.1 What it is, and what it refuses to be
+
+OpenShift answers "is this cluster healthy" with `ClusterOperator` and
+`ClusterVersion`: one object per platform component, each carrying `Available`,
+`Degraded` and `Progressing`, rolled up into a single line at the top of its
+console. **Vanilla Kubernetes serves no such API.** It serves five unrelated ones
+that between them answer most of the same question, and an operator on a vanilla
+cluster reaches them with five `kubectl` invocations and a lot of `jq`.
+
+§19 is those five reads, joined. It is **not** a monitoring system: no history,
+no configurable thresholds, no alerting, no state. Every number is a live read
+taken when the page loaded, like every other page here.
+
+**There is no aggregate verdict, and there will not be one.** No `healthy`
+field, no traffic light. A stale `cloud-controller-manager` lease with no
+aggregated APIs is a normal Tuesday on one cluster and an outage on another, and
+a single boolean would have to pick. The response carries the findings and their
+counts; the judging belongs to the person who knows the cluster.
+
+### 19.2 `GET /api/cluster-status`
+
+No parameters. One response, five independently nullable sections, plus §0.1's
+`partial` and `unavailable[]`:
+
+```json
+{
+  "controlPlane": [ … ] | null,
+  "apiServices": { "items": [ … ], "local_count": 28, "unavailable_count": 1 } | null,
+  "crds":        { "items": [ … ], "total": 74, "unhealthy_count": 1 } | null,
+  "webhooks":    { "items": [ … ], "blocking_count": 1 | null, "complete": true } | null,
+  "versionSkew": { "server_version": "v1.31.4", "supported_minors_behind": 3,
+                   "nodes": [ … ] | null, "out_of_skew_count": 1 | null } | null,
+  "partial": false,
+  "unavailable": []
+}
+```
+
+**A section is `null` when its read did not happen**, with the reason in
+`unavailable[]` and `partial` true. This is §0.1 applied per section rather than
+per response, because the five reads are five different permissions: a console
+that may not list `admissionregistration.k8s.io` still has an honest answer about
+version skew. A `null` section is **never** rendered as the healthy answer — "we
+could not read the admission webhooks" and "this cluster has no admission
+webhooks" send an operator to two different places, and only the second is good
+news.
+
+### 19.3 The five signals, and why each is honest on vanilla
+
+**Leader-election leases** (`coordination.k8s.io/v1`, `kube-system`).
+`kube-controller-manager` and `kube-scheduler` renew a Lease every few seconds.
+`stale` is true when `renewTime` is older than the lease's own
+`leaseDurationSeconds` — which is what a wedged controller looks like from the
+API server's side. It is **tri-state**: `null` when either half is missing, since
+a lease nobody has acquired has no `renewTime`, and calling that stale reports a
+component as wedged on the strength of a field nobody wrote.
+
+Every lease in the namespace is listed, not a filtered set: a cluster runs
+leader-elected components this console has never heard of, and the one that
+stopped renewing is exactly as interesting as `kube-scheduler`.
+
+**Aggregated APIServices** (`apiregistration.k8s.io/v1`). An APIService with a
+`spec.service` is served by a pod, and its `Available` condition is that pod
+answering. This is where `metrics.k8s.io` goes when §7.7 starts returning
+`unsupported`, and §19 is the only place the *reason* is written down. Only the
+aggregated ones are listed — the locally served ones are `Available` on any
+cluster that is answering at all, and thirty rows of guaranteed-green is how a
+table stops being read. They are counted in `local_count` so the total adds up.
+
+**CustomResourceDefinitions** (`apiextensions.k8s.io/v1`). A CRD whose
+`Established` condition is not true serves nothing; one carrying
+`NonStructuralSchema` cannot be pruned or converted. Only the unhealthy ones are
+listed, with `total` alongside — three problems out of four hundred and three out
+of five are different mornings.
+
+**Admission webhooks** (`admissionregistration.k8s.io/v1`, plus an EndpointSlice
+listing). One row per webhook, not per configuration, because `failurePolicy`
+and the backing Service are set per webhook. The row this section exists for is
+`failurePolicy: Fail` with `endpoint_count: 0`: that webhook is **refusing every
+write it intercepts, cluster-wide**, until its backend returns. It is the most
+effective way to break a Kubernetes cluster without touching a node, and nothing
+else in this console — or in `kubectl` — puts it in front of anyone.
+
+`endpoint_count` is nullable twice over, and the two nulls mean different things
+the UI states separately: `null` on a URL-addressed webhook means there is
+nothing *in the cluster* to count (it may be answering perfectly well), and
+`null` on a Service-addressed one means the EndpointSlice listing did not answer.
+Neither may render as `0`, which is the finding.
+
+`complete` is false when one of the two configuration listings answered and the
+other did not — the rows are real, but they are not all of them.
+
+**`blocking_count` is `null`, not `0`, when the EndpointSlice listing did not
+answer.** With every `endpoint_count` at `null` nothing matches the predicate, so
+the naive count reports "no webhook is refusing writes" off a read that never
+happened — this section's one finding, delivered backwards, during exactly the
+outage that produces it. The rows are still returned; only the verdict is
+withheld.
+
+**Version skew** (`/version` and the node listing). A kubelet more than
+`supported_minors_behind` (3, Kubernetes' documented policy since 1.28) minors
+behind the API server is outside support, and a kubelet *ahead* of it is
+unsupported at any distance. Per-node `status` is `ok`, `behind`, `ahead` or
+**`unknown`** — the last whenever either version string could not be parsed,
+because a skew rule applied to a number we do not have is a verdict about a node
+nobody checked. Distribution suffixes (`v1.30.6-eks-abc1234`, `v1.31.4+rke2r1`)
+parse by prefix rather than failing.
+
+`nodes` and `out_of_skew_count` are **both** `null` when the node listing was
+refused, while `server_version` still answers and the section stays — the API
+server's version is worth reading on its own, and `0` there would claim no node
+is out of skew on the strength of nodes nobody listed. The whole section is
+`null` only when neither read answered.
+
+### 19.4 What §19 deliberately does not report
+
+**etcd.** No vanilla API reports etcd health to a client with ordinary RBAC; the
+API server's `/readyz` includes an etcd check and is not readable on most
+clusters. "etcd: unknown" in a table of things that are known is filler, so the
+page says nothing about etcd.
+
+**Reachability.** §19 never claims a webhook, an aggregated API or a controller
+is *reachable*. It reports what the API server recorded about them — a condition
+it wrote, an endpoint count, a renewal timestamp. Reachability from here would be
+a guess about a network this console is not on.
+
+**A missing component.** On EKS, GKE, AKS and every managed control plane, the
+scheduler and controller-manager run where the customer cannot see them and
+`kube-system` may hold no lease for them at all. §19 lists the leases that
+**exist** and says nothing about the ones that do not. "kube-scheduler: MISSING"
+on a healthy EKS cluster is exactly the confidently wrong answer §0 rules out.
+
+### 19.5 Permissions
+
+Five listings, each degrading only its own section: `list leases` in
+`kube-system`, `list apiservices`, `list customresourcedefinitions`, `list
+validatingwebhookconfigurations` and `mutatingwebhookconfigurations`, `list
+endpointslices`, and `list nodes`. `docs/rbac.md` carries what withholding each
+one costs. Nothing here is a write, so there is no preflight and no audit row —
+§19 is a read.

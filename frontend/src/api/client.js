@@ -598,6 +598,28 @@ export const events = {
   list: (params) => api.get('/events', params),
 };
 
+/* ── §19 Cluster status ─────────────────────────────────────────────────── */
+
+export const clusterStatus = {
+  /**
+   * §19. The control plane's own health, from the five APIs vanilla serves:
+   * leader-election leases, aggregated APIServices, CRD establishment,
+   * admission webhooks and kubelet version skew.
+   *
+   * Five independent reads in one envelope, so **each section is separately
+   * nullable**. A section that is `null` means that read did not happen — the
+   * reason is in `unavailable[]` and `partial` is true — and it must never be
+   * rendered as the healthy answer. "This cluster has no admission webhooks"
+   * and "we could not read the admission webhooks" send an operator to two
+   * different places, and only one of them is good news.
+   *
+   * There is no `healthy` field and no rollup, deliberately: a stale
+   * `cloud-controller-manager` lease is ordinary on one cluster and an outage
+   * on another, so the page counts findings and the operator judges them.
+   */
+  get: () => api.get('/cluster-status'),
+};
+
 /* ── §8.4 Network policy ────────────────────────────────────────────────── */
 
 /**

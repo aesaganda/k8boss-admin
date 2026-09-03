@@ -163,6 +163,7 @@ reason.
 | `services/pods.py` | §7.5–§7.7 one pod: the detail that enriches the §6 row, the environment with its five `value_state`s (and no Secret values), and `metrics.k8s.io` usage as a *secondary* read so a cluster without metrics-server is a fact rather than an error |
 | `services/network.py` | §8.4 NetworkPolicy correlation: which pods a policy selects, and which pods nothing selects. Tri-state — an unevaluable selector is `null`, never "not selected" |
 | `services/projects.py` | §17 one namespace with what governs it: quotas with `used` null until the controller writes status, limit ranges, the Pod Security level the labels declare (null is nothing declared, never `privileged`), bindings, a policy summary. Every secondary read collected |
+| `services/cluster_status.py` | §19 the control plane's own health: leader-election leases, aggregated APIService conditions, CRD establishment, admission webhooks joined to their EndpointSlice counts, and kubelet version skew. Five independent reads, each **separately nullable** — one refused listing costs its section and nothing else, and no section is ever rolled up into a single verdict |
 | `admin/mutate.py` | **The single write funnel.** Gate → preflight → apply → diff → audit |
 | `admin/preflight.py` | `SelfSubjectAccessReview`. Keeps a clean denial distinct from a failed review |
 | `admin/diff.py` | Normalise both sides, render a unified diff, digest it for the audit row |
