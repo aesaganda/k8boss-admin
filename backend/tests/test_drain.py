@@ -421,6 +421,97 @@ def test_failed_evictions_are_reported_per_pod_and_never_as_success(cluster):
     assert len(fake.evicted) == 4
 
 
+def test_the_audit_row_says_the_node_was_not_drained(cluster):
+    """The response was honest and the record that outlives it was not.
+
+    A drain is one funnel call performing many writes: the cordon patch, which
+    the funnel preflights and diffs, and then one eviction per pod inside the
+    `apply_fn`. So the row's outcome is `applied` the moment the cordon lands,
+    whatever the evictions did — and "drain node-1, applied" over a node that
+    kept its database is the exact claim `drained: false` exists to stop the
+    *response* making. The counts go in the sentence, written when the row is.
+    """
+    from app.audit import recorder
+
+    cluster(
+        FakeCluster(eviction_errors={
+            "pg-0": ApiException(status=429, reason="Too Many Requests"),
+        }),
+        [
+            _pod("checkout-7d9-abc", owner=_owner("ReplicaSet")),
+            _pod("pg-0", "data", owner=_owner("StatefulSet")),
+        ],
+    )
+
+    drain_node(
+        NODE_NAME, dry_run=False, grace_period_seconds=None,
+        ignore_daemonsets=True, delete_emptydir_data=False, force=False,
+    )
+
+    (row,) = recorder.query(limit=50)["items"]
+    assert row["outcome"] == "applied", "the cordon did land"
+    assert "evicted 1" in row["detail"]
+    assert "1 refused" in row["detail"]
+    assert "NOT drained" in row["detail"], (
+        "somebody reading this trail after a machine was terminated must not "
+        "have to open the response to find out the drain did not finish"
+    )
+
+
+def test_a_clean_drain_says_so_without_the_refusal_wording(cluster):
+    from app.audit import recorder
+
+    cluster(FakeCluster(), [_pod("checkout-7d9-abc", owner=_owner("ReplicaSet"))])
+
+    drain_node(
+        NODE_NAME, dry_run=False, grace_period_seconds=None,
+        ignore_daemonsets=True, delete_emptydir_data=False, force=False,
+    )
+
+    (row,) = recorder.query(limit=50)["items"]
+    assert "evicted 1" in row["detail"]
+    assert "refused" not in row["detail"]
+    assert "NOT drained" not in row["detail"]
+
+
+def test_a_refusal_before_the_evictions_records_only_what_was_attempted(cluster):
+    """A sentence claiming counts for evictions that never ran would be worse
+    than the fixed one it replaced."""
+    from app.audit import recorder
+
+    cluster(FakeCluster(), [
+        _pod("checkout-7d9-abc", owner=_owner("ReplicaSet")),
+        _pod("debug-shell"),
+    ])
+
+    with pytest.raises(Invalid):
+        drain_node(
+            NODE_NAME, dry_run=False, grace_period_seconds=None,
+            ignore_daemonsets=True, delete_emptydir_data=False, force=False,
+        )
+
+    rows = recorder.query(limit=50)["items"]
+    for row in rows:
+        assert "evicted" not in (row["detail"] or "")
+
+
+def test_a_dry_run_never_claims_an_eviction_count(cluster):
+    """Nothing is evicted on a projection, so the sentence must not imply one."""
+    from app.audit import recorder
+
+    cluster(FakeCluster(), [_pod("checkout-7d9-abc", owner=_owner("ReplicaSet"))])
+
+    drain_node(
+        NODE_NAME, dry_run=True, grace_period_seconds=None,
+        ignore_daemonsets=True, delete_emptydir_data=False, force=False,
+    )
+
+    (row,) = recorder.query(limit=50)["items"]
+    assert row["dry_run"] is True
+    assert "evicted" not in row["detail"]
+    assert "(dry run)" in row["detail"]
+
+
 def test_one_failure_does_not_stop_the_others(cluster):
     fake = cluster(
         FakeCluster(eviction_errors={

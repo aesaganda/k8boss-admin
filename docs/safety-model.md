@@ -258,6 +258,17 @@ individually. A drain over three pods the API server refused returns
 "Drained" over three stuck pods is the sentence that gets a machine terminated
 with a database still on it.
 
+**And the audit row says the same thing.** A drain is one funnel call performing
+many writes: the cordon patch, which the funnel preflights and diffs, and then
+one eviction per pod inside its `apply_fn`. So the row's outcome is `applied` the
+moment the cordon lands, whatever the evictions did — the response was honest and
+for a while the record that outlives it was not. The sentence is now resolved
+when the row is written rather than before the call, and carries the counts:
+`drain node-5: evicted 12, 3 refused, node NOT drained`. A refusal before the
+evictions ran — the gate, the preflight, the blocked-pods `422` — says only what
+was attempted, because "evicted 0" over a drain that never started would be a
+worse claim than the fixed sentence it replaced.
+
 *What `force` is, and is not.* `force` means "I have read this plan and I accept
 it": it lets execution proceed past the blocked entries. It does **not** give the
 console power it does not have. A PodDisruptionBudget is enforced by the API

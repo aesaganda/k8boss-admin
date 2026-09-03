@@ -68,8 +68,8 @@ Every collection endpoint returns exactly this shape:
 - `partial` — **true whenever `unavailable` is non-empty.** Invariant, asserted
   in tests.
 - `reason` — one of `forbidden`, `not_found`, `unreachable`, `timeout`,
-  `not_registered`, `unsupported`. Callers branch on this; `detail` is for
-  humans only and must never be parsed.
+  `not_registered`, `unsupported`, `unrenderable`. Callers branch on this;
+  `detail` is for humans only and must never be parsed.
 
 **Every one of those tokens answers "we could not look, and here is why", and an
 error that does not answer that question is never given one.** The map from
@@ -84,6 +84,14 @@ The same rule `collect()` already applied to a `TypeError` from a shaper.
 `unsupported` is the "this cluster does not have that API" case (no Ingress
 controller CRDs, no `metrics.k8s.io`). It is not an error and does not colour a
 row red — the UI renders it as "not present on this cluster".
+
+`unrenderable` is the read that was **never attempted**, because this console
+could not build the query that would answer it. §6's workload detail is where it
+arises: a `matchExpressions` operator it cannot express as a `labelSelector`, or
+a selector that is empty and therefore matches every pod in the namespace. It is
+a limit of the console, not of the cluster — so unlike `unsupported` the section
+is genuinely unknown, and `detail` says which of the two it was because they
+need different things done about them.
 
 ### 1.3 Error envelope
 

@@ -48,7 +48,21 @@ logger = logging.getLogger(__name__)
 #: these, so the set is fixed by the contract and adding to it is a contract
 #: change, not an implementation detail.
 UNAVAILABLE_REASONS: frozenset[str] = frozenset(
-    {"forbidden", "not_found", "unreachable", "timeout", "not_registered", "unsupported"}
+    {
+        "forbidden",
+        "not_found",
+        "unreachable",
+        "timeout",
+        "not_registered",
+        "unsupported",
+        # The read was never attempted, because this console could not build the
+        # query that would answer it — §6's workload detail meets this when a
+        # LabelSelector uses an operator it cannot render, or selects
+        # everything. Distinct from `unsupported`, which says the *cluster* does
+        # not serve something and is rendered as an ordinary fact; this one is a
+        # limit of the console and the section is genuinely unknown.
+        "unrenderable",
+    }
 )
 
 # HTTP statuses that mean "the API server ran out of time", as distinct from
