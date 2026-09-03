@@ -388,6 +388,58 @@ def test_only_the_two_features_whose_projection_is_the_secret_withhold_a_preview
     assert withholds is (feature in WITHHOLDS_THE_PREVIEW)
 
 
+#: Both switches, both features whose switches disagree about the preview, and
+#: the dry-run flag: 16 combinations and what the gate must do with each.
+#:
+#: Written out as a table because the interesting cell is easy to state and easy
+#: to lose in a refactor. A read-only console **still projects a CLI pod** (§15 —
+#: the manifest is a pod running `sleep`) and **refuses to project a node debug
+#: pod** (§5.5 — the manifest is a working recipe for a privileged one). That one
+#: asymmetry is why `withholds_dry_run` sits on the *switch* and not on the
+#: feature, and a change that moved it up a level would still pass every other
+#: test in this file.
+GATE_MATRIX = [
+    # feature, ADMIN_ALLOW_MUTATIONS, the feature's switch, dry_run, refused
+    ("node debug pod", True, True, True, False),
+    ("node debug pod", True, True, False, False),
+    ("node debug pod", True, False, True, True),
+    ("node debug pod", True, False, False, True),
+    ("node debug pod", False, True, True, True),
+    ("node debug pod", False, True, False, True),
+    ("node debug pod", False, False, True, True),
+    ("node debug pod", False, False, False, True),
+    ("CLI pod", True, True, True, False),
+    ("CLI pod", True, True, False, False),
+    ("CLI pod", True, False, True, True),
+    ("CLI pod", True, False, False, True),
+    ("CLI pod", False, True, True, False),   # the asymmetry: §15 still projects
+    ("CLI pod", False, True, False, True),
+    ("CLI pod", False, False, True, True),
+    ("CLI pod", False, False, False, True),
+]
+
+_SETTING_FIELD = {
+    "ADMIN_NODE_DEBUG_ENABLED": "node_debug_enabled",
+    "ADMIN_CLI_ENABLED": "cli_enabled",
+}
+
+
+@pytest.mark.parametrize("feature,mutations,switch,dry_run,refused", GATE_MATRIX)
+def test_the_two_switches_refuse_exactly_where_the_contract_says(
+    feature, mutations, switch, dry_run, refused, db_engine, monkeypatch,
+):
+    build, setting = FEATURE_GATES[feature]
+    monkeypatch.setattr(settings, "admin_allow_mutations", mutations)
+    monkeypatch.setattr(settings, _SETTING_FIELD[setting], switch)
+
+    closed = build().closed(dry_run=dry_run)
+
+    assert (closed is not None) is refused
+    if refused:
+        assert not closed.enabled, "a switch that is on never refuses"
+        assert closed.detail, "and a refusal without a sentence is rule 11.4's forbidden state"
+
+
 def test_no_feature_builds_its_own_refusal_outside_the_funnel(db_engine):
     """The regression this fold exists to prevent.
 
