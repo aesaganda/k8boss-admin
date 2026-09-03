@@ -765,9 +765,18 @@ silently undoing the change the lock existed to protect.
 OpenShift gates *choosing a hostname* behind its own RBAC subresource, separate
 from creating the Route. The funnel preflights `create routes`, that review
 passes, the API server refuses the write — and the operator is told they cannot
-create Routes, a permission the review just confirmed they hold. §13 preflights
-the subresource explicitly, only for Routes and only when a hostname is actually
-set, and audits the denial because it happens outside the funnel.
+create Routes, a permission the review just confirmed they hold. §13 names the
+subresource explicitly, only for Routes and only when a hostname is actually set.
+
+**The funnel reviews it, and the ordering is the point.** §13 decides whether
+the grant applies; `mutate()` checks it, in step 2, after step 1. This once ran
+before the funnel, which put it ahead of the mutations gate: on a read-only
+console a Route with a hostname was refused `rbac_denied`, sending somebody to
+edit a ClusterRole when the deployment could not write at all. §1 exists to keep
+those two answers apart, and a check that runs before it undoes that for one
+endpoint. The denial is audited against the subresource that was refused, not
+the object — the same misattribution, in the trail, is still a
+misattribution.
 
 ### 11.5 The router is manifests, not a controller
 

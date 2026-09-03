@@ -221,6 +221,37 @@ def is_terminated(pod: Any) -> bool:
     return shaping.get_field(pod, "status", "phase") in TERMINAL_PHASES
 
 
+def requested_total(pods: Iterable[Any]) -> dict[str, Any]:
+    """What the scheduler is holding for these pods: ``{"cpu_cores", "memory_bytes"}``.
+
+    **The one algorithm.** §2's cluster overview sums the same quantity over
+    every pod in the cluster and used to do it with a second, simpler one —
+    regular containers only — on the reasoning that init containers have
+    finished by the time a pod is Running. That is true of ordinary init
+    containers and false of the two things :func:`pod_requests` exists to
+    handle: a **sidecar** (an init container with ``restartPolicy: Always``)
+    runs for the pod's whole life, and ``spec.overhead`` is charged by the
+    scheduler and belongs to no container at all. A cluster running a service
+    mesh has a sidecar in every pod, so the two pages reported two different
+    numbers for the same quantity and the overview was the low one — which is
+    the direction that reads as headroom.
+
+    Terminated pods are skipped: a finished pod holds no CPU, and counting one
+    would report a cluster as more committed than it is.
+
+    A value this console cannot parse makes its dimension ``None`` rather than
+    dropping it from the sum — see :class:`_Totals`. A smaller number here means
+    more apparent headroom, and that sends somebody to schedule onto a node that
+    cannot take it.
+    """
+    total = _Totals()
+    for pod in pods:
+        if is_terminated(pod):
+            continue
+        total.add(pod_requests(pod))
+    return total.as_row()
+
+
 def node_usage(pods: Iterable[Any]) -> dict[str, Any]:
     """``{"requested": {...}, "pod_count": n}`` for the pods scheduled to one node.
 
@@ -228,14 +259,8 @@ def node_usage(pods: Iterable[Any]) -> dict[str, Any]:
     both fields instead. Passing an empty iterable here means "the node is
     genuinely empty", which is a different claim and gets genuine zeroes.
     """
-    total = _Totals()
-    count = 0
-    for pod in pods:
-        if is_terminated(pod):
-            continue
-        count += 1
-        total.add(pod_requests(pod))
-    return {"requested": total.as_row(), "pod_count": count}
+    live = [pod for pod in pods if not is_terminated(pod)]
+    return {"requested": requested_total(live), "pod_count": len(live)}
 
 
 # --------------------------------------------------------------------------- #
@@ -524,6 +549,7 @@ __all__ = [
     "node_roles",
     "node_row",
     "node_usage",
+    "requested_total",
     "parse_quantity",
     "pod_capacity",
     "pod_requests",

@@ -71,6 +71,16 @@ Every collection endpoint returns exactly this shape:
   `not_registered`, `unsupported`. Callers branch on this; `detail` is for
   humans only and must never be parsed.
 
+**Every one of those tokens answers "we could not look, and here is why", and an
+error that does not answer that question is never given one.** The map from
+§1.3's codes to this vocabulary is exhaustive and has no fallback: a code that
+is not in it — `invalid` and `conflict`, and §12's console-authentication codes
+— makes the read **propagate** rather than degrade. A 422 from a secondary read
+says the cluster answered and the request this console built was wrong;
+recording that as `unreachable` hides a defect in this process behind a sentence
+about somebody's network, which is where a defect of that shape lives forever.
+The same rule `collect()` already applied to a `TypeError` from a shaper.
+
 `unsupported` is the "this cluster does not have that API" case (no Ingress
 controller CRDs, no `metrics.k8s.io`). It is not an error and does not colour a
 row red — the UI renders it as "not present on this cluster".
@@ -293,6 +303,17 @@ overwrite a deliberate choice with a discovered default.
 Each sub-object is collected independently; a failure degrades **that key only**
 (set to `null`) and appends to `unavailable`. The page must never 500 because
 one collector failed.
+
+**`requested` is §5's algorithm, not a second one.** It is the same function the
+nodes page uses, over every pod in the cluster instead of one node's: regular
+containers, plus sidecars (init containers with `restartPolicy: Always`, which
+run for the pod's whole life), plus the peak of the ordinary init containers,
+plus `spec.overhead`, and terminated pods skipped. Summing `spec.containers`
+alone is the tempting simplification and it undercounts every pod in a service
+mesh — two pages reporting two different numbers for one quantity, with this one
+low, which is the direction that reads as headroom. A quantity that will not
+parse makes **its dimension** `null` rather than dropping out of the sum, for
+the same reason; the pod phase counts beside it are unaffected.
 
 ---
 
@@ -1784,8 +1805,18 @@ funnel preflights `create routes`, that review passes, and the API server then
 refuses the write — so without this the operator is told they cannot create
 Routes, a permission the review just confirmed they hold. It is checked only for
 `openshift` and only when `spec.host` is set (a generated hostname is not a
-custom one), and the denial is audited here because it happens outside the
-funnel.
+custom one).
+
+**It is checked inside the funnel, after the gate.** §13 decides *whether* the
+grant applies and hands the subresource to `mutate()`, which reviews it in the
+same step as the verb on the object itself. Checking it earlier — as this once
+did — puts it ahead of §1.6: on a read-only console a Route carrying a hostname
+came back `rbac_denied`, sending an operator to widen a ClusterRole when the
+deployment was not permitted to write at all, which is exactly the wrong-system
+error `mutations_disabled` has its own code to prevent. The denial is audited
+against `routes/custom-host` rather than `routes`, because a row naming the
+object when the subresource was refused is the same misattribution written into
+the trail.
 
 ---
 

@@ -39,6 +39,7 @@ from app.k8s.client import manager
 from app.k8s.context import reset_current_cluster_id, set_current_cluster_id
 from app.k8s.quantities import add_quantities, parse_quantity
 from app.models import Cluster, utcnow
+from app.services import nodes as nodes_service
 from app.services import route_domain
 
 logger = logging.getLogger(__name__)
@@ -573,33 +574,22 @@ def _collect_pods() -> tuple[dict, dict]:
     pods = get_core_v1().list_pod_for_all_namespaces().items or []
 
     phases = {"total": len(pods), "running": 0, "pending": 0, "failed": 0, "succeeded": 0}
-    cpu: list = []
-    memory: list = []
     for pod in pods:
         phase = getattr(getattr(pod, "status", None), "phase", None)
         key = (phase or "").lower()
         if key in phases and key != "total":
             phases[key] += 1
 
-        # Terminal pods hold no resources — counting them would report a cluster
-        # as far more committed than it is, and the number that matters here is
-        # what the scheduler is currently holding.
-        if phase in ("Succeeded", "Failed"):
-            continue
-        # Regular containers only. Init containers have finished by the time a
-        # pod is Running, so adding them would double-count a share of every
-        # workload that uses one.
-        for container in getattr(getattr(pod, "spec", None), "containers", None) or []:
-            requests = getattr(getattr(container, "resources", None), "requests", None) or {}
-            if "cpu" in requests:
-                cpu.append(requests["cpu"])
-            if "memory" in requests:
-                memory.append(requests["memory"])
-
-    requested = {
-        "cpu_cores": float(round(_sum_quantities(cpu, what="pod requested cpu"), 3)),
-        "memory_bytes": int(_sum_quantities(memory, what="pod requested memory")),
-    }
+    # §5's algorithm, not a second one. This used to sum `spec.containers` alone,
+    # on the reasoning that init containers have finished by the time a pod is
+    # Running — true of ordinary init containers, false of a sidecar
+    # (`restartPolicy: Always`), which runs for the pod's whole life, and false
+    # of `spec.overhead`, which the scheduler charges and no container carries.
+    # A cluster running a service mesh has a sidecar in every pod, so this page
+    # and the nodes page reported two different numbers for the same quantity,
+    # and this one was the low one — the direction that reads as headroom.
+    # Terminated pods are skipped there, as they were here.
+    requested = nodes_service.requested_total(pods)
     return phases, requested
 
 
