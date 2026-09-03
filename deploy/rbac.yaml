@@ -527,6 +527,20 @@ rules:
     resources: ["rolebindings"]
     verbs: ["create"]
 
+  # §18 setting a namespace's Pod Security level — one merge patch on its
+  # labels. Overlaps the §14 router block below, which grants `patch namespaces`
+  # among much else; it is stated separately because a deployment that wants
+  # §18 and not the router should be able to grant this one verb, and because
+  # what it permits is worth naming on its own: this ServiceAccount can lower a
+  # namespace's enforce level, which makes pods the namespace refuses today
+  # deployable by anyone who can create a pod in it. Every such change is
+  # dry-run first, acknowledged by code and audited — but the grant itself is
+  # the control, and withholding it disables the Set level button with the
+  # reason while the namespace page keeps reporting the level as it is.
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["patch"]
+
   # §13 writes. Three separate rules because they are three separate RBAC
   # resources, and an install may reasonably want one without the others: an
   # account allowed to write Ingresses is very often not allowed to write

@@ -172,6 +172,7 @@ reason.
 | `admin/node_debug.py` | §5.5 node debug pods: build the host-mounted pod, the second gate, find them again by label, remove them. The largest grant in the product |
 | `admin/debug.py` | §7.4 debug containers: attach an ephemeral container to a running pod, and decide from discovery — three-valued — whether the cluster serves them at all |
 | `admin/projects.py` | §17 the project: five creates through `apply.create_from_yaml`, never into a namespace that exists, with per-object outcomes and — on a dry run — the Namespace projected by the API server and the rest rendered and preflighted, because admission cannot project into a namespace that does not exist yet |
+| `admin/podsecurity.py` | §18 the Pod Security level: one merge patch on a namespace's six labels, whose dry run carries Pod Security admission's own `Warning:` headers naming the pods already running that violate the new level — passed through verbatim, never parsed |
 | `audit/recorder.py` | `record()` from the funnel and from the two privileged reads; `record_console_event()` for sign-ins and user changes; `query()`, `stream()` and `verify_chain()` for §10 |
 | `audit/integrity.py` | The hash chain. A flush listener that links every new record, and `verify()` — which reports `intact`, `broken` or `partial`, and never claims the third is the first |
 | `audit/export.py` | §10.4 serialisers. NDJSON is byte-faithful; CSV is flattened and defangs cells a spreadsheet would execute as a formula |

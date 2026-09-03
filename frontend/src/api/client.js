@@ -775,6 +775,50 @@ export const projects = {
   create: (body) => api.post('/projects', body),
 };
 
+/* ── §18 Pod Security level ─────────────────────────────────────────────── */
+
+export const podSecurity = {
+  /**
+   * What changing a namespace's Pod Security labels would mean: the labels it
+   * has now, the ones asked for, and the consequences of the difference.
+   *
+   * **Writes nothing and is not a dry run.** The admission warnings that name
+   * the pods already violating the level come back from `set` with
+   * `dryRun: true`, because producing them means asking the API server to
+   * project the patch — which is a write request, preflighted like any other.
+   *
+   * `retry: true` for the reason every plan sets it: a pure read replays for
+   * free, and a transient failure would otherwise cost the operator the form.
+   *
+   * body: { podSecurity: { enforce, enforceVersion, audit, … }, resourceVersion }
+   */
+  plan: (namespace, body) =>
+    request(`/projects/${encodeURIComponent(namespace)}/pod-security/plan`, {
+      method: 'POST',
+      body,
+      retry: true,
+    }),
+
+  /**
+   * Set the level: one merge patch on the namespace's six labels, through the
+   * funnel. A mode sent as `null` **removes** its label, which is not the same
+   * as setting `privileged` — it hands the namespace back to a cluster default
+   * this console cannot read.
+   *
+   * On `dryRun: true` the response's `admissionWarnings` are Pod Security
+   * admission's own verbatim `Warning:` headers naming the pods already in the
+   * namespace that do not meet the level. They are the reason this endpoint
+   * exists rather than the YAML editor, and they are **not** parsed here.
+   *
+   * `applied: true` means the labels changed. It does not mean any running pod
+   * was affected: admission runs when a pod is created, so nothing is evicted.
+   *
+   * body: the plan body + { acknowledgeConsequences, dryRun }
+   */
+  set: (namespace, body) =>
+    api.put(`/projects/${encodeURIComponent(namespace)}/pod-security`, body),
+};
+
 /* ── §9 Access preflight ────────────────────────────────────────────────── */
 
 // `group` is translated to its wire spelling only when the caller supplied one.

@@ -2929,3 +2929,128 @@ ClusterRole grants whatever that ClusterRole aggregates *on that cluster*, which
 the plan does not enumerate. **No per-user identity**: the RoleBinding is for the
 subject the operator names, written by the console's own ServiceAccount; the
 console's user is not a cluster identity, and §17 does not pretend otherwise.
+
+---
+
+## 18. Pod Security — setting the level, with the pods that would violate it
+
+### 18.1 What it is, and why it is not §4
+
+Six labels on one Namespace, as one merge patch through the funnel. §4's YAML
+editor can already write them; what it cannot do is answer the question an
+operator has *first* — what does this break — and that answer is the whole of
+§18.
+
+**Pod Security admission evaluates the pods already in a namespace when the
+namespace's labels change, and returns what it finds as `Warning:` headers on
+the response — on a `dryRun=All` update exactly as on a real one.** So a preview
+of "enforce restricted" comes back carrying the API server's own list of the
+pods in that namespace that do not meet it, by name and by the field that fails.
+That list is not computed here and is deliberately **not parsed** here: a summary
+of somebody else's admission decision is a summary that can be wrong about which
+pods are affected.
+
+This is §17's neighbour, not part of it. §17 creates into a namespace that does
+not exist and never adopts one; §18 edits one existing object's labels, with one
+diff and one confirmation, the way §4 edits anything else.
+
+### 18.2 `POST /api/projects/{name}/pod-security/plan`
+
+```json
+{
+  "podSecurity": { "enforce": "restricted", "enforceVersion": "latest",
+                   "audit": null, "auditVersion": null,
+                   "warn": "restricted", "warnVersion": null }
+}
+```
+
+**Every mode is named on every request, and absent means *remove that label*.** A
+body whose omitted field could mean either "leave it alone" or "remove it" is a
+body that eventually strips somebody's audit level because a form field was left
+blank. An unknown mode key is `422 invalid` rather than ignored.
+
+`null` and `"privileged"` are different requests, and the difference is §18's
+honesty problem. `privileged` declares that this namespace admits everything.
+`null` removes the declaration, and what applies then is the cluster's Pod
+Security default — which lives in the API server's `AdmissionConfiguration`
+file, which no API serves. **This console cannot say what removing the label will
+mean**, and the consequence for it says exactly that.
+
+Response:
+
+```json
+{
+  "namespace": "prod",
+  "current":  { "enforce": "baseline", "enforceVersion": null, "audit": null,
+                "auditVersion": null, "warn": null, "warnVersion": null,
+                "labelled": true },
+  "requested": { "enforce": "restricted", "…": null },
+  "resourceVersion": "4021",
+  "changed": true,
+  "consequences": [ … ],
+  "gate": { "enabled": true, "detail": "…" }
+}
+```
+
+Ungated and unaudited: one namespace read and some arithmetic on labels. It is
+**not** a dry run — a dry run is a write request, preflighted like any other, and
+it is what the caller asks for next. The namespace read must answer: a change
+described against labels we could not read is a diff about nothing, and one
+rendered from an empty dict would show labels being removed that this console
+never saw.
+
+### 18.3 `consequences[]`
+
+Same shape and same handshake as §17.4: `{ code, label, consequence, mitigation }`,
+recomputed server-side at write time against the namespace as it is *then*, and
+a write naming fewer than all of them is `422 invalid` listing what is missing.
+
+| Code | When |
+|---|---|
+| `psa_does_not_evict` | `enforce` is being set or changed. **The headline.** Admission runs when a pod is *created*, so nothing running stops, restarts or is evicted; a workload whose pods violate the new level keeps them and fails to make more — `FailedCreate`, below its replica count, with no pod to inspect |
+| `psa_enforcement_removed` | `enforce` goes from set to absent. Not the same as `privileged`: the cluster default applies and this console cannot read it |
+| `psa_lowered` | `enforce` moves down the `privileged` → `baseline` → `restricted` order. Pods this namespace refuses today become deployable. A level outside those three is **neither** raised nor lowered — inventing an ordering the API server does not use is worse than saying nothing |
+| `psa_no_warn_label` | `enforce` is `baseline` or `restricted` and `warn` is not the same. Violations are refused at pod creation and nobody is told when they apply |
+| `psa_version_pinned` | A mode's version is a minor rather than `latest`. The policy stops tightening as the cluster is upgraded, and nothing reports the gap |
+
+### 18.4 `PUT /api/projects/{name}/pod-security`
+
+The plan's body plus `acknowledgeConsequences[]` and `dryRun` (default **true**).
+Returns the §1.5 mutation response with four keys added: `consequences` (what was
+required, echoed), `current` and `requested` (the levels either side), and
+**`admissionWarnings`** — the API server's `Warning:` headers, verbatim. They are
+the same list §1.5's `warnings` carries; the second name exists so a client can
+read them as what they are.
+
+`PUT` rather than `PATCH` because §0.4 applies: the caller sends the
+`resourceVersion` they were looking at, it is checked locally — which is what
+produces a `409` carrying `context.currentPodSecurity`, the level as it is *now*
+— and it rides inside the merge patch, so the API server refuses a stale write
+too.
+
+**`applied: true` means the labels changed. It does not mean any running pod was
+affected**, and the response's consequences say so rather than leaving an
+operator to infer it from a green result.
+
+Refusals, in order, each before the cluster is changed: request validation, the
+namespace read (which must answer; `404` if it is not there — this endpoint never
+creates), the concurrency check, the acknowledgement check, then the funnel's
+gate and its preflight on `patch namespaces`.
+
+### 18.5 The gate
+
+`ADMIN_ALLOW_MUTATIONS` alone, like §17. The dry run is **not** withheld, and
+withholding it would defeat the feature: the projection is what carries the
+admission warnings, and those are what an operator needs to decide whether to
+open the switch at all.
+
+### 18.6 What §18 does not do
+
+**It does not evict, restart or reschedule anything** — see `psa_does_not_evict`.
+**It does not read the cluster's Pod Security default**, because no API serves
+it. **It does not parse the admission warnings** into a pod list, so there is no
+`violatingPods[]` to sort or count against: the count in the UI is the number of
+warning lines, which is what the API server sent. **It does not check that the
+warnings were read** — the console holds no state between the preview and the
+confirm, so the dialog blocks Confirm until an operator ticks the box and says
+plainly that this one is the client asking, not the server enforcing.

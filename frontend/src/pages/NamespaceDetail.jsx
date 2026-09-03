@@ -25,7 +25,7 @@
  * - "isolated" means a policy *declares* it. Whether the CNI plugin enforces
  *   NetworkPolicy is not knowable from any API here, and the page says so.
  */
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { Alert, Button, Card, CardBody, Grid, GridItem } from '@patternfly/react-core';
 import {
@@ -35,18 +35,24 @@ import {
   EmptyState,
   ErrorState,
   NullableCell,
+  ActionButton,
   PageHeader,
   PartialBanner,
   SectionHeader,
   StatusBadge,
 } from '../components/ui';
 import { projects as projectsApi } from '../api/client';
+import PodSecurityDialog from '../components/PodSecurityDialog';
 import { useCluster } from '../contexts/ClusterContext';
 import { useNamespace } from '../contexts/NamespaceContext';
-import { useAsync } from './_data';
+import { useAsync, useGates } from './_data';
 import { ChipList, LabelsCell, Muted, NoClusterState } from './_parts';
 
 const MODES = ['enforce', 'audit', 'warn'];
+
+//: §18's write is a patch on the namespace itself, so the button is gated on
+//: the verb the write will actually use rather than on anything in it.
+const CHECKS = [{ id: 'patch', verb: 'patch', group: 'core', resource: 'namespaces' }];
 
 /** `cpu=500m, memory=512Mi` for a LimitRange map, or a muted "unset". */
 function quantities(map) {
@@ -228,10 +234,13 @@ export default function NamespaceDetail() {
   const { setSelected } = useNamespace();
   const navigate = useNavigate();
 
+  const [settingLevel, setSettingLevel] = useState(false);
+
   const { data, loading, error, reload } = useAsync(() => projectsApi.get(name), {
     key: `project:${activeClusterId}:${name}`,
     enabled: activeClusterId != null && Boolean(name),
   });
+  const { gate } = useGates(CHECKS, { enabled: activeClusterId != null });
 
   const breadcrumbs = [{ label: 'Namespaces', to: '/namespaces' }, { label: name }];
 
@@ -280,6 +289,15 @@ export default function NamespaceDetail() {
 
       <PartialBanner unavailable={project.unavailable} />
 
+      {settingLevel && (
+        <PodSecurityDialog
+          namespace={name}
+          current={project.podSecurity}
+          onClose={() => setSettingLevel(false)}
+          onApplied={reload}
+        />
+      )}
+
       <Grid hasGutter>
         <GridItem lg={5} md={12}>
           <Card isFullHeight>
@@ -318,6 +336,11 @@ export default function NamespaceDetail() {
               <SectionHeader
                 title="Pod Security"
                 description="The admission level this namespace's labels declare. OpenShift's security context constraints, in vanilla Kubernetes' vocabulary."
+                actions={
+                  <ActionButton gate={gate('patch')} onClick={() => setSettingLevel(true)}>
+                    Set level…
+                  </ActionButton>
+                }
               />
               {loading && !data ? <Muted>Reading…</Muted> : <PodSecurity podSecurity={project.podSecurity} />}
             </CardBody>

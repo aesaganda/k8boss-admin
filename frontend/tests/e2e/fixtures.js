@@ -1929,6 +1929,133 @@ function projectConsequencesFor(body) {
   return out;
 }
 
+/**
+ * §18 the labels a namespace declares now, from the project fixture, so the
+ * plan's `current` and the page's card cannot disagree.
+ */
+export function currentPodSecurity(project = FIXTURES.project) {
+  return project.podSecurity;
+}
+
+/**
+ * §18 `POST /projects/{name}/pod-security/plan`.
+ *
+ * `consequences` is derived from the difference between what the namespace
+ * declares and what the body asks for — never echoed — so a dialog that never
+ * reads them cannot pass.
+ */
+export function podSecurityPlanFor(body, { current = null } = {}) {
+  const now = current ?? currentPodSecurity();
+  const asked = body.podSecurity ?? {};
+  const order = ['privileged', 'baseline', 'restricted'];
+  const consequences = [];
+
+  if (asked.enforce && asked.enforce !== now.enforce) {
+    consequences.push({
+      code: 'psa_does_not_evict',
+      label: 'Pods already running are not affected by this',
+      consequence:
+        'Pod Security admission runs when a pod is created, so nothing in this namespace stops, ' +
+        `restarts or is evicted by enforcing ${asked.enforce}. A workload whose pods violate it ` +
+        'keeps the pods it has and fails to make new ones — FailedCreate, and no pod to inspect.',
+      mitigation: 'Read the admission warnings on the preview: they name the pods that violate it today.',
+    });
+  }
+  if (now.enforce && !asked.enforce) {
+    consequences.push({
+      code: 'psa_enforcement_removed',
+      label: 'The enforce label is removed, not set to privileged',
+      consequence:
+        `This namespace enforces ${now.enforce} today. Removing the label does not mean everything ` +
+        'is admitted: the cluster default applies, and this console cannot tell you what it is.',
+      mitigation: 'Set privileged explicitly if that is what you mean.',
+    });
+  }
+  if (
+    now.enforce && asked.enforce &&
+    order.indexOf(asked.enforce) >= 0 && order.indexOf(now.enforce) >= 0 &&
+    order.indexOf(asked.enforce) < order.indexOf(now.enforce)
+  ) {
+    consequences.push({
+      code: 'psa_lowered',
+      label: 'Pods this namespace refuses today will be admitted',
+      consequence: `The enforce level goes from ${now.enforce} down to ${asked.enforce}.`,
+      mitigation: `Set audit and warn to ${now.enforce} so what would have been refused is still reported.`,
+    });
+  }
+  if (['baseline', 'restricted'].includes(asked.enforce) && asked.warn !== asked.enforce) {
+    consequences.push({
+      code: 'psa_no_warn_label',
+      label: 'Violations will be refused without being reported',
+      consequence: `With enforce at ${asked.enforce} and warn set to ${asked.warn || 'nothing'}, a ` +
+        'workload that violates the level is refused at pod creation and nobody is told when they apply it.',
+      mitigation: `Set warn to ${asked.enforce} as well, which is what \`oc\` does.`,
+    });
+  }
+
+  const changed = ['enforce', 'audit', 'warn'].some(
+    (mode) => (now[mode] ?? null) !== (asked[mode] ?? null)
+      || (now[`${mode}Version`] ?? null) !== (asked[`${mode}Version`] ?? null),
+  );
+
+  return {
+    namespace: 'prod',
+    current: now,
+    requested: asked,
+    resourceVersion: '4021',
+    changed,
+    consequences,
+    gate: { enabled: true, detail: 'This deployment permits setting a Pod Security level.' },
+  };
+}
+
+/**
+ * §18 `PUT /projects/{name}/pod-security`.
+ *
+ * `admissionWarnings` is what Pod Security admission returns when the level is
+ * raised over pods that do not meet it — the API server's own text, which the
+ * console must render verbatim. Returned on the dry run and on the write, the
+ * way the API server returns it on both.
+ */
+export const PSA_ADMISSION_WARNINGS = [
+  'existing pods in namespace "prod" violate the new PodSecurity enforce level "restricted:latest"',
+  'payments-api-7f9c: allowPrivilegeEscalation != false, unrestricted capabilities, runAsNonRoot != true, seccompProfile',
+  'legacy-batch-2xk: host namespaces, hostPath volumes',
+];
+
+export function podSecuritySetFor(body, { warnings = PSA_ADMISSION_WARNINGS, current = null } = {}) {
+  const dryRun = body.dryRun !== false;
+  const plan = podSecurityPlanFor(body, { current });
+  const asked = body.podSecurity ?? {};
+  const before = plan.current;
+  const line = (mode, side, value) => `${side}    pod-security.kubernetes.io/${mode}: ${value}`;
+  const unified =
+    '--- live\n+++ proposed\n@@ -1,6 +1,6 @@\n' +
+    ['enforce', 'audit', 'warn']
+      .flatMap((mode) => {
+        const was = before[mode];
+        const now = asked[mode] ?? null;
+        if (was === now) return [];
+        return [was ? line(mode, '-', was) : null, now ? line(mode, '+', now) : null].filter(Boolean);
+      })
+      .join('\n') + '\n';
+
+  return {
+    dryRun,
+    applied: !dryRun,
+    verb: 'patch',
+    target: { group: '', version: 'v1', resource: 'namespaces', namespace: null, name: 'prod' },
+    diff: { before: null, after: null, unified, changed: true },
+    resourceVersion: '4022',
+    warnings,
+    admissionWarnings: warnings,
+    consequences: plan.consequences,
+    current: plan.current,
+    requested: asked,
+    auditId: dryRun ? null : 9401,
+  };
+}
+
 /** §17 `POST /projects/plan`. `exists` is true for the one namespace the list fixture already has. */
 export function projectPlanFor(body) {
   const exists = FIXTURES.namespaces.items.some((row) => row.name === body.name);
@@ -2080,6 +2207,8 @@ export async function mockApi(
     project = null,
     projectPlan = null,
     projectCreate = null,
+    podSecurityPlan = null,
+    podSecuritySet = null,
   } = {},
 ) {
   // Counted so a spec can hand back a different manifest on the second read —
@@ -2496,6 +2625,25 @@ export async function mockApi(
     if (path === '/projects' && route.request().method() === 'POST') {
       const body = JSON.parse(route.request().postData() || '{}');
       return json(projectCreate ? projectCreate(body) : projectCreateFor(body));
+    }
+    // Ordered before the `/projects/{name}` read: that one matches any path
+    // under the prefix, and a router that hit it first would answer §18's plan
+    // with a namespace.
+    //
+    // `current` comes from whichever project fixture this test is using, not
+    // from FIXTURES.project: a spec that overrides the namespace's labels to
+    // test raising the level would otherwise get a plan computed against
+    // different labels than the page is showing, and the disagreement would
+    // look like a bug in the dialog.
+    if (path.endsWith('/pod-security/plan') && route.request().method() === 'POST') {
+      const body = JSON.parse(route.request().postData() || '{}');
+      const current = (project ?? FIXTURES.project).podSecurity;
+      return json(podSecurityPlan ? podSecurityPlan(body) : podSecurityPlanFor(body, { current }));
+    }
+    if (path.endsWith('/pod-security') && route.request().method() === 'PUT') {
+      const body = JSON.parse(route.request().postData() || '{}');
+      const current = (project ?? FIXTURES.project).podSecurity;
+      return json(podSecuritySet ? podSecuritySet(body) : podSecuritySetFor(body, { current }));
     }
     if (path.startsWith('/projects/')) {
       return json(project ?? FIXTURES.project);

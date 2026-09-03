@@ -1,5 +1,5 @@
 """
-Project endpoints (§17).
+Project endpoints (§17) and the Pod Security level a namespace declares (§18).
 
 Thin, like every router here. The read delegates to
 :mod:`app.services.projects`; the plan and the write delegate to
@@ -20,6 +20,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, Path
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.admin import podsecurity as podsecurity_admin
 from app.admin import projects as projects_admin
 from app.services import projects as projects_service
 
@@ -103,6 +104,49 @@ class ProjectWriteRequest(ProjectRequest):
     )
 
 
+class PodSecurityPlanRequest(BaseModel):
+    """The level a namespace should end up declaring, and what it is now.
+
+    Every mode is named on every request, absent meaning "remove that label".
+    A body whose omitted field could mean either "leave it" or "remove it" is a
+    body that eventually strips somebody's audit level because a form field was
+    blank; §18 makes the request say which.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    podSecurity: PodSecurityRequest  # noqa: N815
+    resourceVersion: str | None = Field(  # noqa: N815
+        None,
+        description=(
+            "The namespace version the operator was looking at. Sent back to "
+            "the API server inside the patch, so a change that landed while "
+            "they were reading is a 409 rather than a silent overwrite."
+        ),
+    )
+
+
+class PodSecurityWriteRequest(PodSecurityPlanRequest):
+    """The plan's body plus the two fields that make it a write."""
+
+    acknowledgeConsequences: list[str] = Field(  # noqa: N815
+        default_factory=list,
+        description=(
+            "Every consequence code the plan returned, named. Recomputed "
+            "server-side against the namespace as it is at write time."
+        ),
+    )
+    dry_run: bool = Field(
+        True,
+        alias="dryRun",
+        description=(
+            "Send the patch with dryRun=All. The API server projects the "
+            "namespace and Pod Security admission returns, as Warning headers, "
+            "the pods already in it that do not meet the new level."
+        ),
+    )
+
+
 @router.get("/projects/{name}")
 def get_project(
     name: str = Path(..., min_length=1, max_length=63, description="The namespace."),
@@ -132,6 +176,40 @@ def create_project(request: ProjectWriteRequest) -> dict[str, Any]:
     what grant it needed.
     """
     return projects_admin.create(
+        request.model_dump(by_alias=True, exclude={"acknowledgeConsequences", "dry_run"}),
+        dry_run=request.dry_run,
+        acknowledge_consequences=request.acknowledgeConsequences,
+    )
+
+
+@router.post("/projects/{name}/pod-security/plan")
+def get_pod_security_plan(
+    request: PodSecurityPlanRequest,
+    name: str = Path(..., min_length=1, max_length=63, description="The namespace."),
+) -> dict[str, Any]:
+    """§18 — what changing this namespace's Pod Security labels would mean.
+
+    One namespace read and some arithmetic on labels: ungated, unaudited, and
+    deliberately *not* a dry run. The admission warnings that name the pods
+    which violate the new level arrive with the preview, which is the write
+    endpoint called with ``dryRun: true``.
+    """
+    return podsecurity_admin.plan(name, request.model_dump(by_alias=True))
+
+
+@router.put("/projects/{name}/pod-security")
+def set_pod_security(
+    request: PodSecurityWriteRequest,
+    name: str = Path(..., min_length=1, max_length=63, description="The namespace."),
+) -> dict[str, Any]:
+    """§18 — set the level, previewing which running pods already violate it.
+
+    ``PUT`` rather than ``PATCH`` because §0.4's concurrency rule applies: the
+    caller sends the version they were looking at and it rides inside the merge
+    patch, so the API server refuses a stale write.
+    """
+    return podsecurity_admin.set_level(
+        name,
         request.model_dump(by_alias=True, exclude={"acknowledgeConsequences", "dry_run"}),
         dry_run=request.dry_run,
         acknowledge_consequences=request.acknowledgeConsequences,
