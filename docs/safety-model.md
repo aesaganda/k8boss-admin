@@ -878,7 +878,100 @@ on both sides.
 
 ---
 
-## 13. What this model does not claim
+## 13. The project, and the five objects it is
+
+`oc new-project` on OpenShift does not create a namespace. It instantiates a
+project request template — a Namespace, a ResourceQuota, a LimitRange, a
+RoleBinding for the requester and, on most production clusters, a NetworkPolicy
+— so that a team never receives a bare namespace with the quota arriving a week
+later, after the incident. Vanilla Kubernetes has all five objects and no act
+that produces them together. §17 of the contract is that act, and every
+property of this model applies to it five times over rather than once.
+
+### 13.1 Five ordinary writes, not a template engine
+
+Each object goes through `app.admin.apply.create_from_yaml`, and so through the
+funnel: its own preflight, its own dry run, its own diff, its own audit row.
+There is no template stored in the console, no reconcile loop, and no label
+claiming the namespace is managed afterwards — the defaults live in the request,
+and what keeps the objects there is the cluster. That is what keeps this on the
+right side of [`adr-0004-shipped-router.md`](adr-0004-shipped-router.md)'s
+boundary: nothing is shipped, nothing is pinned, and every object is one the §4
+editor could already have written. [`adr-0006-projects.md`](adr-0006-projects.md)
+records the argument.
+
+### 13.2 A namespace is never adopted
+
+A project is created into a namespace that does not exist. One that does is
+refused with a 409 naming it — before anything is written, on a dry run as much
+as on a real one, and audited, because the funnel is never reached and "did
+anyone try to create a project over `kube-system`" is a question the trail
+exists to answer. This is stricter than §11.5's managed-by check on purpose: a
+namespace is somebody's, and there is no label that makes taking one over
+acceptable. A namespace read that did not answer stops a real write outright
+rather than becoming "it is not there"; on the plan it becomes `exists: null`
+and a consequence, never `false`.
+
+### 13.3 The dry run says whose diff each object carries
+
+The API server's NamespaceLifecycle admission refuses a create into a namespace
+that does not exist, `dryRun=All` included. So a project's dry run can project
+the Namespace and nothing inside it. §3 promises the API server's own projection,
+and §17 keeps that promise where it can and says plainly where it cannot: the
+Namespace comes back `projection: "server"`, and the four objects inside it come
+back `projection: "rendered"` — the console's manifest diffed against nothing,
+with a preflight of the exact verb the real write will use. The preflight is the
+one thing about a namespaced object that can be checked before its namespace
+exists, and it is the thing most worth knowing first: a denial found *after* the
+Namespace was created leaves a half-project behind for a refusal that was
+knowable up front, so the dialog blocks Confirm on it with the grant it needs.
+
+The UI labels the two projections differently. A rendered manifest has not been
+through admission, and a client that showed it under the sentence "this is the
+difference the API server projected" would be making §3's promise on the
+console's behalf. §14's router install has exactly this shape and does not
+report it; that is a defect in §14, not a precedent for §17.
+
+### 13.4 Consequences are acknowledged by name
+
+The same handshake as §11.3 and §12.3, and the reason is the same: consenting to
+a consequence is a separate act from requesting the change. What is different is
+how *quiet* the failures are. A ResourceQuota over `requests.cpu` with no
+LimitRange supplying a default makes the API server refuse every pod that does
+not state its own request — `must specify requests.cpu` — and the operator
+finds out from a Deployment that is accepted and never gets a pod. An enforced
+Pod Security level does the same for a violating template: the Deployment is
+created, the ReplicaSet fails, and the only evidence is an event. A namespace
+with no quota is what vanilla Kubernetes gives by default and is exactly the
+thing this feature exists to avoid. Each is a code the write refuses without,
+recomputed at write time so consent for one request cannot be carried onto
+another.
+
+### 13.5 A partial project is reported as partial
+
+`created` is true only when every object landed on a real write. A Namespace
+that failed stops the sequence and the objects inside it are reported as
+skipped with the reason, because each would fail with a 404 naming the
+namespace and add four audit rows saying nothing the first one did not. Any
+other failure is counted, named with the grant it needed, and the sequence
+continues so the operator learns about every missing grant in one round. There
+is no rollback: deleting a namespace the operator just asked for is not a
+correction anybody wants made on their behalf, and the response says which
+objects exist so they can add the rest through §4 where each is its own diff.
+
+### 13.6 What the read model refuses to guess
+
+The project page is five reads joined, and each one that did not answer is
+`null` with the reason rather than an empty section — `quotas: null` is not
+"nothing bounds this namespace", which is the sentence that gets a second quota
+added over the one nobody could see. A quota's `used` is `null` until the
+controller has written status, never `0`, which is what somebody about to scale
+wants to hear. And a namespace declaring no Pod Security label is reported as
+declaring nothing, never as `privileged`: the cluster-wide default lives in the
+API server's `AdmissionConfiguration` file, which no API serves, so the console
+cannot know what applies and says so instead of picking the reassuring answer.
+
+## 14. What this model does not claim
 
 Being honest about the edges is part of the model:
 
@@ -908,6 +1001,12 @@ Being honest about the edges is part of the model:
   `create pods/exec`, and the session is audited on open and close — but within
   the session, the console is a terminal and nothing more. Withholding
   `pods/exec` is the only real control.
+* **A project is created, not managed.** §17 writes five objects and stops.
+  Nothing watches them, nothing restores a quota somebody edits away, and the
+  console's user is not a cluster identity — the RoleBinding is for whichever
+  subject the operator names, written by the console's own ServiceAccount. What
+  a `ClusterRole/admin` binding grants is whatever that aggregated role holds on
+  that cluster, which the plan does not enumerate.
 * **A NetworkPolicy shown here is a declaration, not an enforcement.**
   NetworkPolicy objects are implemented by the cluster's CNI plugin, and no API
   this console can reach reports whether a given cluster's plugin implements

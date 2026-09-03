@@ -161,6 +161,7 @@ reason.
 | `services/nodes.py` | Quantity parsing (`Decimal`), node rows, per-node requested totals |
 | `services/pods.py` | §7.5–§7.7 one pod: the detail that enriches the §6 row, the environment with its five `value_state`s (and no Secret values), and `metrics.k8s.io` usage as a *secondary* read so a cluster without metrics-server is a fact rather than an error |
 | `services/network.py` | §8.4 NetworkPolicy correlation: which pods a policy selects, and which pods nothing selects. Tri-state — an unevaluable selector is `null`, never "not selected" |
+| `services/projects.py` | §17 one namespace with what governs it: quotas with `used` null until the controller writes status, limit ranges, the Pod Security level the labels declare (null is nothing declared, never `privileged`), bindings, a policy summary. Every secondary read collected |
 | `admin/mutate.py` | **The single write funnel.** Gate → preflight → apply → diff → audit |
 | `admin/preflight.py` | `SelfSubjectAccessReview`. Keeps a clean denial distinct from a failed review |
 | `admin/diff.py` | Normalise both sides, render a unified diff, digest it for the audit row |
@@ -170,6 +171,7 @@ reason.
 | `admin/nodes.py` | Cordon, and the drain planner: classify every pod, then execute per-pod |
 | `admin/node_debug.py` | §5.5 node debug pods: build the host-mounted pod, the second gate, find them again by label, remove them. The largest grant in the product |
 | `admin/debug.py` | §7.4 debug containers: attach an ephemeral container to a running pod, and decide from discovery — three-valued — whether the cluster serves them at all |
+| `admin/projects.py` | §17 the project: five creates through `apply.create_from_yaml`, never into a namespace that exists, with per-object outcomes and — on a dry run — the Namespace projected by the API server and the rest rendered and preflighted, because admission cannot project into a namespace that does not exist yet |
 | `audit/recorder.py` | `record()` from the funnel and from the two privileged reads; `record_console_event()` for sign-ins and user changes; `query()`, `stream()` and `verify_chain()` for §10 |
 | `audit/integrity.py` | The hash chain. A flush listener that links every new record, and `verify()` — which reports `intact`, `broken` or `partial`, and never claims the third is the first |
 | `audit/export.py` | §10.4 serialisers. NDJSON is byte-faithful; CSV is flattened and defangs cells a spreadsheet would execute as a formula |
