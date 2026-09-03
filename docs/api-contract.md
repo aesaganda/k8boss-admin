@@ -3237,3 +3237,164 @@ validatingwebhookconfigurations` and `mutatingwebhookconfigurations`, `list
 endpointslices`, and `list nodes`. `docs/rbac.md` carries what withholding each
 one costs. Nothing here is a write, so there is no preflight and no audit row —
 §19 is a read.
+
+---
+
+## 20. Expanding a PersistentVolumeClaim
+
+### 20.1 What it is, and why it is not §4
+
+A claim that has filled up is one of the most ordinary production incidents
+there is, and the fix — ask for more — is one field. §4's YAML editor can
+already write that field. What it cannot do is any of the four things that
+decide whether the write is a good idea:
+
+* **It cannot tell you the StorageClass forbids expansion.** The edit is
+  accepted by the form and rejected by the API server, and the operator reads a
+  relayed admission message about a field they did not think they were touching.
+* **It cannot stop you shrinking.** Typing `5Gi` where the claim says `50Gi` is
+  one keystroke. §20 refuses it by arithmetic, before anything is sent.
+* **It cannot name the pods that mount the volume**, which is what decides
+  whether the filesystem grows now or after a restart.
+* **And it cannot say what `applied: true` means**, which is §20.3.
+
+### 20.2 The two endpoints
+
+`POST /api/storage/claims/{namespace}/{name}/expand/plan` takes
+`{"size": "100Gi", "resourceVersion": "…"}` and answers with the claim's state,
+its class's expansion support, what mounts it, and the consequences:
+
+```json
+{
+  "current": { "phase": "Bound", "storage_class": "gp3",
+               "requested": "50Gi", "requested_bytes": 53687091200,
+               "capacity":  "50Gi", "capacity_bytes":  53687091200,
+               "conditions": [ … ] },
+  "requested": { "size": "100Gi", "size_bytes": 107374182400 },
+  "expansion": { "supported": true | false | null, "storage_class": "gp3",
+                 "reason": "allowed", "detail": "…" },
+  "mountedBy": ["postgres-0"] | null,
+  "blocked": { "message": "…", "hint": "…", "context": { … } } | null,
+  "consequences": [ … ],
+  "resourceVersion": "7710",
+  "gate": { … }, "partial": false, "unavailable": []
+}
+```
+
+`PUT /api/storage/claims/{namespace}/{name}/size` takes the plan's body plus
+`acknowledgeConsequences[]` and `dryRun` (default **true**), and returns the
+§1.5 mutation response with `consequences`, `current`, `requested` and
+`expansion` added.
+
+**The size is kept as the string that was typed.** It is parsed only for
+comparison. Reformatting `100Gi` as `107374182400` would put a number in the
+diff the operator has to convert back before they can confirm it, on the one
+screen where the number is the whole decision.
+
+`PUT` rather than `PATCH` because §0.4 applies: the caller sends the
+`resourceVersion` they were looking at, it is checked here — which is what
+produces a `409` carrying `context.currentSize` and `context.currentCapacity` —
+and it rides inside the merge patch, so the API server refuses a stale write too.
+
+### 20.3 What `applied: true` attests, and what it does not
+
+Expansion is two acts by two different parties. This console patches
+`spec.resources.requests.storage`; that is the entire write, and it is the only
+thing `applied: true` attests.
+
+Afterwards the storage provider grows the volume — the claim carries a
+`Resizing` condition while it does — and then the *filesystem* has to be grown
+too, which on many CSI drivers cannot happen while a pod has it mounted: the
+claim sits at `FileSystemResizePending` until every pod using it restarts.
+**`status.capacity` is what a workload actually has, and this write does not
+change it.** `current.capacity` is returned in the same response, read from
+before the write, so the two numbers are side by side rather than one of them
+being inferred from the other.
+
+An operator who reads a green result as "the volume is bigger now" is wrong
+about the disk their database is filling. So it is a consequence acknowledged by
+name — `pvc_capacity_is_not_immediate` — on **every** expansion, including the
+ones that go on to work perfectly.
+
+### 20.4 The refusals, and the one thing that is deliberately not one
+
+Three refusals, each a `422 invalid` raised before a request leaves the process,
+because the API server's message for these names a field the operator did not
+know they were editing:
+
+| Refusal | Why here rather than relayed |
+|---|---|
+| The claim is not `Bound` | There is no volume to expand. An unbound claim has not been provisioned |
+| `size` is smaller than, or equal to, the current request | No Kubernetes API makes a bound claim smaller, and a provider that did would be discarding the data past the new end. Equal is a no-op, named as one |
+| `expansion.supported` is **`false`** | The class forbids it, so the write is certain to be rejected. The message names the class and the field an administrator would set |
+
+The current request being **unreadable** is a fourth: without it this console
+cannot tell an expansion from a shrink, and it will not send a size it could not
+compare.
+
+**`expansion.supported` is tri-state, and only `false` refuses.** `null` means
+we could not find out — the class was refused or has been deleted, or the claim
+names none and is bound to a statically provisioned volume whose growth no API
+here reports on. Reading `null` as `false` would block a write the cluster would
+have accepted and send an operator to argue with a StorageClass that is already
+correct: the same mistake §0.2 forbids on a failed access review. It becomes a
+consequence to acknowledge, and the API server decides.
+
+### 20.5 Why the plan answers `200` for a size it will not write
+
+A blocked size comes back as `blocked` rather than as a `422`. The plan is the
+screen where the size is *decided*, and one that answered a too-small number
+with an error alone would withhold the claim's current size, its capacity and
+its mounts at exactly the moment those three facts are what the operator needs.
+It is the same refusal the write raises, caught rather than restated, so there is
+one set of messages. **The write still refuses.**
+
+### 20.6 The consequences
+
+Two are on every expansion. That is friction on purpose: they are the two things
+people are reliably wrong about, and being wrong about either costs an incident.
+
+| Code | What it says |
+|---|---|
+| `pvc_capacity_is_not_immediate` | §20.3 — this changes the request, not the space a workload has |
+| `pvc_expansion_is_one_way` | No API shrinks a bound claim, and on a cloud provider this is what you are billed for from the moment the volume grows |
+| `pvc_expansion_unknown` | `expansion.supported` is `null`; the API server will decide |
+| `pvc_in_use_offline_resize` | The pods that have the volume mounted, by name. Many CSI drivers need each of them restarted before the filesystem grows |
+| `pvc_mounts_unknown` | The pod listing did not answer. **Not** "nothing has it mounted" |
+| `pvc_resize_already_pending` | The claim carries `Resizing` or `FileSystemResizePending` already; a second expansion stacks on an unfinished one |
+
+Acknowledgements are **recomputed against the claim as it is at write time**,
+never trusted from the plan: a caller that could acknowledge a code the server
+did not derive could acknowledge every code it liked, and one of these is on
+every write.
+
+### 20.7 `mountedBy` is `null`, never `[]`
+
+§0.1's corollary, on a read where the two answers point in opposite directions:
+an empty list says the filesystem can be grown without touching a workload, and
+that is the sentence that starts an offline resize on a volume a database has
+open. A refused pod listing is `null`, `partial` is true, the reason is in
+`unavailable[]`, and `pvc_mounts_unknown` says so in words.
+
+### 20.8 The §8 row gains two fields
+
+`pvc_row` now carries `requested` and `requested_bytes` beside `capacity_bytes`.
+On a settled claim the two agree and the extra column is noise; on a claim
+mid-expansion they differ, and **that gap is the only thing in the §8 table that
+says an earlier resize has not finished.** Neither ever falls back to the other:
+a capacity borrowed from the request would tell an operator a Pending claim has
+500 GiB behind it, and a request borrowed from the capacity would make the two
+columns agree by construction and stop the row from showing an expansion at all.
+
+### 20.9 The gate, and what §20 does not do
+
+`ADMIN_ALLOW_MUTATIONS` alone, like §17 and §18. The dry run is **not** withheld:
+the projection is where the API server's own validation lands — including the
+StorageClass check this console cannot make when it could not read the class —
+so withholding it would leave an operator with strictly less than `kubectl`
+gives them.
+
+**§20 shrinks nothing, restarts nothing and creates nothing.** It does not
+restart the pods that need restarting for an offline resize, does not watch the
+claim afterwards, and does not report whether the expansion completed — a live
+read of the claim does that, and `status.capacity` is where the answer is.

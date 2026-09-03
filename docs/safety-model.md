@@ -1186,3 +1186,79 @@ Being honest about the edges is part of the model:
   whose `podSelector` matches nothing reports `selected_pod_count: 0` and is
   flagged as inert, while a pod listing we could not make reports `null`. See
   §8.3 of [`api-contract.md`](api-contract.md).
+
+---
+
+## 14. Expanding a claim — where "done" is somebody else's word
+
+§20 is the one write in this document whose **success is not the end of the
+change**, and everything careful about it follows from that.
+
+One field on one PersistentVolumeClaim, one merge patch, the ordinary funnel.
+§4's YAML editor could write the same field. The reason §20 exists is that a
+claim that filled up is a live incident, the fix is one number, and every part
+of getting that number right is invisible in a text editor.
+
+**`applied: true` means the claim requests the new size, and nothing else.**
+Expansion is two acts by two parties. This console patches
+`spec.resources.requests.storage`. Then the storage provider grows the volume —
+the claim carries `Resizing` while it does — and then the *filesystem* has to be
+grown, which on many CSI drivers cannot happen while a pod has the volume
+mounted: the claim sits at `FileSystemResizePending` until every pod using it
+restarts. `status.capacity` is what a workload actually has, and no write from
+this console changes it directly.
+
+That gap is the whole risk. A console that reported a green result and closed
+the dialog would leave an operator believing a database has room it does not
+have, during the incident where that belief is most expensive. So the response
+carries `current.capacity` — read from *before* the write — beside
+`requested.size`, the dialog renders both after the write under the heading
+"What changed, and what has not", and `pvc_capacity_is_not_immediate` is
+acknowledged by name on **every** expansion, including the ones that go on to
+work perfectly. This document's defect standard is that a claim about somebody's
+cluster has to be true; "the volume is bigger" is not one this console is in a
+position to make.
+
+**Expansion is one way, and that is a second acknowledgement rather than the
+same one.** No Kubernetes API makes a bound claim smaller, and on a cloud
+provider the new size is what you are billed for from the moment the volume
+grows. The first consequence is about *when* the change takes effect; this one
+is about whether it can be taken back. They are different mistakes, so they are
+different checkboxes.
+
+**Three things are refused here rather than relayed from admission.** A claim
+that is not `Bound` has no volume to expand. A size smaller than the current
+request is a shrink — refused by arithmetic, before anything is sent, because
+the API server's own message for it names a field the operator did not think
+they were editing, and because a provider that honoured it would be discarding
+the data past the new end. And a StorageClass that does not set
+`allowVolumeExpansion` refuses the write with the class named, since the
+alternative is a rejection the operator has to decode.
+
+**But `allowVolumeExpansion` is tri-state, and only `false` refuses.** A class
+that was refused, a class that has been deleted since the claim bound, a claim
+that names no class at all — each of those is `null`, meaning *we could not find
+out*. Reading `null` as `false` would block a write the cluster would have
+accepted and send an operator to argue with a StorageClass that is already
+correct: §2's rule about a failed access review, applied to a different read.
+`null` becomes a consequence to acknowledge and the API server decides.
+
+**And the pods that mount the volume are `null`, never `[]`, when the listing
+failed.** The two answers point in opposite directions. An empty list says the
+filesystem can grow without touching a workload; that is the sentence that
+starts an offline resize on a volume a database has open. So a refused pod
+listing is `null`, `partial` is true, and `pvc_mounts_unknown` says in words
+that this console is not claiming nothing is using it.
+
+**The plan answers `200` for a size it will not write.** A blocked size comes
+back as `blocked` rather than a `422`, because the plan is the screen where the
+size is decided and one that answered a too-small number with an error alone
+would withhold the claim's current size, its capacity and its mounts at exactly
+the moment those are the three facts needed. It is the same refusal the write
+raises, caught rather than restated. The write still refuses.
+
+**What §20 does not do.** It does not restart the pods that an offline resize
+needs restarted, does not watch the claim afterwards, and does not report
+whether the expansion completed. A live read of the claim answers that, and
+`status.capacity` is where the answer is — which is the point of showing it in
+the first place.

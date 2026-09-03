@@ -471,6 +471,11 @@ def test_a_pending_pvc_has_no_capacity_rather_than_zero_capacity():
     assert row["capacity_bytes"] is None
     assert row["status"] == "Pending"
     assert row["access_modes"] == ["ReadWriteOnce"]
+    # The request is carried, separately and unmistakably: §20 needs it to seed
+    # an expansion, and the row above is where it must not be mistaken for
+    # capacity.
+    assert row["requested"] == "500Gi"
+    assert row["requested_bytes"] == 500 * 1024**3
 
 
 def test_a_bound_pvc_reports_what_was_actually_provisioned():
@@ -483,6 +488,11 @@ def test_a_bound_pvc_reports_what_was_actually_provisioned():
 
     assert row["capacity_bytes"] == 500 * 1024**3
     assert row["volume"] == "pv-1"
+    # No request on this claim's spec at all: null rather than borrowed from the
+    # capacity beside it, which would make the two columns agree by construction
+    # and stop the row from ever showing an expansion in flight.
+    assert row["requested"] is None
+    assert row["requested_bytes"] is None
 
 
 def test_a_pv_reports_its_claim_as_namespace_slash_name():

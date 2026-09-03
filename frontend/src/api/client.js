@@ -909,6 +909,52 @@ export const audit = {
   },
 };
 
+/* ── §20 Storage writes — growing a claim ────────────────────────────────── */
+
+const claimPath = (namespace, name) =>
+  `/storage/claims/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}`;
+
+/**
+ * There is deliberately no listing here. Claims, volumes and StorageClasses are
+ * browsed through `resources.list(...)`, which already returns the typed §8 rows
+ * because their shapers are registered on the backend — a second listing in this
+ * file would be a second shaping of the same object, free to drift from the
+ * first and impossible to notice from outside.
+ */
+export const storage = {
+  /**
+   * §20. What growing this claim would mean: its requested size beside the
+   * capacity actually provisioned, whether its StorageClass permits expansion at
+   * all, which pods have the volume mounted, and the consequences to acknowledge.
+   *
+   * **A size the claim cannot be given comes back `200` with `blocked` set, not
+   * `422`.** This is the screen where the size is decided, and one that answered
+   * a too-small number with an error alone would withhold the current size, the
+   * capacity and the mounts at the moment those are the three facts needed.
+   *
+   * `expansion.supported` is **tri-state**: `null` means the StorageClass could
+   * not be read or the claim names none, and `null` never blocks the write —
+   * reading it as `false` would refuse what the cluster would have accepted.
+   * `mountedBy` is `null`, never `[]`, when the pod listing failed: "nothing has
+   * this open" is the sentence that starts an offline resize on a volume a
+   * database is using.
+   */
+  expandPlan: (namespace, name, body) =>
+    api.post(`${claimPath(namespace, name)}/expand/plan`, body),
+
+  /**
+   * §20. Grow the claim — a §1.5 mutation, so it goes through `MutationDialog`
+   * like every other write. body: `{ size, resourceVersion,
+   * acknowledgeConsequences, dryRun }`.
+   *
+   * **`applied: true` means the claim requests the new size and nothing more.**
+   * The volume grows when the storage provider grows it and the filesystem after
+   * that — often not until every pod using it restarts. `current.capacity` in
+   * the same response is what a workload has today, read from before the write.
+   */
+  expand: (namespace, name, body) => api.put(`${claimPath(namespace, name)}/size`, body),
+};
+
 /* ── §7 Pods — the detail reads, the logs, the streams ──────────────────── */
 
 const podPath = (namespace, name) =>

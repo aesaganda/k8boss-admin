@@ -516,6 +516,12 @@ rules:
   # button on those pages. `secrets` is included because the editor offers the
   # same operations on every §8 row; drop it to keep Secret writing out of the
   # console while leaving the rest editable.
+  #
+  # `patch persistentvolumeclaims` is also what §20's Expand action uses, and it
+  # is deliberately the same grant rather than a new one: a console that can edit
+  # a claim's YAML can already change its requested size. §20 adds the checks —
+  # the StorageClass, the shrink refusal, the pods that have the volume mounted —
+  # and the sentence about what `applied: true` does not prove.
   - apiGroups: [""]
     resources: ["configmaps", "secrets", "services", "serviceaccounts", "persistentvolumeclaims"]
     verbs: ["create", "update", "patch", "delete"]

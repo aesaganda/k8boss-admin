@@ -1006,14 +1006,30 @@ def pvc_row(obj: Any) -> dict[str, Any]:
 
     ``access_modes`` prefers ``status`` over ``spec`` for the same reason — what
     the volume grants, not what the claim requested.
+
+    ``requested`` and ``requested_bytes`` are the other half of that pair, and
+    they are here **because they are not the capacity**. On a settled claim the
+    two numbers agree and the extra column is noise; on a claim mid-expansion
+    they differ, and that difference is the only thing on this row that says an
+    earlier resize has not finished. §20 seeds its dialog from ``requested``, so
+    the first number an operator sees when growing a claim is the one they are
+    changing rather than one this console invented.
+
+    ``requested`` keeps the quantity **as written** beside the parsed byte count:
+    the string is what §20 sends back to the API server, and a row that carried
+    only the integer would make the console re-render somebody's ``500Gi`` as
+    ``536870912000`` in the diff they have to confirm.
     """
     status_modes = get_field(obj, "status", "accessModes", default=None)
+    requested = get_field(obj, "spec", "resources", "requests", "storage")
     return {
         "name": get_field(obj, "metadata", "name"),
         "namespace": get_field(obj, "metadata", "namespace"),
         "status": get_field(obj, "status", "phase"),
         "volume": get_field(obj, "spec", "volumeName"),
         "capacity_bytes": parse_bytes(get_field(obj, "status", "capacity", "storage")),
+        "requested": requested,
+        "requested_bytes": parse_bytes(requested),
         "access_modes": list(
             status_modes if status_modes is not None
             else (get_field(obj, "spec", "accessModes", default=[]) or [])

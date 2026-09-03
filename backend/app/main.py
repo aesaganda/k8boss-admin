@@ -57,6 +57,7 @@ from app.api.portal import router as portal_router
 from app.api.projects import router as projects_router
 from app.api.resources import router as resources_router
 from app.api.routes import router as routes_router
+from app.api.storage import router as storage_router
 from app.api.workloads import router as workloads_router
 from app.api.auth import router as auth_router
 
@@ -161,6 +162,7 @@ app.include_router(workloads_router)
 app.include_router(routes_router)
 app.include_router(portal_router)
 app.include_router(projects_router)
+app.include_router(storage_router)
 app.include_router(nodes_router)
 app.include_router(network_router)
 app.include_router(access_router)

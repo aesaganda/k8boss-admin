@@ -1872,6 +1872,58 @@ export const FIXTURES = {
   },
 
   /**
+   * §8/§20. Three claims that between them make the page's argument: one
+   * settled, one mid-expansion (requested and capacity disagree — the only
+   * thing in the table that shows an unfinished resize), and one Pending with
+   * no capacity at all.
+   */
+  claims: {
+    items: [
+      {
+        name: 'postgres-data',
+        namespace: 'prod',
+        status: 'Bound',
+        volume: 'pvc-9f2a',
+        capacity_bytes: 50 * 1024 * 1024 * 1024,
+        requested: '50Gi',
+        requested_bytes: 50 * 1024 * 1024 * 1024,
+        access_modes: ['ReadWriteOnce'],
+        storage_class: 'gp3',
+        age_seconds: 86400,
+      },
+      {
+        // Mid-expansion: it asked for 100Gi and the volume still provides 50.
+        name: 'metrics-data',
+        namespace: 'prod',
+        status: 'Bound',
+        volume: 'pvc-1c8e',
+        capacity_bytes: 50 * 1024 * 1024 * 1024,
+        requested: '100Gi',
+        requested_bytes: 100 * 1024 * 1024 * 1024,
+        access_modes: ['ReadWriteOnce'],
+        storage_class: 'gp3',
+        age_seconds: 7200,
+      },
+      {
+        name: 'unbound-data',
+        namespace: 'prod',
+        status: 'Pending',
+        volume: null,
+        capacity_bytes: null,
+        requested: '10Gi',
+        requested_bytes: 10 * 1024 * 1024 * 1024,
+        access_modes: ['ReadWriteOnce'],
+        storage_class: 'slow',
+        age_seconds: 60,
+      },
+    ],
+    continue: null,
+    remaining: null,
+    partial: false,
+    unavailable: [],
+  },
+
+  /**
    * §19. A cluster with one of each finding, because the page's whole job is to
    * surface them: a lease that stopped renewing, an aggregated API that is not
    * Available, a CRD that never Established, a `failurePolicy: Fail` webhook
@@ -2081,6 +2133,164 @@ export function currentPodSecurity(project = FIXTURES.project) {
  * declares and what the body asks for — never echoed — so a dialog that never
  * reads them cannot pass.
  */
+/**
+ * §20's plan for one claim, derived from the size asked for.
+ *
+ * Derived rather than fixed, because the plan's whole shape depends on the
+ * number: too small and it comes back `blocked` with the claim still described,
+ * large enough and it comes back with consequences to acknowledge. A fixture
+ * that always answered one of those could not test the other.
+ */
+export function expandPlanFor(body, { claim = null, mountedBy = [], expansion = null } = {}) {
+  const target = claim ?? FIXTURES.claims.items[0];
+  const bytes = parseQuantity(body.size);
+  const support = expansion ?? {
+    supported: true,
+    storage_class: target.storage_class,
+    reason: 'allowed',
+    detail: `StorageClass ${target.storage_class} sets allowVolumeExpansion: true.`,
+  };
+  const current = {
+    namespace: target.namespace,
+    name: target.name,
+    phase: target.status,
+    volume: target.volume,
+    storage_class: target.storage_class,
+    requested: target.requested,
+    requested_bytes: target.requested_bytes,
+    capacity: target.capacity_bytes == null ? null : `${target.capacity_bytes / 1024 ** 3}Gi`,
+    capacity_bytes: target.capacity_bytes,
+    conditions: [],
+  };
+
+  let blocked = null;
+  if (bytes == null) {
+    blocked = { message: `'${body.size}' is not a Kubernetes quantity.`, hint: 'Use 20Gi, 500M or 1Ti.', context: {} };
+  } else if (target.status !== 'Bound') {
+    blocked = {
+      message: `This claim is ${target.status}, so there is no volume to expand.`,
+      hint: 'An unbound claim has not been provisioned yet.',
+      context: { phase: target.status },
+    };
+  } else if (bytes < target.requested_bytes) {
+    blocked = {
+      message: 'A persistent volume claim cannot be shrunk.',
+      hint: `This claim requests ${target.requested}. Ask for more than that, or leave it alone.`,
+      context: { currentRequested: target.requested },
+    };
+  } else if (bytes === target.requested_bytes) {
+    blocked = {
+      message: `This claim already requests ${target.requested}.`,
+      hint: 'Ask for a larger size, or nothing needs to change.',
+      context: { currentRequested: target.requested },
+    };
+  } else if (support.supported === false) {
+    blocked = {
+      message: `StorageClass ${support.storage_class} does not allow volume expansion.`,
+      hint: 'An administrator can set allowVolumeExpansion: true on the StorageClass.',
+      context: { storageClass: support.storage_class },
+    };
+  }
+
+  return {
+    namespace: target.namespace,
+    name: target.name,
+    current,
+    requested: { size: body.size, size_bytes: bytes },
+    expansion: support,
+    mountedBy,
+    resourceVersion: '7710',
+    blocked,
+    consequences: blocked ? [] : expandConsequences(body.size, current, support, mountedBy),
+    gate: { feature: 'expanding a persistent volume claim', enabled: true, detail: null, switches: [] },
+    partial: mountedBy === null,
+    unavailable: mountedBy === null
+      ? [{ headline: 'Pods could not be listed', group: '', resource: 'pods',
+           namespace: target.namespace, reason: 'forbidden', detail: null }]
+      : [],
+  };
+}
+
+/** The two codes on every expansion, plus the situational ones. */
+function expandConsequences(size, current, support, mountedBy) {
+  const out = [
+    {
+      code: 'pvc_capacity_is_not_immediate',
+      label: 'This changes the request, not the space a workload has',
+      consequence: `Writing this asks for ${size}. status.capacity is what a workload actually has, and this write does not change it.`,
+      mitigation: 'Watch the claim\u2019s capacity and its conditions afterwards.',
+    },
+    {
+      code: 'pvc_expansion_is_one_way',
+      label: 'Expansion cannot be undone',
+      consequence: `No Kubernetes API makes a bound claim smaller again. Going from ${current.requested} to ${size} is permanent.`,
+      mitigation: 'The cheap mistake is a second expansion later, not a large first one.',
+    },
+  ];
+  if (support.supported === null) {
+    out.push({
+      code: 'pvc_expansion_unknown',
+      label: 'Whether this volume can grow at all is unknown',
+      consequence: `${support.detail} The write will be sent and the API server will decide.`,
+      mitigation: 'Preview first.',
+    });
+  }
+  if (mountedBy === null) {
+    out.push({
+      code: 'pvc_mounts_unknown',
+      label: 'Which pods have this mounted could not be read',
+      consequence: 'The pod listing did not answer. It is not saying nothing has the volume open.',
+      mitigation: 'Check with kubectl before expanding.',
+    });
+  } else if (mountedBy.length) {
+    out.push({
+      code: 'pvc_in_use_offline_resize',
+      label: `${mountedBy.length} pod${mountedBy.length === 1 ? '' : 's'} have this volume mounted`,
+      consequence: `Many CSI drivers cannot grow a filesystem while it is mounted. The claim will report FileSystemResizePending until every pod using it restarts \u2014 ${mountedBy.join(', ')}.`,
+      mitigation: 'Plan the restart with the expansion.',
+    });
+  }
+  return out;
+}
+
+/** §20's write response: the §1.5 envelope plus the four keys §20 adds. */
+export function expandFor(body, options = {}) {
+  const plan = expandPlanFor(body, options);
+  const applied = body.dryRun === false;
+  return {
+    dryRun: body.dryRun !== false,
+    // Derived, never echoed: §1.5 makes `applied` the only evidence a cluster
+    // changed, and here it attests the *request* and nothing about the volume.
+    applied,
+    verb: 'patch',
+    target: {
+      group: '', version: 'v1', resource: 'persistentvolumeclaims',
+      namespace: plan.namespace, name: plan.name,
+    },
+    diff: {
+      unified:
+        `--- live\n+++ projected\n@@\n-      storage: ${plan.current.requested}\n+      storage: ${body.size}\n`,
+      digest: 'sha256:abcd',
+    },
+    object: null,
+    resourceVersion: '7711',
+    warnings: [],
+    consequences: plan.consequences,
+    current: plan.current,
+    requested: plan.requested,
+    expansion: plan.expansion,
+    mountedBy: plan.mountedBy,
+  };
+}
+
+/** `50Gi` to bytes. Only the suffixes the fixtures use, deliberately. */
+function parseQuantity(text) {
+  const match = /^(\d+(?:\.\d+)?)(Gi|Mi|Ti|G|M|T)?$/.exec(String(text ?? '').trim());
+  if (!match) return null;
+  const units = { Gi: 1024 ** 3, Mi: 1024 ** 2, Ti: 1024 ** 4, G: 1e9, M: 1e6, T: 1e12 };
+  return Number(match[1]) * (match[2] ? units[match[2]] : 1);
+}
+
 export function podSecurityPlanFor(body, { current = null } = {}) {
   const now = current ?? currentPodSecurity();
   const asked = body.podSecurity ?? {};
@@ -2347,6 +2557,10 @@ export async function mockApi(
     podSecurityPlan = null,
     podSecuritySet = null,
     clusterStatus = null,
+    claims = null,
+    expandPlan = null,
+    expandWrite = null,
+    expandOptions = undefined,
   } = {},
 ) {
   // Counted so a spec can hand back a different manifest on the second read —
@@ -2498,6 +2712,25 @@ export async function mockApi(
     // response at 200.
     if (path === '/cluster-status') return json(clusterStatus ?? FIXTURES.clusterStatus);
     if (path === '/resources/core/v1/services') return json(services ?? FIXTURES.services);
+    if (path === '/resources/core/v1/persistentvolumeclaims') {
+      return json(claims ?? FIXTURES.claims);
+    }
+    // §20. The plan answers 200 even for a size the claim cannot be given —
+    // `blocked` is set instead — because that is the endpoint's contract, and a
+    // fixture that returned 422 there would let a dialog that hides the claim
+    // behind an error panel pass.
+    if (/^\/storage\/claims\/[^/]+\/[^/]+\/expand\/plan$/.test(path)) {
+      const body = JSON.parse(route.request().postData() || '{}');
+      return json(
+        expandPlan ? expandPlan(body) : expandPlanFor(body, expandOptions ?? {}),
+      );
+    }
+    if (/^\/storage\/claims\/[^/]+\/[^/]+\/size$/.test(path)) {
+      const body = JSON.parse(route.request().postData() || '{}');
+      return json(
+        expandWrite ? expandWrite(body) : expandFor(body, expandOptions ?? {}),
+      );
+    }
     // §15. The CLI pod, and the shell into it — the terminal itself is §7's
     // exec websocket, which no route here answers because Playwright never
     // opens one.
