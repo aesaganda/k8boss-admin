@@ -75,8 +75,9 @@ the dialog, and it is still a weaker preview than every other write in this
 console gets. The alternative — creating the Namespace for real on the preview
 so the rest can be projected — would be a write on the preview step, which is
 the one thing the dry-run-first model forbids. Note that §14's router install has
-exactly this shape on a fresh namespace and does not report it; that is a defect
-in §14 and is recorded in the evaluation that produced this ADR, not a precedent.
+exactly this shape on a fresh namespace and, when this ADR was written, did not
+report it; that was recorded as a defect in §14 by the evaluation that produced
+this ADR, and §14 has since been given the same rule.
 
 **A partial project has no rollback.** Five writes, and the fourth can fail.
 Deleting the three that landed would be three more writes the operator did not

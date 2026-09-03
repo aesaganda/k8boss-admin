@@ -32,6 +32,20 @@ the ones that did not. This is the same shape §5's drain uses, for the same
 reason — "installed" over a half-created router is the sentence that leaves
 somebody debugging an ingress path that was never finished.
 
+**A dry run says whose diff each object carries.** The API server's
+NamespaceLifecycle admission refuses a create into a namespace that does not
+exist — ``dryRun=All`` included, with a 404 naming the namespace — so on a fresh
+install the four objects inside the router's namespace cannot be projected until
+the Namespace is real, and a dry run that tried came back reporting them as
+``not_found`` failures on every real cluster. So the Namespace and the three
+other cluster-scoped objects are projected by the API server
+(``projection: "server"``), and when the Namespace does not exist yet the four
+inside it are reported with ``projection: "rendered"``: the bundle's manifest
+diffed against nothing, with a preflight of the ``create`` the real install will
+need, so a missing grant surfaces before the confirm rather than after the
+namespace exists. Once the Namespace exists — a reinstall, an upgrade — every
+object is projected by the API server. §17's project uses the same rule.
+
 **Uninstall does not delete the namespace.** It deletes the objects it created
 and leaves the Namespace standing, reporting that it did. A namespace can hold
 things the console did not put there, and ``kubectl delete namespace`` is not a
@@ -44,7 +58,9 @@ import logging
 from typing import Any
 
 from app.admin import apply as apply_service
+from app.admin import preflight
 from app.admin import router_bundle
+from app.admin.diff import build_diff
 from app.admin.router_bundle import (
     MANAGED_BY,
     NAME,
@@ -430,14 +446,23 @@ def _apply_object(
 
 def _outcome(
     item: BundleObject, *, verb: str, result: dict[str, Any] | None,
-    error: AdminError | None,
+    error: AdminError | None, projection: str | None = None,
+    preflight_result: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """One entry in the per-object report.
 
     ``applied`` is copied from the funnel's own answer and never derived here:
     §1.5 makes it the only evidence a cluster changed, and a second place that
     computed it would eventually compute it differently.
+
+    ``projection`` says whose diff this is: ``server`` when the API server
+    projected it, ``rendered`` when it is the bundle's own manifest because the
+    namespace did not yet exist to project into, ``None`` when there is no diff
+    at all. A UI labels the two differently — a rendered manifest has not been
+    through admission.
     """
+    if projection is None and result is not None and result.get("diff") is not None:
+        projection = "server"
     return {
         "kind": item.kind,
         "name": item.name,
@@ -447,12 +472,41 @@ def _outcome(
         "verb": verb,
         "applied": bool(result and result.get("applied")),
         "diff": (result or {}).get("diff"),
+        "projection": projection,
+        "preflight": preflight_result,
         "auditId": (result or {}).get("auditId"),
         "error": None if error is None else {
             "code": error.code, "message": error.message, "detail": error.detail,
             "hint": error.hint,
         },
     }
+
+
+def _rendered_outcome(item: BundleObject) -> dict[str, Any]:
+    """The dry-run report for an object the API server cannot project yet.
+
+    The manifest diffed against nothing — nothing can exist inside a namespace
+    that does not — and a preflight of the ``create`` the real install will
+    use: the one thing about such an object that *can* be checked before its
+    namespace exists, and the one most worth knowing first. No audit row: no
+    request reached the cluster for this object.
+    """
+    check = preflight.check(
+        "create", item.group, item.plural, namespace=item.namespace, name=item.name,
+    )
+    return _outcome(
+        item,
+        verb="create",
+        result={"applied": False, "diff": build_diff(None, item.body), "auditId": None},
+        error=None,
+        projection="rendered",
+        preflight_result={
+            "allowed": check.get("allowed"),
+            "reason": check.get("reason"),
+            "evaluationError": check.get("evaluationError"),
+            "hint": check.get("hint"),
+        },
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -478,7 +532,10 @@ def install(payload: dict[str, Any], *, dry_run: bool = True) -> dict[str, Any]:
     it. §14 says so rather than implying the §13 guarantee.
 
     Returns the §14 install response: a per-object report, an aggregate
-    ``installed``, and the count that did not land.
+    ``installed``, and the count that did not land. On a dry run into a
+    namespace that does not exist yet, the objects inside it carry
+    ``projection: "rendered"`` and a preflight rather than a server projection;
+    see the module docstring and :func:`_rendered_outcome`.
     """
     options = router_bundle.validate_options(payload)
     _require_enabled("install", dry_run=dry_run, namespace=options.namespace)
@@ -495,8 +552,20 @@ def install(payload: dict[str, Any], *, dry_run: bool = True) -> dict[str, Any]:
     # failure is only a consequence of an earlier one can say so instead of
     # reporting a cause it does not have.
     failed_kinds: set[str] = set()
+    # Whether the Namespace exists decides what a dry run can show for the
+    # objects inside it. See the module docstring: the API server cannot
+    # project into a namespace that is not there, and a dry run that asked it
+    # to reported four not_found failures on every fresh install.
+    namespace_exists = next(
+        (bool(prior["exists"]) for item, prior in zip(objects, existing)
+         if item.kind == "Namespace"),
+        True,
+    )
     for item, prior in zip(objects, existing):
         verb = "update" if prior["exists"] else "create"
+        if dry_run and item.namespace is not None and not namespace_exists:
+            results.append(_rendered_outcome(item))
+            continue
         try:
             result = _apply_object(
                 item, prior["resourceVersion"], dry_run=dry_run, action="install",

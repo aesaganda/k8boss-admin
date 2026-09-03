@@ -654,10 +654,98 @@ def test_a_dry_run_install_sends_dry_run_all_on_every_object(
         )[1],
     )
 
-    router_service.install({}, dry_run=True)
+    result = router_service.install({}, dry_run=True)
+
+    # Four, not eight: the API server cannot project into a namespace that does
+    # not exist, so only the cluster-scoped objects reach it on a fresh install.
+    assert len(calls) == 4
+    assert all(c.get("dryRun") == "All" for c in calls)
+    by_kind = {o["kind"]: o for o in result["objects"]}
+    assert {k for k, o in by_kind.items() if o["projection"] == "server"} == {
+        "Namespace", "ClusterRole", "ClusterRoleBinding", "IngressClass",
+    }
+    rendered = [o for o in result["objects"] if o["projection"] == "rendered"]
+    assert {o["kind"] for o in rendered} == {"ServiceAccount", "ConfigMap", "Deployment", "Service"}
+    for entry in rendered:
+        assert entry["error"] is None
+        assert entry["applied"] is False
+        assert entry["auditId"] is None
+        assert entry["diff"]["changed"] is True and entry["kind"] in entry["diff"]["after"]
+        assert entry["preflight"]["allowed"] is True
+    assert result["installed"] is False
+    assert result["failed"] == 0
+
+
+def test_a_dry_run_into_an_existing_namespace_projects_every_object(
+    monkeypatch, fake_k8s, allow_router,
+):
+    """Once the Namespace is real — a reinstall, an upgrade — there is nothing
+    the API server cannot project, and nothing is rendered."""
+    stub_discovery(monkeypatch)
+    allow_preflight(fake_k8s)
+    calls: list = []
+
+    def fake_get(group, version, plural, name, namespace=None):
+        if plural == "namespaces":
+            return {
+                "apiVersion": "v1", "kind": "Namespace",
+                "metadata": {"name": name, "resourceVersion": "50",
+                             "labels": {router_service.MANAGED_BY_LABEL: router_bundle.MANAGED_BY}},
+            }
+        raise NotFound("not found", context={"resource": plural})
+
+    monkeypatch.setattr(router_service.reader, "get_resource", fake_get)
+    fake_k8s.api_client.returns(
+        "call_api",
+        lambda path, method, **kwargs: (
+            calls.append((method, dict(kwargs.get("query_params") or []))),
+            ({**(kwargs.get("body") or {}), "metadata": {**((kwargs.get("body") or {}).get("metadata") or {}), "resourceVersion": "51"}}, 200, {}),
+        )[1],
+    )
+
+    result = router_service.install({}, dry_run=True)
 
     assert len(calls) == 8
-    assert all(c.get("dryRun") == "All" for c in calls)
+    assert all(q.get("dryRun") == "All" for _m, q in calls)
+    assert all(o["projection"] == "server" for o in result["objects"])
+    assert all(o["preflight"] is None for o in result["objects"])
+    assert result["installed"] is False
+
+
+def test_a_rendered_object_carries_its_preflight_denial(monkeypatch, fake_k8s, allow_router):
+    """The grant is the one thing about a namespaced object that can be checked
+    before its namespace exists — and finding it out after the Namespace was
+    created is a half-install for a refusal that was knowable up front."""
+    stub_discovery(monkeypatch)
+    monkeypatch.setattr(
+        router_service.reader, "get_resource",
+        lambda *a, **k: (_ for _ in ()).throw(NotFound("gone", context={})),
+    )
+    fake_k8s.api_client.returns(
+        "call_api",
+        lambda path, method, **kwargs: ({**(kwargs.get("body") or {})}, 200, {}),
+    )
+
+    def review(body, **kw):
+        attrs = body.spec.resource_attributes
+        denied = attrs.resource == "deployments"
+        return type("R", (), {"status": type("S", (), {
+            "allowed": not denied, "reason": "no RBAC policy matched" if denied else "",
+            "evaluation_error": None,
+        })()})()
+
+    fake_k8s.authorization_v1.returns("create_self_subject_access_review", review)
+
+    result = router_service.install({}, dry_run=True)
+
+    deployment = next(o for o in result["objects"] if o["kind"] == "Deployment")
+    assert deployment["projection"] == "rendered"
+    assert deployment["preflight"]["allowed"] is False
+    assert "deployments" in (deployment["preflight"]["hint"] or "")
+    service = next(o for o in result["objects"] if o["kind"] == "Service")
+    assert service["preflight"]["allowed"] is True
+    # A denial on an object no request was made for is not a failed write.
+    assert result["failed"] == 0
 
 
 # --------------------------------------------------------------------------- #

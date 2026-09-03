@@ -46,6 +46,7 @@ import {
   TextInput,
 } from '@patternfly/react-core';
 import MutationDialog from './MutationDialog';
+import DiffView from './DiffView';
 import {
   ActionButton,
   CodeBlock,
@@ -372,6 +373,7 @@ export default function RouterPanel({ gate, onChanged }) {
           requireTyped={options.defaultClass ? options.ingressClassName : undefined}
           autoPreview={false}
           summarize={summarizeInstall}
+          confirmBlockedReason={blockOnPreflightDenial}
           renderExtra={ObjectReport}
           onClose={() => setInstallOpen(false)}
           // Deliberately does NOT close the dialog. An install is eight writes
@@ -524,6 +526,7 @@ function ObjectReport({ result, phase, error }) {
   const objects = result?.objects ?? [];
   if (!objects.length) return null;
   const executed = phase === 'done';
+  const anyRendered = objects.some((object) => object.projection === 'rendered');
 
   return (
     <div style={{ marginBlockStart: 'var(--admin-gap, 1rem)' }} data-testid="router-object-report">
@@ -532,34 +535,101 @@ function ObjectReport({ result, phase, error }) {
         description={
           executed
             ? 'Each of these was a separate write through the funnel, with its own audit row. Nothing was rolled back.'
-            : 'Each is preflighted, projected and audited on its own.'
+            : anyRendered
+              ? 'The cluster-scoped objects are projected by the API server. The ones inside the router\u2019s namespace cannot be until it exists, so they are shown as rendered, each with a preflight of the grant the install will need.'
+              : 'Each is preflighted, projected and audited on its own.'
         }
       />
-      <ul>
-        {objects.map((object) => (
-          <li key={`${object.kind}/${object.namespace ?? ''}/${object.name}`}>
+      {objects.map((object) => (
+        <div
+          key={`${object.kind}/${object.namespace ?? ''}/${object.name}`}
+          style={{ marginBlockEnd: '0.75rem' }}
+          data-testid="router-object"
+          data-kind={object.kind}
+          data-projection={object.projection ?? ''}
+        >
+          <div>
             <strong>
               {object.kind} {object.namespace ? `${object.namespace}/` : ''}
               {object.name}
             </strong>{' '}
-            — {object.verb}
-            {object.error ? (
-              <>
-                {' '}
-                <StatusBadge status="NotReady" label={object.error.code} />{' '}
-                {object.error.message}
-                {object.error.hint ? ` ${object.error.hint}` : ''}
-              </>
-            ) : executed && object.applied ? (
-              <> <StatusBadge status="Ready" label="written" /></>
-            ) : (
-              <> <StatusBadge status="Unknown" label="projected" tooltip="A dry run. Nothing was written." /></>
+            — {object.verb} {projectionBadge(object, executed)}
+            {object.preflight?.allowed === false && (
+              <span style={{ marginInlineStart: '0.5rem' }} data-testid="router-object-preflight-denied">
+                <StatusBadge status="NotReady" label="preflight refused" />{' '}
+                <span style={{ color: 'var(--admin-muted, #6a6e73)' }}>
+                  {object.preflight.hint || object.preflight.reason}
+                </span>
+              </span>
             )}
-          </li>
-        ))}
-      </ul>
+          </div>
+          {object.error && (
+            <div style={{ marginBlockStart: '0.25rem' }}>
+              {object.error.message}
+              {object.error.hint ? <div style={{ fontWeight: 600 }}>{object.error.hint}</div> : null}
+            </div>
+          )}
+          {/* The diff, per object. Rule 11.3 is a property of the whole console
+              and an eight-object write does not get to skip it: before this the
+              panel showed the funnel's per-object diffs to nobody. */}
+          {!executed && object.diff?.unified && (
+            <DiffView
+              unified={object.diff.unified}
+              changed={object.diff.changed}
+              maxHeight={200}
+              ariaLabel={`${object.kind} ${object.name} diff`}
+            />
+          )}
+        </div>
+      ))}
       {error && !objects.length && <p>{error.message}</p>}
     </div>
+  );
+}
+
+/**
+ * Which kind of answer this object's row is showing.
+ *
+ * `rendered` is the bundle's own manifest: the API server cannot project into
+ * a namespace that does not exist yet, so on a fresh install the four objects
+ * inside it have not been through admission. Labelled as such rather than as
+ * "projected", which would make §0.3's promise about a diff the API server
+ * never saw.
+ */
+function projectionBadge(object, executed) {
+  if (object.error) {
+    return <StatusBadge status="NotReady" label={object.error.code} />;
+  }
+  if (executed && object.applied) {
+    return <StatusBadge status="Ready" label="written" />;
+  }
+  if (object.projection === 'rendered') {
+    return (
+      <StatusBadge
+        status="Unknown"
+        label="rendered by the console"
+        tooltip="The API server cannot project into a namespace that does not exist yet. This is the bundle's manifest, not an admission-checked projection."
+      />
+    );
+  }
+  return <StatusBadge status="Unknown" label="projected by the API server" tooltip="A dry run. Nothing was written." />;
+}
+
+/**
+ * A preflight denial on a rendered object blocks Confirm, with the grant.
+ *
+ * Creating the Namespace now would leave a half-install behind for a refusal
+ * that is already known — the exact state §14's partial-install report exists
+ * to describe, reached on purpose.
+ */
+function blockOnPreflightDenial(result) {
+  const refused = (result?.objects ?? []).filter((object) => object.preflight?.allowed === false);
+  if (!refused.length) return null;
+  const first = refused[0];
+  return (
+    `The preflight refused ${refused.map((object) => `${object.kind} ${object.name}`).join(', ')}. ` +
+    `${first.preflight.hint || first.preflight.reason || ''} Installing now would create the Namespace and ` +
+    'then fail inside it, for a refusal that is already known.'
   );
 }
 
