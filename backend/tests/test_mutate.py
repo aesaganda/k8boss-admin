@@ -167,9 +167,11 @@ def test_a_feature_switch_refuses_a_real_write_the_console_wide_one_would_allow(
 
     with pytest.raises(MutationsDisabled) as caught:
         run(fake_k8s, apply_fn, dry_run=False,
-            gate=gate(OPEN, SHUT, hint="Set ADMIN_FEATURE_ENABLED=true."))
+            gate=gate(OPEN, SHUT, hint="Set ADMIN_FEATURE_ENABLED=true.",
+                      message="the feature is switched off on this deployment"))
 
     assert caught.value.code == "mutations_disabled"
+    assert caught.value.message == "the feature is switched off on this deployment"
     assert caught.value.detail == "the feature is off"
     assert "ADMIN_FEATURE_ENABLED" in caught.value.hint
     assert apply_fn.calls == [], "the cluster must not be touched"
@@ -368,6 +370,60 @@ def test_every_feature_gate_names_its_own_setting_when_that_is_the_one_that_is_o
 
     monkeypatch.setattr(settings, field, True)
     assert build().state()["enabled"] is True
+
+
+#: What each feature's refusal headline has to say it is refusing. The default
+#: ``MutationsDisabled`` message names ``ADMIN_ALLOW_MUTATIONS`` and nothing
+#: else, so a gate that supplies no message tells an operator whose *feature*
+#: switch is off to go and change a variable that is already true.
+REFUSAL_NAMES = {
+    "router install": "router install",
+    "router uninstall": "router uninstall",
+    "portal subscribe": "subscribing",
+    "node debug pod": "node debug pod",
+    "CLI pod": "CLI session",
+    "project create": "project",
+}
+
+
+@pytest.mark.parametrize("feature", sorted(FEATURE_GATES))
+def test_every_refusal_leads_with_the_thing_it_refused(feature, db_engine):
+    """The headline of the 403, and the first line the operator reads.
+
+    Without it the refusal falls back to ``MutationsDisabled``'s default — "this
+    console is running read-only, writes are disabled by ADMIN_ALLOW_MUTATIONS"
+    — which for a feature switch names the wrong setting entirely and sends
+    somebody to change a variable that is already true.
+
+    This is here because it is the one field of a refusal nothing else asserted.
+    Detail and hint are checked above and by each feature's own tests; dropping
+    the message passed all 1287 of them.
+    """
+    build, _ = FEATURE_GATES[feature]
+    message = build().message
+
+    assert message, "no headline means the generic read-only one, naming the wrong switch"
+    assert REFUSAL_NAMES[feature].lower() in message.lower(), (
+        f"the headline {message!r} never says it is {REFUSAL_NAMES[feature]} that "
+        "is off, so the operator is told something is disabled and not what"
+    )
+
+
+def test_the_hoisted_gate_keeps_the_context_its_caller_added(db_engine):
+    """`require_open`'s ``context`` is why §14 can say *which* router action was
+    refused. It is the only caller-supplied field on the refusal envelope, so
+    nothing else would notice it going missing."""
+    with pytest.raises(MutationsDisabled) as caught:
+        require_open(
+            gate(SHUT, message="Router install is disabled on this console."),
+            verb="create", group="apps", version="v1", plural="deployments",
+            namespace="k8boss-router", name="k8boss-admin-router",
+            dry_run=False, detail="router install refused (switched off)",
+            context={"action": "install"},
+        )
+
+    assert caught.value.context["action"] == "install"
+    assert caught.value.context["resource"] == "deployments", "and the target survives it"
 
 
 @pytest.mark.parametrize("feature", sorted(FEATURE_GATES))
