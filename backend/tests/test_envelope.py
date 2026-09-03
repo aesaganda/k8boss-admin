@@ -28,12 +28,17 @@ import pytest
 from kubernetes.client.rest import ApiException
 
 from app.errors import (
+    AdminError,
+    AuthenticationRequired,
     ClusterUnreachable,
+    Conflict,
     Invalid,
+    InvalidCredentials,
     NotFound,
     NoClusterSelected,
     RBACDenied,
     Unsupported,
+    UpstreamError,
 )
 from app.resources.envelope import (
     UNAVAILABLE_REASONS,
@@ -276,10 +281,10 @@ def test_a_missing_resource_is_recorded_as_not_found():
         (ClusterUnreachable("no"), "unreachable"),
         (NoClusterSelected("no"), "not_registered"),
         (Unsupported("no"), "unsupported"),
-        (Invalid("no"), "unreachable"),
+        (UpstreamError("no"), "unreachable"),
     ],
 )
-def test_every_error_class_maps_into_the_closed_vocabulary(error, expected):
+def test_every_availability_error_maps_into_the_closed_vocabulary(error, expected):
     """A new error class cannot quietly start rendering as the catch-all.
 
     `unavailable_entry` refuses anything outside the vocabulary, so a mapping
@@ -288,6 +293,72 @@ def test_every_error_class_maps_into_the_closed_vocabulary(error, expected):
     """
     assert reason_for_error(error) == expected
     assert expected in UNAVAILABLE_REASONS
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        Invalid("no"),
+        Conflict("no"),
+        AuthenticationRequired("no"),
+        InvalidCredentials("no"),
+    ],
+)
+def test_an_error_that_is_not_about_availability_maps_to_nothing(error):
+    """`unreachable` was the old fallback, and it was the wrong answer.
+
+    Every token in the §1.2 vocabulary answers "we could not look, and here is
+    why". A 422 or a 409 from a read says the opposite: the cluster answered,
+    and the request this console built was wrong. §12's authentication codes are
+    about the person at the console and never about a cluster at all. Reporting
+    either as `unreachable` sends an operator to check a network that is fine,
+    which is where a defect of that shape lives forever.
+    """
+    assert reason_for_error(error) is None
+
+
+def test_the_mapping_has_no_fallback_so_a_new_class_must_be_added_to_it():
+    """The property the docstring claimed and `.get(code, "unreachable")` broke.
+
+    A new error class had to be *added* to render — except it did not: it became
+    "the cluster could not be reached" on its own.
+    """
+    class Invented(AdminError):
+        code = "something_new"
+
+    assert reason_for_error(Invented("no")) is None
+
+
+def test_collect_re_raises_what_it_cannot_honestly_record():
+    """Same reasoning as the TypeError case below, one layer in.
+
+    A degraded column saying the cluster was unreachable, when the cluster
+    answered and refused our request, is a wrong answer delivered confidently —
+    and it is one nobody will ever chase, because it reads as somebody else's
+    outage.
+    """
+    sink: list = []
+
+    with pytest.raises(Invalid):
+        with collect(sink, "", "pods", namespace="prod"):
+            raise Invalid("fieldSelector is malformed")
+
+    assert sink == [], "and nothing is recorded, because nothing was degraded"
+
+
+def test_collect_re_raises_a_422_from_the_api_server_too():
+    """The ApiException path maps to `invalid` and must reach the same verdict.
+
+    Two branches, one rule: if it cannot be said as an availability reason, it
+    is not one.
+    """
+    sink: list = []
+
+    with pytest.raises(Invalid):
+        with collect(sink, "", "pods", namespace="prod"):
+            raise ApiException(status=422, reason="Unprocessable Entity")
+
+    assert sink == []
 
 
 # --------------------------------------------------------------------------- #

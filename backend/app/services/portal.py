@@ -282,10 +282,15 @@ def unknown_entry(state: SourceState, *, namespace: str | None = None) -> dict[s
     """The §1.2 ``unavailable[]`` entry for an API we could not classify."""
     error = state.error
     assert error is not None  # only called for STATE_UNKNOWN, which always has one
+    reason = reason_for_error(error)
+    if reason is None:
+        # See `app.services.routes._unknown_entry`: an error that is not about
+        # availability must not be rendered as one.
+        raise error
     return unavailable_entry(
         state.api.group,
         state.api.plural,
-        reason_for_error(error),
+        reason,
         detail=error.detail or error.message,
         namespace=namespace,
     )

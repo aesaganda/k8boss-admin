@@ -46,9 +46,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.admin import apply as apply_service
-from app.admin import preflight
-from app.audit import recorder
-from app.errors import AdminError, Invalid, Unsupported
+from app.errors import Invalid, Unsupported
 from app.resources import reader
 from app.services import routes as routes_service
 from app.services.routes import (
@@ -1050,69 +1048,43 @@ def _require_acknowledgement(
 CUSTOM_HOST_SUBRESOURCE = "custom-host"
 
 
-def _preflight_custom_host(
+def _custom_host_subresources(
     backend: RouteBackend, exposure: Exposure | None, document: dict[str, Any],
-    *, verb: str, dry_run: bool,
-) -> None:
-    """Preflight ``routes/custom-host`` when the Route names a hostname.
+) -> tuple[str, ...]:
+    """``("custom-host",)`` when this write needs that grant, else empty.
 
-    Invariant 2 promises a denial that names the missing permission. Without
-    this, it does not — and this is the one case in §13 where it silently would
-    not.
+    A **pure decision**, handed to the funnel as ``also_requires`` rather than
+    reviewed here. Invariant 2 promises a denial that names the missing
+    permission, and this is the one case in §13 where the funnel alone would
+    not: OpenShift gates *choosing a hostname* behind ``routes/custom-host``, a
+    separate RBAC subresource, so a ServiceAccount can hold ``create routes``,
+    pass the funnel's own review, and still have the API server refuse the
+    write. The operator is then told they cannot create Routes — a permission
+    the review just confirmed they hold — and goes looking in the wrong
+    ClusterRole.
 
-    OpenShift gates *choosing a hostname* separately from creating a Route:
-    ``routes/custom-host`` is its own RBAC subresource, and a ServiceAccount can
-    hold ``create routes`` while not holding it. The funnel preflights
-    ``create routes``, that review passes, and the API server then refuses the
-    write. The operator is told they cannot create Routes — a permission the
-    review just confirmed they have — and goes looking in the wrong ClusterRole.
+    **Deciding here and reviewing there is the point.** This check used to run
+    before the write reached :func:`app.admin.mutate.mutate`, which put it ahead
+    of the mutations gate: on a read-only console a Route carrying a hostname
+    was answered ``403 rbac_denied``, sending somebody to widen a ClusterRole
+    when the deployment simply was not permitted to write at all. §1.3 gives
+    ``mutations_disabled`` its own code precisely so that cannot happen, and the
+    ordering inside the funnel is what keeps the promise. The denial is audited
+    there too, against the subresource that was actually refused.
 
     Only for Routes, and only when a hostname is actually set: a Route with
     ``spec.subdomain``, or one letting the router generate the name entirely, is
-    not a custom host and does not need the grant. Preflighting it anyway would
-    disable a button for a permission the action does not require, which is the
+    not a custom host and does not need the grant. Asking for it anyway would
+    disable a control for a permission the action does not require, which is the
     same defect pointed the other way.
     """
     if backend.key != "openshift":
-        return
+        return ()
     host = (
         exposure.host if exposure is not None
         else (document.get("spec") or {}).get("host")
     )
-    if not host:
-        return
-
-    namespace = (
-        exposure.namespace if exposure is not None
-        else (document.get("metadata") or {}).get("namespace")
-    )
-    name = (
-        exposure.name if exposure is not None
-        else (document.get("metadata") or {}).get("name")
-    )
-    try:
-        preflight.require(
-            verb, backend.group, backend.plural,
-            namespace=namespace, name=name, subresource=CUSTOM_HOST_SUBRESOURCE,
-        )
-    except AdminError as error:
-        # Audited here because this refusal happens *outside* the funnel, which
-        # audits its own. A denial that left no row would be the one attempted
-        # write in §13 the trail could not answer for. Never raises — see
-        # `app.audit`.
-        recorder.record(
-            verb=verb,
-            target={
-                "group": backend.group, "version": "v1", "resource": backend.plural,
-                "namespace": namespace, "name": name,
-                "subresource": CUSTOM_HOST_SUBRESOURCE,
-            },
-            dry_run=dry_run,
-            outcome="denied",
-            detail=f"set hostname {host} on {backend.kind} {namespace}/{name}",
-            error=f"{error.code}: {error.message}",
-        )
-        raise
+    return (CUSTOM_HOST_SUBRESOURCE,) if host else ()
 
 
 def _audit_detail(exposure: Exposure, backend: RouteBackend, verb: str) -> str:
@@ -1192,10 +1164,6 @@ def create_route(
         namespace = exposure.namespace
         detail = _audit_detail(exposure, backend, "create")
 
-    _preflight_custom_host(
-        backend, exposure, rendered["document"], verb="create", dry_run=dry_run,
-    )
-
     result = apply_service.create_from_yaml(
         rendered["group"],
         rendered["version"],
@@ -1204,6 +1172,11 @@ def create_route(
         rendered["yaml"],
         dry_run,
         detail=detail,
+        # Reviewed inside the funnel, after the gate. See
+        # `_custom_host_subresources` for why the ordering is load-bearing.
+        also_requires=_custom_host_subresources(
+            backend, exposure, rendered["document"],
+        ),
     )
     result["route"] = {
         "backend": rendered["backend"],
@@ -1258,10 +1231,6 @@ def update_route(
             )
         detail = _audit_detail(exposure, backend, "replace")
 
-    _preflight_custom_host(
-        backend, exposure, rendered["document"], verb="update", dry_run=dry_run,
-    )
-
     result = apply_service.update_from_yaml(
         rendered["group"],
         rendered["version"],
@@ -1272,6 +1241,9 @@ def update_route(
         resource_version,
         dry_run,
         detail=detail,
+        also_requires=_custom_host_subresources(
+            backend, exposure, rendered["document"],
+        ),
     )
     result["route"] = {
         "backend": rendered["backend"],

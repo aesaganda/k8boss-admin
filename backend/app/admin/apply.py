@@ -472,6 +472,7 @@ def create_from_yaml(
     dry_run: bool,
     *,
     detail: str | None = None,
+    also_requires: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """``POST /api/resources/{group}/{version}/{plural}`` (§4).
 
@@ -532,6 +533,7 @@ def create_from_yaml(
         ),
         before=None,
         detail=detail or f"create {info['kind'] or plural} {name or '(generated name)'}",
+        also_requires=also_requires,
     )
 
 
@@ -550,6 +552,7 @@ def update_from_yaml(
     dry_run: bool,
     *,
     detail: str | None = None,
+    also_requires: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """``PUT /api/resources/{group}/{version}/{plural}/{name}`` (§4).
 
@@ -657,6 +660,7 @@ def update_from_yaml(
         apply_fn=apply_fn,
         before=live,
         detail=detail or f"replace {info['kind'] or plural} {name}",
+        also_requires=also_requires,
     )
 
 

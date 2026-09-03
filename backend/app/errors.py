@@ -76,17 +76,30 @@ class AdminError(Exception):
         }
 
     @property
-    def unavailable_reason(self) -> str:
-        """This error expressed as an §1.2 ``unavailable[].reason`` token.
+    def unavailable_reason(self) -> str | None:
+        """This error as an §1.2 ``unavailable[].reason`` token, or ``None``.
 
         Collection endpoints do not fail when one of several reads fails — they
         record the failure and keep going. That record has a small closed
         vocabulary (``forbidden``, ``not_found``, ``unreachable``, ``timeout``,
         ``not_registered``, ``unsupported``), and this is the single place the
-        two vocabularies are joined, so a new error class cannot quietly start
-        rendering as the catch-all.
+        two vocabularies are joined.
+
+        **``None`` means this error is not a statement about whether we could
+        read**, and the caller must not render it as one. Every token above
+        answers "we could not look, and here is why"; ``invalid`` and
+        ``conflict`` do not — a read refused for a malformed request or a
+        version mismatch says the cluster answered and something on this side
+        was wrong. So do §12's console-authentication codes, which are about the
+        person at the console and never about a cluster.
+
+        There is deliberately **no default**. The previous version fell back to
+        ``unreachable`` for anything unmapped, which made this docstring's own
+        promise false: a new error class did not have to be added here to render
+        — it silently became "the cluster could not be reached", the one answer
+        that sends an operator to go and check a network that is fine.
         """
-        return _UNAVAILABLE_REASON.get(self.code, "unreachable")
+        return _UNAVAILABLE_REASON.get(self.code)
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"<{type(self).__name__} {self.code} {self.http_status} {self.message!r}>"
@@ -291,20 +304,37 @@ class InternalError(AdminError):
 # ``unreachable``, which would send an operator to check a cluster that answered
 # every question it was asked. If that ever stops being true, the fix is a new
 # reason in ``UNAVAILABLE_REASONS``, which is a contract change.
+#: The join between the §1.3 error codes and §1.2's closed reason vocabulary.
+#:
+#: **Exhaustive by construction, with no fallback.** Every entry answers "we
+#: could not look at this, and here is why". A code absent from this table maps
+#: to ``None``, which callers must treat as "not expressible as an unavailable
+#: reason" and propagate rather than render.
+#:
+#: What is deliberately *not* here, and why:
+#:
+#: * ``invalid`` and ``conflict`` — the cluster answered. A secondary read that
+#:   came back 422 or 409 means the request this console built was wrong, and
+#:   recording that as ``unreachable`` hides a bug in this process behind a
+#:   sentence about somebody's network. `collect` re-raises them for the same
+#:   reason it re-raises a ``TypeError`` from a shaper.
+#: * §12's ``authentication_required``, ``invalid_credentials``,
+#:   ``permission_denied``, ``identity_provider_unavailable`` and
+#:   ``too_many_attempts`` — these are about the person signed in to the
+#:   console, not about a cluster read, and one appearing in a cluster
+#:   listing's ``unavailable[]`` would be a category error the operator has no
+#:   way to interpret.
 _UNAVAILABLE_REASON: dict[str, str] = {
     "rbac_denied": "forbidden",
     "not_found": "not_found",
     "cluster_unreachable": "unreachable",
     "no_cluster_selected": "not_registered",
     "unsupported": "unsupported",
+    # A write refusal, so it should never reach a read's `unavailable[]` — but
+    # it is a true "you may not, and here is why", and mapping it costs nothing.
     "mutations_disabled": "forbidden",
-    "conflict": "unreachable",
-    "invalid": "unreachable",
-    "authentication_required": "forbidden",
-    "invalid_credentials": "forbidden",
-    "permission_denied": "forbidden",
-    "identity_provider_unavailable": "unreachable",
-    "too_many_attempts": "unreachable",
+    # The API server answered and the answer was a failure: 5xx, 401, an
+    # unparseable body. "We could not look" is exactly right.
     "upstream_error": "unreachable",
 }
 

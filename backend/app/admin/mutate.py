@@ -310,6 +310,7 @@ def mutate(
     subresource: str | None = None,
     detail: str | None = None,
     gate: FeatureGate | None = None,
+    also_requires: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Run one mutation through the gate, the preflight, the diff and the trail.
 
@@ -332,6 +333,16 @@ def mutate(
             §17). Evaluated here at step one, so the refusal is audited against
             this write's real target and a feature cannot forget the row.
             ``None`` means the write has only the console-wide switch.
+        also_requires: subresources of *this* object that the write needs the
+            same verb on, beyond the verb on the object itself. §13's
+            ``routes/custom-host`` is the case: OpenShift gates *choosing a
+            hostname* behind its own RBAC subresource, so a ServiceAccount can
+            hold ``create routes``, pass the review above, and still have the
+            API server refuse the write — leaving the operator told they cannot
+            create Routes, a permission the review just confirmed. Checked here
+            rather than by the caller so it happens **after** the gate: a
+            read-only console must answer ``mutations_disabled``, not send
+            somebody to fix a ClusterRole that was never the obstacle.
 
     Returns:
         The §1.5 mutation response.
@@ -355,14 +366,28 @@ def mutate(
     # 2. Preflight (§0.2). A clean denial and a review that could not be
     #    evaluated are different errors, and preflight.require keeps them apart —
     #    both are audited, because both mean the write did not happen.
-    try:
-        preflight.require(
-            verb, group, plural, namespace=namespace, name=name, subresource=subresource
-        )
-    except AdminError as e:
-        _audit(verb=verb, target=target, dry_run=dry_run, outcome="denied",
-               detail=detail, error=e)
-        raise
+    #
+    #    Each `also_requires` subresource is reviewed too, and a denial there is
+    #    audited against *that* subresource rather than the object: a row saying
+    #    `create routes` was denied, when what was refused was
+    #    `routes/custom-host`, is the misattribution this whole check exists to
+    #    prevent, repeated in the trail.
+    for required, audited in [
+        (subresource, target),
+        *(
+            (extra, _target(group, version, plural, namespace, name, extra))
+            for extra in also_requires
+        ),
+    ]:
+        try:
+            preflight.require(
+                verb, group, plural,
+                namespace=namespace, name=name, subresource=required,
+            )
+        except AdminError as e:
+            _audit(verb=verb, target=audited, dry_run=dry_run, outcome="denied",
+                   detail=detail, error=e)
+            raise
 
     # 3. Apply. The only step that reaches the cluster.
     try:

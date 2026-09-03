@@ -426,10 +426,18 @@ def _unknown_entry(state: BackendState) -> dict[str, Any]:
     """
     error = state.error
     assert error is not None  # only called for STATE_UNKNOWN, which always has one
+    reason = reason_for_error(error)
+    if reason is None:
+        # Discovery failed for something that is not a statement about whether
+        # we could look — a malformed request, not an unavailable backend. The
+        # same rule `collect` follows: propagate rather than pick the nearest
+        # token, because "unreachable" here would send somebody to check a
+        # network that answered fine.
+        raise error
     return unavailable_entry(
         state.backend.group,
         state.backend.plural,
-        reason_for_error(error),
+        reason,
         detail=error.detail or error.message,
     )
 
