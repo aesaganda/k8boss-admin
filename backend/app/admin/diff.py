@@ -42,6 +42,19 @@ to both sides, so nothing that is genuinely changing can be hidden by it.
 What is deliberately *not* normalised: labels, annotations (other than the one
 above), spec in any form, and anything under a CRD's own keys. If it is in the
 diff, it is because the operator's request put it there.
+
+**A Secret's values never appear in a diff, on either side.** Every write of a
+Secret — the dry run of a delete, a replace, the fresh diff on a 409 — passes
+its live object through here as ``before``, and the live object carries every
+value. Left alone, a dry-run delete (permitted in read-only mode, preflighted on
+``delete`` rather than ``get``, audited as an ordinary dry run) returned the
+whole Secret in ``diff.before``: a reveal path that §8's reveal gate never saw.
+So :func:`build_diff` redacts ``data`` on both sides before diffing, into
+``<redacted, N bytes>`` placeholders that keep the key, the decoded size and —
+on the proposed side — a ``changed`` marker when the value differs from the live
+one. That marker is what keeps ``changed`` honest: a same-length rotation of a
+password would otherwise redact to identical text on both sides and be reported
+as a write that changes nothing.
 """
 
 from __future__ import annotations
@@ -151,6 +164,94 @@ def _to_yaml(obj: Any) -> str:
     )
 
 
+def _is_core_secret(obj: Any) -> bool:
+    """Whether ``obj`` is a ``v1`` Secret — the kind whose ``data`` is the secret.
+
+    ``apiVersion`` absent counts: a hand-written manifest posted to the
+    Secrets URL may omit it, and :func:`app.admin.apply._check_document_matches_url`
+    has already refused any document that names a different one.
+    """
+    return (
+        isinstance(obj, dict)
+        and obj.get("kind") == "Secret"
+        and obj.get("apiVersion") in (None, "v1")
+    )
+
+
+def _decoded_size(value: Any) -> int:
+    """Decoded byte length of a base64 value, by arithmetic rather than decoding.
+
+    The same rule as :func:`app.resources.shaping._base64_decoded_size`,
+    restated rather than imported for the reason the module docstring gives
+    about the reader: decoding would put the plaintext in a local variable on a
+    code path whose entire purpose is to never hold it.
+    """
+    text = str(value or "")
+    return max((len(text) * 3) // 4 - text.count("="), 0)
+
+
+def _placeholder(size: int, *, changed: bool) -> str:
+    """What a Secret value becomes in the diff.
+
+    Not ``null`` — that is what the single-object read uses, and it is right
+    there because ``null`` cannot be applied back. In a diff ``null`` on both
+    sides would hide a changed value, and a diff that says a password rotation
+    changes nothing is a confirm dialog that offers no Confirm. Not asterisks
+    either, and not a hash: a hash of a short password is an oracle. The
+    decoded size and a ``changed`` marker say everything an operator needs to
+    approve the write and nothing that could leave the console.
+    """
+    return f"<redacted, {size} bytes{', changed' if changed else ''}>"
+
+
+def _redact_secret_sides(
+    before: dict[str, Any] | None, after: dict[str, Any] | None
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Copies of both sides with every Secret value replaced.
+
+    ``data`` keys are kept so an added or removed key still shows as a hunk;
+    a key present on both sides with the same value redacts to identical text
+    and produces no hunk; a key whose value differs carries ``changed`` on the
+    proposed side. ``stringData`` — the write-only plaintext form a submitted
+    manifest may carry, which the API server folds into ``data`` and never
+    returns — is redacted by plaintext length, because on a 409 the submitted
+    document is diffed as-is against live. The last-applied annotation, which
+    holds a serialised copy of the whole object, is already dropped from both
+    sides by :func:`_strip_metadata`.
+    """
+    before_copy = copy.deepcopy(before) if isinstance(before, dict) else before
+    after_copy = copy.deepcopy(after) if isinstance(after, dict) else after
+
+    before_data = before.get("data") if isinstance(before, dict) else None
+    if not isinstance(before_data, dict):
+        before_data = None
+
+    for side in (before_copy, after_copy):
+        if not isinstance(side, dict):
+            continue
+        string_data = side.get("stringData")
+        if isinstance(string_data, dict):
+            side["stringData"] = {
+                key: _placeholder(len(str(value or "").encode("utf-8")), changed=False)
+                for key, value in string_data.items()
+            }
+
+    if isinstance(before_copy, dict) and before_data is not None:
+        before_copy["data"] = {
+            key: _placeholder(_decoded_size(value), changed=False)
+            for key, value in before_data.items()
+        }
+    if isinstance(after_copy, dict) and isinstance(after_copy.get("data"), dict):
+        after_copy["data"] = {
+            key: _placeholder(
+                _decoded_size(value),
+                changed=before_data is not None and key in before_data and before_data[key] != value,
+            )
+            for key, value in after_copy["data"].items()
+        }
+    return before_copy, after_copy
+
+
 def build_diff(before: dict[str, Any] | None, after: dict[str, Any] | None) -> dict[str, Any]:
     """The §1.5 ``diff`` block: ``{before, after, unified, changed}``.
 
@@ -176,6 +277,13 @@ def build_diff(before: dict[str, Any] | None, after: dict[str, Any] | None) -> d
     # would show a deletion that is not going to happen. A create or a delete has
     # no second side to be asymmetric with, and §4 fixes a delete's `before` as
     # the live object entire.
+    # Before normalisation and before either side is rendered: from here on no
+    # Secret value exists in this function's frames. Keyed on the objects, not
+    # on a caller-supplied flag, so the conflict diff in apply.py and any future
+    # caller get the same rule without having to remember it.
+    if _is_core_secret(before) or _is_core_secret(after):
+        before, after = _redact_secret_sides(before, after)
+
     before_has_status = isinstance(before, dict) and "status" in before
     after_has_status = isinstance(after, dict) and "status" in after
     comparing_two = before is not None and after is not None
@@ -215,8 +323,9 @@ def build_diff(before: dict[str, Any] | None, after: dict[str, Any] | None) -> d
 def digest(diff: dict[str, Any]) -> str:
     """``sha256:...`` over the unified diff, for the audit record (§10).
 
-    The diff itself is deliberately never stored: it can contain Secret data and
-    ConfigMap payloads, and the audit table is a much less carefully guarded
+    The diff itself is deliberately never stored: a Secret's is redacted (see
+    :func:`_redact_secret_sides`) but a ConfigMap's payload and any CRD's spec
+    are in it verbatim, and the audit table is a much less carefully guarded
     place than the cluster those values came from. The digest keeps the one
     property that matters after the fact — that the change an operator confirmed
     in the dry run is byte-for-byte the change that was applied — without keeping

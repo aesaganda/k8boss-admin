@@ -401,3 +401,112 @@ def test_an_unparseable_warning_is_kept_rather_than_dropped(db_engine, server):
     )
 
     assert response["warnings"] == ["something a proxy invented"]
+
+
+# --------------------------------------------------------------------------- #
+# Secrets. The write path is the other channel a value could leave by.
+# --------------------------------------------------------------------------- #
+
+import base64  # noqa: E402
+
+SECRET_PASSWORD_B64 = base64.b64encode(b"hunter2-rotated-2026").decode()
+SECRET_ROTATED_B64 = base64.b64encode(b"hunter3-rotated-2026").decode()
+
+SECRET_LIVE = {
+    "apiVersion": "v1",
+    "kind": "Secret",
+    "metadata": {
+        "name": "db", "namespace": "prod", "resourceVersion": "10",
+        "annotations": {
+            "kubectl.kubernetes.io/last-applied-configuration":
+                '{"data":{"password":"' + SECRET_PASSWORD_B64 + '"}}',
+        },
+    },
+    "type": "Opaque",
+    "data": {"password": SECRET_PASSWORD_B64},
+}
+
+SECRET_INFO = {
+    "group": "", "version": "v1", "kind": "Secret", "resource": "secrets",
+    "namespaced": True,
+    "verbs": ["get", "list", "watch", "create", "update", "patch", "delete"],
+    "shortNames": [], "categories": [], "apiVersion": "v1", "preferred": True,
+}
+
+SECRET_YAML = f"""
+apiVersion: v1
+kind: Secret
+metadata:
+  name: db
+  namespace: prod
+type: Opaque
+data:
+  password: {SECRET_ROTATED_B64}
+"""
+
+
+@pytest.fixture
+def secret_server(monkeypatch, fake_k8s):
+    """The `server` fixture, for a Secret: discovery answers Secrets, live is one."""
+    monkeypatch.setattr(catalog, "resolve", lambda group, version, plural: SECRET_INFO)
+    fake_k8s.authorization_v1.returns("create_self_subject_access_review", obj(status=obj(
+        allowed=True, reason=None, evaluation_error=None, denied=False,
+    )))
+    api_server = FakeApiServer(live=SECRET_LIVE)
+    fake_k8s.api_client.returns("call_api", api_server)
+    return api_server
+
+
+def _all_text(diff):
+    return "\n".join(str(diff[key]) for key in ("before", "after", "unified"))
+
+
+def test_a_dry_run_delete_of_a_secret_carries_no_value(db_engine, secret_server):
+    """The leak: permitted in read-only mode, preflighted on `delete`, audited as
+    an ordinary dry run — and, before this, the whole Secret in `diff.before`."""
+    response = apply_service.delete_resource("", "v1", "secrets", "prod", "db", "Background", True)
+
+    assert SECRET_PASSWORD_B64 not in _all_text(response["diff"])
+    assert "hunter2" not in _all_text(response["diff"])
+    assert "password: <redacted, 20 bytes>" in response["diff"]["before"]
+    assert "last-applied-configuration" not in _all_text(response["diff"])
+    assert response["diff"]["changed"] is True
+    assert response["applied"] is False
+
+
+def test_a_secret_replace_diff_names_the_changed_key_without_its_value(db_engine, secret_server):
+    secret_server.projection = {
+        **SECRET_LIVE, "metadata": {**SECRET_LIVE["metadata"], "resourceVersion": "11"},
+        "data": {"password": SECRET_ROTATED_B64},
+    }
+
+    response = apply_service.update_from_yaml("", "v1", "secrets", "prod", "db", SECRET_YAML, "10", True)
+
+    text = _all_text(response["diff"])
+    assert SECRET_PASSWORD_B64 not in text and SECRET_ROTATED_B64 not in text
+    assert response["diff"]["changed"] is True
+    assert "+  password: <redacted, 20 bytes, changed>" in response["diff"]["unified"]
+
+
+def test_the_fresh_diff_on_a_secret_conflict_carries_no_value(db_engine, secret_server):
+    """A 409 diffs the submitted document against live, outside the funnel's own
+    diff — the same rule has to hold there, and it does because it is keyed on
+    the object inside build_diff rather than on the caller."""
+    with pytest.raises(Conflict) as caught:
+        apply_service.update_from_yaml("", "v1", "secrets", "prod", "db", SECRET_YAML, "9", True)
+
+    fresh = caught.value.context["diff"]
+    assert SECRET_PASSWORD_B64 not in _all_text(fresh)
+    assert SECRET_ROTATED_B64 not in _all_text(fresh)
+    assert fresh["changed"] is True
+
+
+def test_the_delete_route_returns_a_redacted_diff(client, db_engine, secret_server):
+    """Through the HTTP route, in read-only mode: the response body a browser
+    would hold in its network tab has no value in it anywhere."""
+    response = client.delete("/api/resources/core/v1/secrets/db", params={"namespace": "prod", "dryRun": "true"})
+
+    assert response.status_code == 200, response.text
+    assert SECRET_PASSWORD_B64 not in response.text
+    assert "hunter2" not in response.text
+    assert "<redacted, 20 bytes>" in response.text
