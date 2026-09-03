@@ -41,12 +41,12 @@ from app.admin.apply import (
     JSON_PATCH,
     STRATEGIC_MERGE_PATCH,
     patch_fn,
-    read_object,
-    request_json,
 )
 from app.admin.mutate import mutate
 from app.errors import Invalid, NotFound, UpstreamError, from_api_exception
 from app.resources import reader
+from app.resources.reader import read_object
+from app.resources.transport import request_json
 from app.resources.envelope import collect, unavailable_entry
 from app.resources.shaping import get_field, rfc3339
 from app.services.workloads import KindSpec, label_selector_string, resolve_plural

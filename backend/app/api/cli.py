@@ -17,6 +17,7 @@ from typing import Any
 from fastapi import APIRouter, Query
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.api.bodies import MutationBody
 from app.admin import cli_pod
 
 logger = logging.getLogger(__name__)
@@ -24,7 +25,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["cli"])
 
 
-class CliPodRequest(BaseModel):
+class CliPodRequest(MutationBody):
     """``POST /api/cli`` body (§15).
 
     One field. Everything else about the pod — the ServiceAccount above all — is
@@ -37,11 +38,6 @@ class CliPodRequest(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
-    dry_run: bool = Field(
-        True,
-        alias="dryRun",
-        description="Send dryRun=All to the API server and return the projected diff.",
-    )
     image: str | None = Field(
         None,
         max_length=512,

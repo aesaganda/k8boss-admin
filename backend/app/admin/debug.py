@@ -58,7 +58,8 @@ from typing import Any
 
 from kubernetes.client.rest import ApiException
 
-from app.admin.apply import STRATEGIC_MERGE_PATCH, patch_fn, read_object
+from app.admin.apply import STRATEGIC_MERGE_PATCH, patch_fn
+from app.resources.reader import read_object
 from app.admin.images import validate_image_reference
 from app.admin.mutate import mutate
 from app.admin.names import random_suffix
@@ -236,7 +237,7 @@ def _require_support(namespace: str, name: str) -> None:
 def _read_pod(namespace: str, name: str) -> dict[str, Any]:
     """The live pod, for its container names and its ephemeral containers.
 
-    Read through :func:`app.admin.apply.read_object` rather than the generic
+    Read through :func:`app.resources.reader.read_object` rather than the generic
     reader for the reason that function documents: group, version and scope are
     already known here, so a discovery round trip to re-learn "core/v1 pods is
     namespaced" would be paid on every request for nothing.

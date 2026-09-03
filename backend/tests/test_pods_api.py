@@ -66,7 +66,7 @@ METRICS_CATALOG_ITEM = {
 def live_pod(**overrides):
     """The pod as the API server hands it back — a plain JSON dict.
 
-    A dict rather than a ``V1Pod`` because :func:`app.admin.apply.read_object`
+    A dict rather than a ``V1Pod`` because :func:`app.resources.reader.read_object`
     deliberately reaches past the typed clients, so this is the shape the code
     under test actually receives.
     """

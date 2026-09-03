@@ -22,6 +22,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, Query
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.api.bodies import MutationBody
 from app.admin import portal as portal_admin
 from app.services import portal as portal_service
 
@@ -48,7 +49,7 @@ class SubscribeRequest(BaseModel):
     startingCSV: str | None = Field(None, min_length=1, max_length=253)  # noqa: N815
 
 
-class SubscribeWriteRequest(SubscribeRequest):
+class SubscribeWriteRequest(MutationBody, SubscribeRequest):
     """The plan's body plus the two fields that make it a write."""
 
     acknowledgeConsequences: list[str] = Field(  # noqa: N815
@@ -58,11 +59,6 @@ class SubscribeWriteRequest(SubscribeRequest):
             "boolean, like §13's acknowledgeLossy: a caller that acknowledged one "
             "set and then changed the namespace has to read the new one."
         ),
-    )
-    dry_run: bool = Field(
-        True,
-        alias="dryRun",
-        description="Send dryRun=All to the API server and return the projected diff.",
     )
 
 

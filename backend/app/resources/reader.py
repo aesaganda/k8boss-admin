@@ -28,7 +28,7 @@ from typing import Any
 import yaml
 from kubernetes.client.rest import ApiException
 
-from app.errors import Invalid, Unsupported, from_api_exception
+from app.errors import Invalid, Unsupported, UpstreamError, from_api_exception
 from app.resources import catalog
 from app.resources.envelope import envelope
 
@@ -38,6 +38,7 @@ from app.resources.envelope import envelope
 # each spelling a magic string is how one of them ends up stripping a slightly
 # different key.
 from app.resources.shaping import LAST_APPLIED_ANNOTATION
+from app.resources.transport import request_json
 
 logger = logging.getLogger(__name__)
 
@@ -274,6 +275,49 @@ def get_resource(
     except ApiException as e:
         raise from_api_exception(e, context=context) from e
     return trim(payload, for_list=False)
+
+
+def read_object(
+    group: str,
+    version: str,
+    plural: str,
+    name: str,
+    *,
+    namespace: str | None = None,
+    subresource: str | None = None,
+) -> dict[str, Any]:
+    """Read the object a write is about to change, as a plain JSON dict.
+
+    Deliberately *not* :func:`app.resources.reader.get_resource`: that path
+    resolves the resource through discovery first, which is right for the generic
+    browser (it must find out whether the resource exists and is namespaced) and
+    wrong for the typed workload writes, where group, version and scope are
+    already known from a :class:`~app.services.workloads.KindSpec`. Paying a
+    discovery round trip to re-learn "apps/v1 deployments is namespaced" would
+    put a cache-cold dependency in front of every scale.
+
+    Also the only way to reach a **subresource**: ``/scale`` is not an object the
+    catalog lists, and the reader has no vocabulary for it.
+    """
+    context = {
+        "verb": "get", "group": group, "version": version, "resource": plural,
+        "namespace": namespace, "name": name, "subresource": subresource,
+    }
+    path = resource_path(
+        group, version, plural, namespace=namespace, name=name, subresource=subresource,
+    )
+    try:
+        payload, _warnings = request_json("GET", path)
+    except ApiException as e:
+        raise from_api_exception(e, context=context) from e
+    if not isinstance(payload, dict):
+        raise UpstreamError(
+            "The cluster returned something that is not a Kubernetes object.",
+            detail=f"GET {path} returned {type(payload).__name__}.",
+            hint="Check whether a proxy in front of the API server is answering instead of it.",
+            context=context,
+        )
+    return payload
 
 
 __all__ = [

@@ -21,6 +21,7 @@ from typing import Any
 from fastapi import APIRouter, Body, Path
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.api.bodies import MutationBody
 from app.admin import debug as debug_service
 
 logger = logging.getLogger(__name__)
@@ -28,7 +29,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["debug"])
 
 
-class DebugRequest(BaseModel):
+class DebugRequest(MutationBody):
     """``POST /api/pods/{namespace}/{name}/debug`` body.
 
     ``dryRun`` defaults to **true**, and the alias accepts ``dry_run`` too, for
@@ -39,11 +40,6 @@ class DebugRequest(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
-    dry_run: bool = Field(
-        True,
-        alias="dryRun",
-        description="Send dryRun=All to the API server and return the projected diff.",
-    )
     image: str | None = Field(
         None,
         max_length=512,

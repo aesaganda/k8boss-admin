@@ -39,7 +39,6 @@ from __future__ import annotations
 
 import copy
 import logging
-import re
 from typing import Any
 
 import yaml
@@ -48,8 +47,8 @@ from kubernetes.client.rest import ApiException
 from app.admin.diff import build_diff
 from app.admin.mutate import mutate
 from app.errors import Conflict, Invalid, Unsupported, UpstreamError, from_api_exception
-from app.k8s.client import get_api_client
 from app.resources import catalog, reader
+from app.resources.transport import request_json
 from app.resources.shaping import get_field
 
 logger = logging.getLogger(__name__)
@@ -62,7 +61,6 @@ DRY_RUN_ALL = "All"
 #: than split on commas because warning texts routinely *contain* commas
 #: ("spec.template.spec.containers[0].resources, and 2 other fields"), and a
 #: comma split turns one accurate warning into two false ones.
-_WARNING_RE = re.compile(r'\d{3}\s+\S+\s+"((?:[^"\\]|\\.)*)"')
 
 #: §4's delete propagation choices, passed to the API server unchanged.
 PROPAGATION_POLICIES: tuple[str, ...] = ("Background", "Foreground", "Orphan")
@@ -84,127 +82,6 @@ PROPAGATION_POLICIES: tuple[str, ...] = ("Background", "Foreground", "Orphan")
 MERGE_PATCH = "application/merge-patch+json"
 STRATEGIC_MERGE_PATCH = "application/strategic-merge-patch+json"
 JSON_PATCH = "application/json-patch+json"
-
-
-# --------------------------------------------------------------------------- #
-# Raw REST, because the typed clients throw the response headers away
-# --------------------------------------------------------------------------- #
-
-def parse_warnings(headers: Any) -> list[str]:
-    """The API server's ``Warning:`` headers, unquoted, in order.
-
-    Returns ``[]`` when there are none — which here genuinely means "the server
-    warned about nothing", not "we could not look": the headers are part of the
-    same response as the object, so if we have one we have the other.
-
-    Multiple warnings arrive either as repeated headers or as one comma-joined
-    value, depending on the HTTP stack; both are handled, and a value that
-    matches no warn-header form at all is returned raw rather than dropped —
-    an unparseable warning is still a warning.
-    """
-    if headers is None:
-        return []
-    try:
-        items = headers.items() if hasattr(headers, "items") else list(headers)
-    except Exception:  # noqa: BLE001 - a stand-in with an unusual shape
-        logger.debug("Could not iterate response headers of type %s", type(headers).__name__)
-        return []
-
-    warnings: list[str] = []
-    for key, value in items:
-        if str(key).lower() != "warning" or not value:
-            continue
-        matched = _WARNING_RE.findall(str(value))
-        if matched:
-            warnings.extend(
-                text.replace('\\"', '"').replace("\\\\", "\\") for text in matched
-            )
-        else:
-            warnings.append(str(value))
-    return warnings
-
-
-def request_json(
-    method: str,
-    path: str,
-    *,
-    query: list[tuple[str, Any]] | None = None,
-    body: Any = None,
-    content_type: str = "application/json",
-) -> tuple[Any, list[str]]:
-    """One authenticated write against the cluster, returning ``(body, warnings)``.
-
-    The write-side counterpart of :func:`app.resources.catalog.raw_get`, and
-    separate from it for one reason: this one asks for the response *headers*.
-    ``_return_http_data_only=False`` makes ``call_api`` return
-    ``(data, status, headers)``, which is the only way to reach the ``Warning:``
-    values §1.5 promises to relay.
-
-    ``response_type="object"`` matters as much here as it does on the read side:
-    with ``None`` the generated client discards the body, and a create would
-    return nothing to diff against — which would render as "this write changes
-    nothing".
-    """
-    response = get_api_client().call_api(
-        path,
-        method,
-        query_params=[(key, value) for key, value in (query or []) if value is not None],
-        header_params={"Accept": "application/json", "Content-Type": content_type},
-        body=body,
-        response_type="object",
-        auth_settings=["BearerToken"],
-        _return_http_data_only=False,
-    )
-    # A stand-in (or a future client) that hands back only the body still works:
-    # the warnings are then unknown, and an empty list is the honest rendering of
-    # "this transport does not surface headers", not a claim that none were sent.
-    if isinstance(response, tuple) and len(response) == 3:
-        data, _status, headers = response
-        return data, parse_warnings(headers)
-    return response, []
-
-
-def read_object(
-    group: str,
-    version: str,
-    plural: str,
-    name: str,
-    *,
-    namespace: str | None = None,
-    subresource: str | None = None,
-) -> dict[str, Any]:
-    """Read the object a write is about to change, as a plain JSON dict.
-
-    Deliberately *not* :func:`app.resources.reader.get_resource`: that path
-    resolves the resource through discovery first, which is right for the generic
-    browser (it must find out whether the resource exists and is namespaced) and
-    wrong for the typed workload writes, where group, version and scope are
-    already known from a :class:`~app.services.workloads.KindSpec`. Paying a
-    discovery round trip to re-learn "apps/v1 deployments is namespaced" would
-    put a cache-cold dependency in front of every scale.
-
-    Also the only way to reach a **subresource**: ``/scale`` is not an object the
-    catalog lists, and the reader has no vocabulary for it.
-    """
-    context = {
-        "verb": "get", "group": group, "version": version, "resource": plural,
-        "namespace": namespace, "name": name, "subresource": subresource,
-    }
-    path = reader.resource_path(
-        group, version, plural, namespace=namespace, name=name, subresource=subresource,
-    )
-    try:
-        payload, _warnings = request_json("GET", path)
-    except ApiException as e:
-        raise from_api_exception(e, context=context) from e
-    if not isinstance(payload, dict):
-        raise UpstreamError(
-            "The cluster returned something that is not a Kubernetes object.",
-            detail=f"GET {path} returned {type(payload).__name__}.",
-            hint="Check whether a proxy in front of the API server is answering instead of it.",
-            context=context,
-        )
-    return payload
 
 
 def patch_fn(
@@ -754,9 +631,7 @@ __all__ = [
     "create_from_yaml",
     "delete_resource",
     "parse_document",
-    "parse_warnings",
     "patch_fn",
-    "read_object",
     "request_json",
     "update_from_yaml",
 ]

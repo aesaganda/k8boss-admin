@@ -154,7 +154,8 @@ reason.
 | `k8s/auth.py` | `AuthProvider` strategy — adding OIDC or client certs means adding a class here, not editing the client |
 | `k8s/client.py` | `ClusterClientManager`: per-cluster client bundles, deadlines, typed transport failures, CA temp-file lifecycle |
 | `resources/catalog.py` | Discovery. A broken API group becomes an `unavailable` entry, never a smaller catalog |
-| `resources/reader.py` | Generic list/get/YAML, plus trimming (`managedFields` always, `last-applied-configuration` from lists) |
+| `resources/reader.py` | Generic list/get/YAML, plus trimming (`managedFields` always, `last-applied-configuration` from lists), and `read_object` — one object by known group/version/plural, skipping the discovery round trip the generic path needs |
+| `resources/transport.py` | The one authenticated round trip that keeps its response headers, which is where the API server's `Warning:` values live. Used by both directions: the funnel's writes and `read_object`'s GET |
 | `resources/shaping.py` | Pure row shapers — `pod_row`, `phase_detail`, the §8 config/storage/access/network-policy rows, and the tri-state label-selector matcher |
 | `resources/envelope.py` | `envelope()`, `collect()`, `unavailable_entry()` — the mechanism behind "empty is never blind" |
 | `services/workloads.py` | Six controller kinds into one row; `Unknown` status, `null`-vs-`0` counts |

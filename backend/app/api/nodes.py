@@ -34,6 +34,7 @@ from typing import Any
 from fastapi import APIRouter, Path, Query
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.api.bodies import MutationBody
 from app.admin import node_debug
 from app.admin.nodes import cordon_node, drain_node
 from app.services.nodes import get_node, list_nodes
@@ -43,27 +44,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["nodes"])
 
 
-class _MutationBody(BaseModel):
-    """Shared base for the §1.5 write bodies on this router.
-
-    ``dryRun`` defaults to true and the alias accepts ``dry_run`` too. Both are
-    safety rather than convenience: a client that omits the field gets a
-    projection, and a client that sends the snake_case spelling is understood
-    instead of silently falling back to the default — which for this field would
-    mean an operator asking for a real drain, receiving a dry run, and being told
-    ``applied: false`` about a node they believe is now empty.
-    """
-
-    model_config = ConfigDict(populate_by_name=True)
-
-    dry_run: bool = Field(
-        True,
-        alias="dryRun",
-        description="Send dryRun=All to the API server and return the projected diff.",
-    )
-
-
-class CordonRequest(_MutationBody):
+class CordonRequest(MutationBody):
     unschedulable: bool = Field(
         ...,
         # Required, with no default. Defaulting either way makes an empty body a
@@ -74,7 +55,7 @@ class CordonRequest(_MutationBody):
     )
 
 
-class DrainRequest(_MutationBody):
+class DrainRequest(MutationBody):
     grace_period_seconds: int | None = Field(
         None,
         alias="gracePeriodSeconds",
@@ -115,7 +96,7 @@ class DrainRequest(_MutationBody):
     )
 
 
-class NodeDebugRequest(_MutationBody):
+class NodeDebugRequest(MutationBody):
     """``POST /api/nodes/{name}/debug`` body (§5.5).
 
     Two fields, deliberately. Everything else about the pod is fixed by

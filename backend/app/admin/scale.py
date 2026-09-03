@@ -34,7 +34,8 @@ import datetime
 import logging
 from typing import Any
 
-from app.admin.apply import patch_fn, read_object
+from app.admin.apply import patch_fn
+from app.resources.reader import read_object
 from app.admin.mutate import mutate
 from app.errors import Invalid
 from app.resources.shaping import get_field

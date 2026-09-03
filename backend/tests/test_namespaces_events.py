@@ -26,7 +26,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from kubernetes.client.rest import ApiException
 
-from app.api.events import _field_selector
+from app.services.events import _field_selector
 from tests.conftest import obj
 
 NOW = datetime.now(timezone.utc)
