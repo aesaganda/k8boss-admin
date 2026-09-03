@@ -342,6 +342,17 @@ version being that there is no undo for a deleted StatefulSet.
     stated calmly, not a red panel — and an unmeasured pod is drawn as unknown,
     never at zero, because a pod at zero cores reads as idle and idle is what
     gets something turned off.
+* **Cluster status** — the health rollup OpenShift gets from `ClusterOperator`,
+  rebuilt from the five things vanilla Kubernetes actually serves: leader-election
+  leases in `kube-system`, aggregated APIService availability (this is where
+  `metrics.k8s.io` goes when the metrics tab empties, and the only page that says
+  why), CRDs that never became Established, admission webhooks joined to their
+  backing endpoints, and kubelet version skew. The row it exists for is a
+  `failurePolicy: Fail` webhook with nothing behind its Service: that one is
+  refusing every write it intercepts, cluster-wide, and nothing else in a vanilla
+  cluster puts it in front of anyone. There is deliberately **no single verdict** —
+  each section can be `null` when its read was refused, and a section that could
+  not be read never renders as the healthy answer. See §19.
 * **Projects** — one namespace read with what governs it, the way OpenShift's
   project page shows it on vanilla objects: quota usage beside hard limits, limit
   ranges, the Pod Security level its labels declare, role bindings and a network

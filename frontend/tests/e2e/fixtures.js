@@ -1870,6 +1870,143 @@ export const FIXTURES = {
     partial: false,
     unavailable: [],
   },
+
+  /**
+   * §19. A cluster with one of each finding, because the page's whole job is to
+   * surface them: a lease that stopped renewing, an aggregated API that is not
+   * Available, a CRD that never Established, a `failurePolicy: Fail` webhook
+   * with nothing behind its Service, and a node three minors adrift.
+   *
+   * Every section is populated here. The `null` sections — the ones that mean
+   * "we could not look" — are set per-spec, because that is the assertion
+   * rather than the backdrop.
+   */
+  clusterStatus: {
+    controlPlane: [
+      {
+        name: 'kube-controller-manager',
+        holder: 'ip-10-0-1-4_9f2a',
+        renewTime: '2026-08-19T09:59:58Z',
+        seconds_since_renew: 2,
+        lease_duration_seconds: 15,
+        stale: false,
+        well_known: true,
+      },
+      {
+        name: 'kube-scheduler',
+        holder: 'ip-10-0-1-5_1c8e',
+        renewTime: '2026-08-19T09:52:10Z',
+        seconds_since_renew: 470,
+        lease_duration_seconds: 15,
+        stale: true,
+        well_known: true,
+      },
+      {
+        // Acquired by nobody yet: `stale` is null, and the page must render an
+        // em dash rather than either verdict.
+        name: 'external-dns-controller',
+        holder: null,
+        renewTime: null,
+        seconds_since_renew: null,
+        lease_duration_seconds: 15,
+        stale: null,
+        well_known: false,
+      },
+    ],
+    apiServices: {
+      items: [
+        {
+          name: 'v1beta1.metrics.k8s.io',
+          group: 'metrics.k8s.io',
+          version: 'v1beta1',
+          service: { namespace: 'kube-system', name: 'metrics-server' },
+          available: false,
+          reason: 'FailedDiscoveryCheck',
+          message: 'failing or missing response from https://10.96.0.9:443/apis/metrics.k8s.io/v1beta1',
+          since: '2026-08-19T08:40:00Z',
+        },
+        {
+          name: 'v1.packages.operators.coreos.com',
+          group: 'packages.operators.coreos.com',
+          version: 'v1',
+          service: { namespace: 'olm', name: 'packageserver-service' },
+          available: true,
+          reason: 'Passed',
+          message: 'all checks passed',
+          since: '2026-08-18T22:15:00Z',
+        },
+      ],
+      local_count: 28,
+      unavailable_count: 1,
+    },
+    crds: {
+      items: [
+        {
+          name: 'widgets.example.test',
+          group: 'example.test',
+          established: false,
+          reason: 'NotAccepted',
+          message: 'not all names are accepted',
+          non_structural: null,
+        },
+      ],
+      total: 74,
+      unhealthy_count: 1,
+    },
+    webhooks: {
+      items: [
+        {
+          kind: 'ValidatingWebhookConfiguration',
+          configuration: 'policy.example.test',
+          name: 'validate.policy.example.test',
+          failure_policy: 'Fail',
+          timeout_seconds: 10,
+          side_effects: 'None',
+          url: null,
+          service: { namespace: 'policy-system', name: 'policy-webhook', port: 443 },
+          endpoint_count: 0,
+        },
+        {
+          kind: 'MutatingWebhookConfiguration',
+          configuration: 'sidecar-injector',
+          name: 'inject.sidecar.example.test',
+          failure_policy: 'Ignore',
+          timeout_seconds: 5,
+          side_effects: 'None',
+          url: null,
+          service: { namespace: 'mesh', name: 'injector', port: 443 },
+          endpoint_count: 3,
+        },
+        {
+          // Addressed by URL: there is nothing in the cluster to count, which
+          // is not the same as counting zero.
+          kind: 'ValidatingWebhookConfiguration',
+          configuration: 'external-audit',
+          name: 'audit.external.example.test',
+          failure_policy: 'Ignore',
+          timeout_seconds: 5,
+          side_effects: 'None',
+          url: 'https://audit.example.test/admit',
+          service: null,
+          endpoint_count: null,
+        },
+      ],
+      blocking_count: 1,
+      complete: true,
+    },
+    versionSkew: {
+      server_version: 'v1.31.4',
+      supported_minors_behind: 3,
+      nodes: [
+        { node: 'ip-10-0-1-9', kubelet_version: 'v1.26.15', status: 'behind' },
+        { node: 'ip-10-0-1-4', kubelet_version: 'v1.31.4', status: 'ok' },
+        { node: 'ip-10-0-1-5', kubelet_version: 'v1.30.6-eks-abc1234', status: 'ok' },
+      ],
+      out_of_skew_count: 1,
+    },
+    partial: false,
+    unavailable: [],
+  },
 };
 
 /** Answer every /api call from the fixtures above. */
@@ -2209,6 +2346,7 @@ export async function mockApi(
     projectCreate = null,
     podSecurityPlan = null,
     podSecuritySet = null,
+    clusterStatus = null,
   } = {},
 ) {
   // Counted so a spec can hand back a different manifest on the second read —
@@ -2353,6 +2491,12 @@ export async function mockApi(
       return json(networkPolicies ?? FIXTURES.networkPolicies);
     }
     if (path === '/network/isolation') return json(isolation ?? FIXTURES.isolation);
+    // §19. One GET, five sections, each separately nullable — a spec that wants
+    // "we could not read the webhooks" passes `{ webhooks: null, unavailable:
+    // [...], partial: true }` rather than an error, because that is what the
+    // endpoint does: a refused listing costs its section and leaves the
+    // response at 200.
+    if (path === '/cluster-status') return json(clusterStatus ?? FIXTURES.clusterStatus);
     if (path === '/resources/core/v1/services') return json(services ?? FIXTURES.services);
     // §15. The CLI pod, and the shell into it — the terminal itself is §7's
     // exec websocket, which no route here answers because Playwright never

@@ -156,9 +156,11 @@ rules:
 
   # §8 Services and their backing endpoints. Both spellings: `endpoints` backs
   # the Network page's endpoint listing, `endpointslices` (below) backs the
-  # `endpoint_count` column. Without the slices that column is null with an
-  # `unavailable` entry — deliberately not 0, which would claim a Service backs
-  # nothing.
+  # `endpoint_count` column, and §19 counts the same slices to decide whether an
+  # admission webhook's backend is there at all. Without the slices that column
+  # is null with an `unavailable` entry — deliberately not 0, which would claim a
+  # Service backs nothing, and in §19 would raise a false alarm about a webhook
+  # blocking every write on the cluster.
   - apiGroups: [""]
     resources: ["services", "endpoints"]
     verbs: ["get", "list", "watch"]
@@ -273,6 +275,11 @@ rules:
   # §8 Configuration page — scheduling and workload-identity objects that carry
   # no secret material, read purely for the browser: what priority a pod can
   # claim, what runtime a sandboxed pod asks for, who currently holds a lease.
+  # `leases` also backs §19's control-plane section: a Lease in kube-system whose
+  # renewTime is older than its own duration is what a wedged controller-manager
+  # looks like from the API server's side. Withholding it costs that section
+  # alone — `controlPlane` is null with a `forbidden` entry, never an empty list,
+  # which would read as a control plane with nothing running in it.
   - apiGroups: ["scheduling.k8s.io"]
     resources: ["priorityclasses"]
     verbs: ["get", "list", "watch"]
@@ -285,7 +292,11 @@ rules:
 
   # §8 Configuration page — admission webhook configurations. These describe
   # what the cluster's admission chain does to every write; reading them is a
-  # browse, not a change to what they enforce.
+  # browse, not a change to what they enforce. §19 joins them to the
+  # EndpointSlice count above to find the one row that matters: a
+  # `failurePolicy: Fail` webhook with nothing behind its Service is refusing
+  # every write it intercepts, cluster-wide. Withholding either listing makes
+  # §19's `webhooks` section null, or `complete: false` if only one is refused.
   - apiGroups: ["admissionregistration.k8s.io"]
     resources: ["mutatingwebhookconfigurations", "validatingwebhookconfigurations"]
     verbs: ["get", "list", "watch"]
@@ -344,6 +355,11 @@ rules:
   # CRDs themselves. Reading the definitions is not reading the custom objects:
   # a CRD this role does not name is listed in the catalog and returns
   # `forbidden` when browsed, which is the honest answer.
+  #
+  # Both kinds are also §19's third and second sections: a CRD that never
+  # became Established serves nothing, and an APIService with a `spec.service`
+  # is served by a pod — which is where metrics.k8s.io goes when the metrics tab
+  # empties, and the only place §19 can say why.
   - apiGroups: ["apiextensions.k8s.io"]
     resources: ["customresourcedefinitions"]
     verbs: ["get", "list", "watch"]

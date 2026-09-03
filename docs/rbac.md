@@ -172,6 +172,38 @@ resolves to `unknown`, and it goes in `unavailable[]` with `reason: forbidden`.
 | `get,list operators.coreos.com/catalogsources` | §16 which catalogs the packages came from, and whether that registry is answering | `catalogs` is **`null`, not `[]`** — an empty list reads as a cluster with no catalogs, which is a different cluster from one whose catalogs could not be read. The package rows still render; their `catalog` names come off the packages themselves |
 | `get,list operators.coreos.com/operatorgroups` | §16 the subscribe plan's namespace check | `target.ready` is `null` and the plan carries an `operator_group_unknown` consequence that must be acknowledged by name before the write. It never degrades to `false`: OLM installs only into a namespace governed by exactly one OperatorGroup, and reporting "this namespace has none" from a refused read would put a blocking consequence in front of a namespace that is perfectly configured |
 
+## Read: cluster status
+
+§19 is five unrelated listings joined into one page, and the whole point of
+granting them separately is that **each one degrades only its own section**. A
+console that may not list `admissionregistration.k8s.io` still has an honest
+answer about version skew; it simply says nothing about admission webhooks
+rather than saying there are none.
+
+Every row below is already in `k8boss-admin-reader` for another feature — §19
+adds no permission of its own, it joins reads the console already makes. What is
+new is what each one now costs when withheld.
+
+| Permission | Feature | Withheld |
+|---|---|---|
+| `get,list,watch coordination.k8s.io/leases` (namespaced to `kube-system` is enough for §19) | §19 control plane — whether the leader-elected components are still renewing | `controlPlane` is **`null`, not `[]`**. An empty list reads as a control plane with nothing running in it, which on a managed cluster is also what a *correct* answer looks like — so the two must not be spelled the same |
+| `get,list,watch apiregistration.k8s.io/apiservices` | §19 aggregated APIs — which extension APIs are answering, and why `metrics.k8s.io` went away | `apiServices` is `null`. The rest of the console keeps reporting a missing aggregated API as `unsupported` (§1.2), an ordinary fact; §19 is the only page that can say *why*, and without this grant it says it cannot |
+| `get,list,watch apiextensions.k8s.io/customresourcedefinitions` | §19 CRDs — the ones that never became Established, or carry a non-structural schema | `crds` is `null`. Note this section lists only the *unhealthy* ones, so `{"items": [], "total": 74}` is the good answer and `null` is the absent one; collapsing them would report a healthy cluster from a refused read |
+| `get,list,watch admissionregistration.k8s.io/{validating,mutating}webhookconfigurations` | §19 admission webhooks — what intercepts writes to this cluster | Both refused: `webhooks` is `null`. **One refused:** the rows that answered are still shown with `complete: false`, and the page says out loud that they are not all of them. Never an empty list, which would say nothing is intercepting writes while something is refusing all of them |
+| `get,list,watch discovery.k8s.io/endpointslices` | §19 webhook backends — whether a `failurePolicy: Fail` webhook has anything behind its Service | Every `endpoint_count` is **`null`, not `0`**, and no row is flagged as blocking. This is the finding §19 exists for and the one place a zero from a refused read would be actively harmful: it would name a healthy webhook as the thing breaking the cluster, during an incident, and send somebody to delete it |
+| `get,list,watch core/nodes` | §19 version skew — every kubelet's version against the API server's | `versionSkew.nodes` is `null` while `server_version` still answers. Per-node `status` is `unknown` whenever either version is missing — never `ok`, which is a verdict about a node nobody checked |
+
+The API server's own `/version` needs no RBAC; it is served to any authenticated
+client. When it fails anyway, `server_version` is `null`, every node's `status`
+is `unknown`, and the section stays rather than disappearing — the kubelet
+versions are still worth reading, and the page does not pretend to know how far
+from supported they are.
+
+**No write, no preflight, no audit row.** §19 is a read, and the funnel is not
+involved.
+
+---
+
 ---
 
 ## Write
