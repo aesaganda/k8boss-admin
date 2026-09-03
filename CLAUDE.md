@@ -375,6 +375,7 @@ serving a request — and SQLite could not reproduce it.
 | `docs/adr-0004-shipped-router.md` | Why the console installs a router at all, why HAProxy, what it does not serve, and the boundary that keeps "not a deployment engine" true of everything else |
 | `docs/adr-0005-operator-portal.md` | Why creating an OLM Subscription is not a second thing this console installs, and where that line is |
 | `docs/adr-0006-projects.md` | Why a project is five ordinary writes into a namespace that does not exist, not a template engine, and why the dry run says whose diff each object carries |
+| `docs/adr-0007-impersonation.md` | **Proposed, not accepted.** Why every cluster call is made as one ServiceAccount, what per-user impersonation would fix, what its grant costs, and the conditions any implementation would have to meet |
 | `deploy/router.yaml` | The shipped router bundle, applicable by hand. **Generated** — `make router-manifest`, enforced by a test |
 | `deploy/rbac.yaml` | The shipped roles. Each rule is annotated with the contract section it serves |
 | `README.md` | The front door: quickstart, feature list, every environment variable |

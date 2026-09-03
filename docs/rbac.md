@@ -10,8 +10,24 @@ an `unavailable[]` entry saying `forbidden` and a banner naming it. Read the
 degradation, then decide.
 
 The shipped roles are in [`deploy/rbac.yaml`](../deploy/rbac.yaml):
-`k8boss-admin-reader` (bound by default) and `k8boss-admin-writer` (defined, and
-its binding commented out).
+`k8boss-admin-reader` and `k8boss-admin-writer`. **Both bindings are applied in
+the manifests as they stand, and the writer role carries a wildcard
+`apiGroups: ["*"] / resources: ["*"]` write rule** — opted into deliberately for
+this deployment, and enumerated in that file's own header. So the per-feature
+grants below describe what the console's *features* need, not what its
+ServiceAccount currently holds: on the shipped manifests it holds everything.
+Deleting the wildcard rule is what makes this table the operative document, and
+that is the deployment it is written for.
+
+**Every permission here belongs to one ServiceAccount per cluster, not to the
+person signed in.** The console's own users decide who may reach the console;
+they decide nothing about a cluster, so two operators with different console
+roles have identical power over every registered cluster and every preflight in
+this document answers about the ServiceAccount. That is why withholding a grant
+is the control, and why this table is worth reading before enabling writes.
+[`adr-0007-impersonation.md`](adr-0007-impersonation.md) records what acting as
+the operator instead would fix and what its grant would cost; it is proposed,
+not accepted, and nothing implements it.
 
 ---
 
@@ -160,9 +176,14 @@ resolves to `unknown`, and it goes in `unavailable[]` with `reason: forbidden`.
 
 ## Write
 
-Everything below is in `k8boss-admin-writer`, whose binding is commented out in
-`deploy/rbac.yaml`. Withholding **all** of it gives a fully functional read-only
-console — which is the default install, not a degraded one.
+Everything below is in `k8boss-admin-writer`. Withholding **all** of it gives a
+fully functional read-only console — a supported state, not a degraded one.
+
+The manifests in this repository bind that role and add a wildcard write rule
+beside it, so on an unmodified `kubectl apply -f rbac.yaml` the console holds
+everything below *and everything else*. This section is what the features
+actually need; it becomes the operative list once the wildcard rule is
+deleted.
 
 Remember that **dry-run needs the same verb as the real write**: the API server
 requires `patch` to project a patch. A console that only previews still needs

@@ -397,11 +397,26 @@ of the four combinations:
 | yes | true | Writes reach the cluster |
 
 The first three are all diagnosable states with a clear message. What is *not*
-diagnosable is a console that writes because a default did it quietly — which is
-why `deploy/rbac.yaml` ships the writer ClusterRole defined but its
-ClusterRoleBinding commented out, and `deploy/deployment.yaml` ships
-`ADMIN_ALLOW_MUTATIONS: "false"`. Enabling writes takes two edits in two files by
-someone who read both.
+diagnosable is a console that writes because a default did it quietly. Enabling
+writes is therefore two edits in two files — the writer `ClusterRoleBinding` in
+`deploy/rbac.yaml` and `ADMIN_ALLOW_MUTATIONS` in `deploy/deployment.yaml` — and
+`ADMIN_ALLOW_MUTATIONS=false` alone stops every write immediately without
+touching RBAC.
+
+**The manifests in this repository have both edits made.** They ship the writer
+binding applied, `ADMIN_ALLOW_MUTATIONS: "true"`, and — deliberately, on request
+— a wildcard `apiGroups: ["*"] / resources: ["*"]` write rule in the writer role.
+`kubectl apply -f rbac.yaml` therefore produces a console that can write to every
+cluster it is registered against, unrestricted. Both files say so in their own
+headers, in those words: it is cluster-admin wearing a different name, it
+includes write over RBAC itself, and it makes the console's ServiceAccount a
+privilege-escalation path for anyone who can reach its port. That is what makes
+`AUTH_ENABLED` load-bearing rather than optional on this deployment, and it is
+why the header enumerates exactly what is live — a comment that misdescribes its
+own YAML sends an operator hunting for a binding that was never there. A
+deployment that wants the bounded console deletes the wildcard rule and keeps the
+typed verbs the features below actually need; `rbac.md` is what each of those
+costs.
 
 Per-permission degradation is catalogued in [`rbac.md`](rbac.md).
 
@@ -1091,6 +1106,16 @@ Being honest about the edges is part of the model:
   the port private or put an authenticating proxy in front. Built-in local/LDAP
   auth removes that limitation, but does not replace Kubernetes preflight or the
   deployment-wide mutation gate.
+* **The console's users are not cluster identities.** Every call to a cluster is
+  made as that cluster's one registered credential, so §2's preflight answers
+  about the console rather than about the operator reading it — correct about
+  whether the write will succeed, correct about the wrong subject — and the
+  cluster's own audit log records the ServiceAccount for every write this
+  console makes. Two operators with different console roles have identical power
+  over every registered cluster. [`adr-0007-impersonation.md`](adr-0007-impersonation.md)
+  records what impersonating the operator would fix, why the grant it needs is
+  cluster-admin by proxy, and the conditions under which it could be built. It
+  is proposed, not accepted, and nothing implements it.
 * **There is no undo.** This is the reason the whole flow is dry-run-first rather
   than optimistic-with-rollback; see [`adr-0001-dry-run-first.md`](adr-0001-dry-run-first.md).
   A deleted StatefulSet's PersistentVolumeClaims are not recreated by any button

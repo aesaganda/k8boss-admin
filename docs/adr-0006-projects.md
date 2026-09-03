@@ -98,8 +98,10 @@ will refuse it unless the ServiceAccount holds what the role grants or holds
 gap more visible.** `oc new-project` binds the *requester*. §17 binds whichever
 subject the operator types, because the console acts as one ServiceAccount per
 cluster and has no identity of its own to bind. The evaluation that produced
-this ADR names per-user impersonation as the next architectural step; until
-then, the dialog asks for the subject rather than pretending to know it.
+this ADR named per-user impersonation as the next architectural step;
+[`adr-0007-impersonation.md`](adr-0007-impersonation.md) is that decision written
+down, and it is proposed rather than accepted. Until it is taken, the dialog asks
+for the subject rather than pretending to know it.
 
 ## What was rejected
 
