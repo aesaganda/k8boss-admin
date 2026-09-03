@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 
-import { FIXTURES, expectPageRendered, mockApi } from './fixtures.js';
+import { FIXTURES, expectPageRendered, mockApi, routerInstallObjectsFor } from './fixtures.js';
 
 /**
  * Routes (§13) and the shipped router (§14).
@@ -716,6 +716,59 @@ test.describe('the shipped router', () => {
     await expect(report).toContainText('ClusterRole');
     await expect(report).toContainText('rbac_denied');
     await expect(report).toContainText('Grant create on rbac.authorization.k8s.io/clusterroles.');
+  });
+});
+
+test.describe('the router install preview', () => {
+  test('the dry run says whose diff each object carries, and shows every diff', async ({ page }) => {
+    await mockApi(page, {
+      preflight: ALLOW_ALL,
+      routerStatus: { ...FIXTURES.routerAbsent, enabled: true },
+    });
+    await openRoutes(page);
+    await page.getByTestId('router-panel').getByRole('button', { name: /Install the router/ }).click();
+    await page.getByTestId('mutation-preview').click();
+
+    const objects = page.getByTestId('router-object');
+    await expect(objects.first()).toBeVisible();
+    // The Namespace is the API server's projection; the Deployment inside it
+    // cannot be until the Namespace exists, and is labelled as the console's.
+    const namespace = objects.filter({ hasText: 'Namespace' }).first();
+    await expect(namespace).toHaveAttribute('data-projection', 'server');
+    await expect(namespace).toContainText('projected by the API server');
+    const deployment = objects.filter({ hasText: 'Deployment' }).first();
+    await expect(deployment).toHaveAttribute('data-projection', 'rendered');
+    await expect(deployment).toContainText('rendered by the console');
+    // Rule 11.3: a diff per object, on screen before Confirm.
+    await expect(page.getByTestId('diff-view').first()).toBeVisible();
+    expect(await page.getByTestId('diff-view').count()).toBeGreaterThan(1);
+    await expect(page.getByTestId('mutation-summary')).toHaveCount(0);
+  });
+
+  test('a preflight denial on a rendered object blocks Confirm with the grant', async ({ page }) => {
+    await mockApi(page, {
+      preflight: ALLOW_ALL,
+      routerStatus: { ...FIXTURES.routerAbsent, enabled: true },
+      routerInstall: (body) => ({
+        dryRun: body.dryRun !== false,
+        installed: false,
+        failed: 0,
+        version: '3.2.13',
+        namespace: 'k8boss-router',
+        ingressClassName: 'haproxy',
+        objects: routerInstallObjectsFor(body, { preflightDenied: ['Deployment'] }),
+        serves: FIXTURES.routerPlan.serves,
+        options: FIXTURES.routerPlan.options,
+      }),
+    });
+    await openRoutes(page);
+    await page.getByTestId('router-panel').getByRole('button', { name: /Install the router/ }).click();
+    await page.getByTestId('mutation-preview').click();
+
+    await expect(page.getByTestId('router-object-preflight-denied')).toBeVisible();
+    await expect(page.getByTestId('router-object-preflight-denied')).toContainText('apps/deployments');
+    await expect(page.getByTestId('mutation-confirm')).toBeDisabled();
+    await expect(page.getByTestId('mutation-blocked')).toContainText('Deployment');
   });
 });
 

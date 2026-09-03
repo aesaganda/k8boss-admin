@@ -1862,6 +1862,20 @@ object landed; `failed` counts the rest; `objects[]` carries a per-object
 outcome with the error and its hint. There is no rollback — deleting what
 succeeded would be more writes the operator did not approve.
 
+**A dry run says whose diff each object carries.** The API server's
+NamespaceLifecycle admission refuses a create into a namespace that does not
+exist, `dryRun=All` included, so a fresh install's dry run cannot project the
+four objects inside the router's namespace. Each `objects[]` entry therefore
+carries `projection`: `"server"` when the API server projected it (the
+Namespace and the other cluster-scoped objects always; every object once the
+Namespace exists), `"rendered"` when it is the bundle's own manifest diffed
+against nothing because the Namespace does not exist yet, `null` when there is
+no diff. A rendered entry also carries `preflight` — §9's `PreflightResult` for
+the `create` the real install will use — so a missing grant surfaces before the
+confirm rather than after the Namespace was created; it has no audit row, since
+no request reached the cluster for it. A client labels the two differently: a
+rendered manifest has not been through admission. Same rule as §17.5.
+
 **RBAC escalation prevention is the one denial preflight cannot foresee.** A
 `SelfSubjectAccessReview` on `create clusterroles` answers *yes*; the API server
 then refuses the ClusterRole with `attempt to grant extra privileges`, because
@@ -2858,8 +2872,8 @@ real write will use (§9's `PreflightResult` fields), because the grant is the o
 thing about such an object that *can* be checked before its namespace exists and
 the one most worth knowing first. `projection: "server"` marks a diff the API
 server produced. A client must label the two differently: a rendered manifest
-has not been through admission. **§14's router install has this same shape and
-does not report it; §17 does.**
+has not been through admission. **§14.4's router install follows the same
+rule.**
 
 **`created` is true only when `dryRun` is false and every object landed.**
 `failed` counts objects whose write failed, each with `error` in §1.3's shape and

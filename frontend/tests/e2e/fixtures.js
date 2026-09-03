@@ -1992,6 +1992,54 @@ export function projectCreateFor(body, { failKinds = [], preflightDenied = [] } 
   };
 }
 
+/**
+ * §14 install report objects, derived from the plan the way the backend does:
+ * on a dry run into a namespace that does not exist, the cluster-scoped
+ * objects are server-projected and the ones inside the namespace are rendered,
+ * each with a preflight; on a real write every object is projected and applied.
+ */
+const ROUTER_BUNDLE = [
+  { kind: 'Namespace', name: 'k8boss-router', namespace: null, group: '', resource: 'namespaces' },
+  { kind: 'ClusterRole', name: 'k8boss-admin-router', namespace: null, group: 'rbac.authorization.k8s.io', resource: 'clusterroles' },
+  { kind: 'ClusterRoleBinding', name: 'k8boss-admin-router', namespace: null, group: 'rbac.authorization.k8s.io', resource: 'clusterrolebindings' },
+  { kind: 'IngressClass', name: 'haproxy', namespace: null, group: 'networking.k8s.io', resource: 'ingressclasses' },
+  { kind: 'ServiceAccount', name: 'k8boss-admin-router', namespace: 'k8boss-router', group: '', resource: 'serviceaccounts' },
+  { kind: 'ConfigMap', name: 'k8boss-admin-router', namespace: 'k8boss-router', group: '', resource: 'configmaps' },
+  { kind: 'Deployment', name: 'k8boss-admin-router', namespace: 'k8boss-router', group: 'apps', resource: 'deployments' },
+  { kind: 'Service', name: 'k8boss-admin-router', namespace: 'k8boss-router', group: '', resource: 'services' },
+];
+
+export function routerInstallObjectsFor(body, { preflightDenied = [] } = {}) {
+  const dryRun = body.dryRun !== false;
+  const namespace = body.namespace || 'k8boss-router';
+  return ROUTER_BUNDLE.map((template, index) => {
+    const object = {
+      ...template,
+      namespace: template.namespace == null ? null : namespace,
+      yaml: `apiVersion: v1\nkind: ${template.kind}\nmetadata:\n  name: ${template.name}\n`,
+    };
+    const rendered = dryRun && object.namespace != null;
+    const denied = preflightDenied.includes(object.kind);
+    return {
+      kind: object.kind,
+      name: object.name,
+      namespace: object.namespace ?? null,
+      group: object.group ?? '',
+      resource: object.resource,
+      verb: 'create',
+      applied: !dryRun,
+      diff: { before: null, after: object.yaml, unified: `--- live\n+++ proposed\n@@ -0,0 +1,2 @@\n+kind: ${object.kind}\n+name: ${object.name}\n`, changed: true },
+      projection: rendered ? 'rendered' : 'server',
+      preflight: rendered
+        ? { allowed: !denied, reason: denied ? 'no RBAC policy matched' : '', evaluationError: null,
+            hint: denied ? `Grant \`create\` on \`${object.group || 'core'}/${object.resource}\` in \`${object.namespace}\` to the console's ServiceAccount.` : null }
+        : null,
+      auditId: rendered ? null : 7000 + index,
+      error: null,
+    };
+  });
+}
+
 export async function mockApi(
   page,
   {
@@ -2413,7 +2461,7 @@ export async function mockApi(
                 version: '3.2.13',
                 namespace: body.namespace || 'k8boss-router',
                 ingressClassName: body.ingressClassName || 'haproxy',
-                objects: [],
+                objects: routerInstallObjectsFor(body),
                 serves: FIXTURES.routerPlan.serves,
                 options: FIXTURES.routerPlan.options,
               },

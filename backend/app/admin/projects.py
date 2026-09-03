@@ -41,7 +41,7 @@ is that act, and it is built out of things this console already does:
   grant surfaces before the confirm rather than after the namespace exists. On
   the real write every object is projected and diffed by the API server, and
   the response says which kind of diff each one carries. §14's router install
-  has this same shape and does not say so; §17 does.
+  follows the same rule.
 
 * **Every consequence is acknowledged by name.** The same handshake §13 and
   §16 use, for the same reason: a quota with no LimitRange behind it refuses

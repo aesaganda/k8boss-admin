@@ -750,6 +750,21 @@ Four refusals carry the safety of it:
 * **`installed` is tri-state.** `null` during an outage, never `false` — which
   would invite installing a second proxy beside the one already running.
 
+**Its dry run says whose diff each object carries.** The API server refuses a
+create into a namespace that does not exist, `dryRun=All` included, so a fresh
+install's dry run cannot project the four objects inside the router's namespace
+— and the first version of this install asked it to anyway, and reported four
+`not_found` failures on every real cluster while the fake in the tests answered
+happily. Now the cluster-scoped objects are projected by the API server, the
+four inside the namespace are reported as the bundle's own manifest with
+`projection: "rendered"` and a preflight of the `create` the real install will
+need, and the panel shows every object's diff labelled with whose it is —
+something it did not do at all before: the funnel produced eight diffs and the
+panel showed them to nobody. A preflight denial on a rendered object blocks
+Confirm with the grant, because creating the Namespace and then failing inside
+it is a half-install for a refusal that was knowable up front. §13.3 is the same
+rule for a project.
+
 ### 11.6 Two gates, and one deliberate departure
 
 `ADMIN_ALLOW_MUTATIONS` and `ADMIN_ROUTER_MANAGE_ENABLED`, both required for a
@@ -948,8 +963,9 @@ knowable up front, so the dialog blocks Confirm on it with the grant it needs.
 The UI labels the two projections differently. A rendered manifest has not been
 through admission, and a client that showed it under the sentence "this is the
 difference the API server projected" would be making §3's promise on the
-console's behalf. §14's router install has exactly this shape and does not
-report it; that is a defect in §14, not a precedent for §17.
+console's behalf. §14's router install has exactly this shape on a fresh
+namespace and, since the review that produced §17, follows the same rule — see
+§11.5.
 
 ### 13.4 Consequences are acknowledged by name
 
