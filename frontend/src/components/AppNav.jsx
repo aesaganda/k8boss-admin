@@ -39,15 +39,15 @@ function RouterNavItem({ to, end = false, children }) {
 // Module level, not defined inside AppNav: a component declared during render
 // is a new type each time, and every section would remount — collapsing itself
 // on every keystroke anywhere in the app.
-function NavSection({ id, title, routes, children, defaultExpanded = true, to }) {
+function NavSection({ id, title, routes, children, to }) {
   const { pathname } = useLocation();
   const navigate = useNavigate();
   const [expanded, setExpanded] = useState(() => {
     try {
       const stored = localStorage.getItem(`k8boss-admin.nav.${id}`);
-      return stored === null ? defaultExpanded : stored === 'expanded';
+      return stored === 'expanded';
     } catch {
-      return defaultExpanded;
+      return false;
     }
   });
   const containsActive = routes.some((route) => pathname === route || pathname.startsWith(`${route}/`));
@@ -113,7 +113,6 @@ export default function AppNav() {
           id="network"
           title="Network"
           routes={['/network', '/routes', '/gateway']}
-          defaultExpanded={false}
           to="/network"
         >
           <RouterNavItem to="/routes">Routes</RouterNavItem>

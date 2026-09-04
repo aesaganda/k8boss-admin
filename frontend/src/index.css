@@ -32,18 +32,6 @@ body {
 
 /* ── Shell ──────────────────────────────────────────────────────────────── */
 
-.admin-shell {
-  --pf-v6-c-page__sidebar--Width--base: 15.625rem;
-}
-
-.admin-nav {
-  --pf-v6-c-nav__link--PaddingBlockStart: var(--pf-t--global--spacer--control--vertical--compact, 0.25rem);
-  --pf-v6-c-nav__link--PaddingBlockEnd: var(--pf-t--global--spacer--control--vertical--compact, 0.25rem);
-  --pf-v6-c-nav__list--RowGap: var(--pf-t--global--spacer--xs, 0.25rem);
-  --pf-v6-c-nav--PaddingBlockStart: var(--pf-t--global--spacer--sm, 0.5rem);
-  --pf-v6-c-nav--PaddingBlockEnd: var(--pf-t--global--spacer--sm, 0.5rem);
-}
-
 .admin-brand {
   display: inline-flex;
   align-items: center;
