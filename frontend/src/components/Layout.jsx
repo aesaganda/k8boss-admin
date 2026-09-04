@@ -499,6 +499,7 @@ export default function Layout() {
 
   return (
     <Page
+      className="admin-shell"
       masthead={<AppMasthead />}
       sidebar={
         <PageSidebar>

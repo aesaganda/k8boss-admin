@@ -17,6 +17,21 @@ test.describe('shell', () => {
     const nav = page.getByRole('navigation', { name: 'Console navigation' });
     await expect(nav.getByRole('link', { name: 'Overview' })).toBeVisible();
     await expect(nav.getByRole('link', { name: 'API explorer' })).toBeVisible();
+
+    const network = nav.getByRole('button', { name: 'Network' });
+    await expect(network).toHaveAttribute('aria-expanded', 'false');
+    await network.click();
+    await expect(page).toHaveURL(/\/network$/);
+    await expect(nav.getByRole('link', { name: 'Routes', exact: true })).toBeVisible();
+    await expect(nav.getByRole('link', { name: 'Gateway (beta)' })).toBeVisible();
+  });
+
+  test('keeps the active network page visible in its navigation group', async ({ page }) => {
+    await page.goto('/routes');
+
+    const nav = page.getByRole('navigation', { name: 'Console navigation' });
+    await expect(nav.getByRole('button', { name: 'Network' })).toHaveAttribute('aria-expanded', 'true');
+    await expect(nav.getByRole('link', { name: 'Routes', exact: true })).toHaveAttribute('aria-current', 'page');
   });
 
   test('keeps the sidebar mounted while a page chunk loads', async ({ page }) => {

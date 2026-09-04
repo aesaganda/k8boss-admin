@@ -39,13 +39,15 @@ function RouterNavItem({ to, end = false, children }) {
 // Module level, not defined inside AppNav: a component declared during render
 // is a new type each time, and every section would remount — collapsing itself
 // on every keystroke anywhere in the app.
-function NavSection({ id, title, routes, children }) {
+function NavSection({ id, title, routes, children, defaultExpanded = true, to }) {
   const { pathname } = useLocation();
+  const navigate = useNavigate();
   const [expanded, setExpanded] = useState(() => {
     try {
-      return localStorage.getItem(`k8boss-admin.nav.${id}`) !== 'collapsed';
+      const stored = localStorage.getItem(`k8boss-admin.nav.${id}`);
+      return stored === null ? defaultExpanded : stored === 'expanded';
     } catch {
-      return true;
+      return defaultExpanded;
     }
   });
   const containsActive = routes.some((route) => pathname === route || pathname.startsWith(`${route}/`));
@@ -59,6 +61,7 @@ function NavSection({ id, title, routes, children }) {
       isExpanded={expanded || containsActive}
       onExpand={(_event, value) => {
         setExpanded(value);
+        if (to) navigate(to);
         try {
           localStorage.setItem(`k8boss-admin.nav.${id}`, value ? 'expanded' : 'collapsed');
         } catch {
@@ -77,7 +80,7 @@ export default function AppNav() {
   const administrationRoutes = ['/clusters', '/audit', ...(canManageUsers ? ['/users'] : [])];
 
   return (
-    <Nav aria-label="Console navigation">
+    <Nav aria-label="Console navigation" className="admin-nav">
       <NavList>
         <RouterNavItem to="/" end>
           Overview
@@ -103,31 +106,20 @@ export default function AppNav() {
           <RouterNavItem to="/pods">Pods</RouterNavItem>
         </NavSection>
 
-        {/* Storage and Configuration are each one page whose resource types
-            are tabs inside it (`ResourceTabsPage`), not one route apiece —
-            so each gets a single top-level link, the way "API explorer"
-            always has, rather than an expandable section holding only
-            itself. */}
+        {/* Storage and Configuration are each one page whose resource types are
+            tabs inside it (`ResourceTabsPage`), so each remains one link. */}
         <RouterNavItem to="/storage">Storage</RouterNavItem>
-
-        {/* Network, Routes and Gateway are three separate pages — Network is
-            a browser over what exists, Routes is the one page that makes
-            something reachable from outside the cluster, and Gateway is a
-            distinct, often-absent API — but an operator reaching for
-            anything networking-shaped should not have to scan three
-            unrelated rows in a flat list to find them. Grouped under one
-            expandable section for that reason alone: nothing about how each
-            page is built changes, only where its link sits. */}
-        <NavSection id="networking" title="Networking" routes={['/network', '/routes', '/gateway']}>
-          <RouterNavItem to="/network">Network</RouterNavItem>
+        <NavSection
+          id="network"
+          title="Network"
+          routes={['/network', '/routes', '/gateway']}
+          defaultExpanded={false}
+          to="/network"
+        >
           <RouterNavItem to="/routes">Routes</RouterNavItem>
-          {/* Gateway API resources are CRD-backed and often absent — "(beta)"
-              in the label is the same signal §1.2 gives every unsupported entry:
-              a cluster with none of this installed is a normal cluster, not a
-              broken console. */}
+          {/* Gateway API resources are CRD-backed and often absent. */}
           <RouterNavItem to="/gateway">Gateway (beta)</RouterNavItem>
         </NavSection>
-
         <RouterNavItem to="/config">Configuration</RouterNavItem>
 
         <NavSection id="access" title="Access control" routes={['/access']}>
