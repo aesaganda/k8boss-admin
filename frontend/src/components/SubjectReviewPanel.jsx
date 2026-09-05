@@ -36,9 +36,6 @@ import { access as accessApi } from '../api/client';
 
 const MUTED = { color: 'var(--admin-muted, #6a6e73)' };
 
-/** The verbs worth asking about by default — RBAC's own set. */
-const VERBS = ['get', 'list', 'watch', 'create', 'update', 'patch', 'delete'];
-
 /** A starting set that shows the shape without pretending to be exhaustive. */
 const DEFAULT_CHECKS = [
   { verb: 'get', group: 'core', resource: 'pods' },
@@ -89,8 +86,11 @@ export default function SubjectReviewPanel() {
   const [name, setName] = useState('');
   const [namespace, setNamespace] = useState('');
   const [groups, setGroups] = useState('');
-  const [checks, setChecks] = useState(DEFAULT_CHECKS);
   const [answer, setAnswer] = useState(null);
+  // Fixed for now: the questions are a starting set, not something the panel
+  // lets you edit yet. Held as a constant rather than as state with no setter,
+  // which would read as an editing affordance that is not there.
+  const checks = DEFAULT_CHECKS;
   const [error, setError] = useState(null);
   const [running, setRunning] = useState(false);
 
@@ -337,4 +337,4 @@ export default function SubjectReviewPanel() {
   );
 }
 
-export { DEFAULT_CHECKS, VERBS };
+export { DEFAULT_CHECKS };
