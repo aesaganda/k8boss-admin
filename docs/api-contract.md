@@ -3398,3 +3398,145 @@ gives them.
 restart the pods that need restarting for an offline resize, does not watch the
 claim afterwards, and does not report whether the expansion completed — a live
 read of the claim does that, and `status.capacity` is where the answer is.
+
+---
+
+## 21. Autoscalers — the replica bounds, and whether the autoscaler is scaling at all
+
+### 21.1 What it is, and the failure it exists for
+
+Two integers on one `HorizontalPodAutoscaler`. §4's YAML editor can already write
+them; §21 exists because of what the editor cannot say.
+
+**An HPA whose `ScalingActive` condition is false is not scaling anything.** The
+controller cannot compute a desired replica count — almost always because the
+metric it needs cannot be read, which is what a missing `metrics.k8s.io` looks
+like from here. Such an autoscaler is *completely ordinary* in `kubectl get hpa`:
+one column reads `<unknown>` and everything else is populated. The action this
+endpoint is reached for happens during an incident — a service is at its ceiling
+and somebody raises `maxReplicas` — and on an inert HPA that action stores a
+number in etcd and changes nothing at all, while the operator goes back to
+watching a service that will never grow.
+
+**The second failure is direction.** Lowering `maxReplicas` below the running
+replica count is not a cap on future growth: the HPA clamps at its next scale
+decision, seconds away, and pods terminate. The form field is identical to the
+one that raises a ceiling.
+
+### 21.2 The typed row
+
+`hpa_row` is registered as the §4 shaper for
+`autoscaling/horizontalpodautoscalers`, so the generic listing carries it. Three
+of its fields are **tri-state and must not be rendered as two**:
+
+* `scaling_active`, `able_to_scale`, `scaling_limited` — `true`/`false` from the
+  controller's conditions, and **`null` when the condition has not been written
+  yet**. `null` is a fresh autoscaler, not a broken one; `false` is one the
+  controller has observed and cannot use. Rendering either as healthy is the
+  confident wrong answer §0 rules out.
+* Each entry in `metrics[]` carries `target` and `current`, and **`current` is
+  `null` when the controller has published no reading**. Never `0`: a CPU metric
+  drawn at 0% reads as an idle workload, and idle is the number that argues for
+  scaling *down*.
+* `current_replicas` and `desired_replicas` are `null` when unobserved.
+
+`metrics[]` is driven by **`spec.metrics`**, not by `status.currentMetrics` — a
+status-driven list would drop exactly the metric worth seeing — and the two are
+paired by metric **identity** (kind, name, container, described object) rather
+than by list position, because pairing by index hands one metric another's
+reading the moment either list is incomplete.
+
+`scaling_limited: true` is **not a fault**: it means the desired count is being
+clamped to one of the bounds. During an incident it is the answer to "why is this
+not scaling up".
+
+### 21.3 `POST /api/autoscaling/hpas/{namespace}/{name}/bounds/plan`
+
+```json
+{ "minReplicas": 2, "maxReplicas": 30, "resourceVersion": "9040" }
+```
+
+**Both bounds are named on every request**, including the one that is not
+changing, for §18.2's reason: a body whose omitted field could mean "leave it
+alone" or "reset it to the default" is a body that eventually resets somebody's
+floor to 1 because a form field was blank — during the incident where they were
+raising the ceiling.
+
+Ungated and unaudited: one read and arithmetic. Returns `current` (the §21.2
+row), `requested`, `resourceVersion`, `consequences`, `gate`, and **`blocked`**.
+
+A request that changes neither bound answers **`200` with `blocked` set**, not
+`422`, exactly as §20.3 does. The plan is the screen where the bounds are
+*decided*, and one that answered with an error alone would withhold the current
+bounds and the replica count at the moment those are the facts needed to pick
+different ones. `blocked` and `consequences` are never both populated. The write
+refuses.
+
+### 21.4 `PUT /api/autoscaling/hpas/{namespace}/{name}/bounds`
+
+The plan's body plus `acknowledgeConsequences[]` and `dryRun` (default **true**).
+One merge patch on `spec.minReplicas` and `spec.maxReplicas` through the funnel,
+preflighting `patch horizontalpodautoscalers`.
+
+Consequence codes: `hpa_not_scaling`, `hpa_cannot_reach_target`,
+`hpa_max_below_current`, `hpa_min_above_current`, `hpa_replicas_unknown`,
+`hpa_scale_to_zero_gated`.
+
+`hpa_replicas_unknown` is the tri-state one: with no `currentReplicas` published,
+whether these bounds take effect immediately is arithmetic on a number nobody
+has, so the verdict is withheld rather than guessed in either direction.
+
+Acknowledgements are **recomputed at write time**, never trusted from the plan —
+the replica count moves on its own, so "this terminates two pods" can be a
+different number by the time the write lands, and the caller must have accepted
+the one that is true then.
+
+**`applied: true` means the bounds are stored.** It does not mean anything
+scaled, and on an inert autoscaler it never will: `current.scaling_active` in the
+same response is that answer, read from before the write.
+
+Pinned to `autoscaling/v2`. `v1` carries no `metrics` field, so every
+current-versus-target reading would be absent; a cluster serving only `v1` is
+pre-1.23 and gets §1.2's `unsupported`, which renders calmly rather than red.
+
+### 21.5 `governedBy` on §6's scale
+
+**A manual scale on an autoscaled workload is reverted seconds later.** The write
+succeeds, the API server accepts it, `applied: true` is true — and the HPA's next
+scale decision puts the count back. An operator who scaled a service to 10 during
+an incident and watched it return to 3 has been told something correct and
+misleading, which is the defect standard with a green tick on it.
+
+`POST /api/workloads/{plural}/{namespace}/{name}/scale` therefore carries
+`governedBy`, read before the write and returned **on the dry run as well** —
+the preview is where the operator decides:
+
+```json
+{ "governed": true, "autoscaler": { … §21.2 row … }, "reason": null, "detail": "…" }
+```
+
+`governed` is **tri-state**:
+
+* `true` — an HPA targets this workload; `autoscaler` is its row, so the UI can
+  also say whether that HPA is itself inert (in which case the manual count will
+  hold, which is a reprieve rather than a fix).
+* `false` — nothing autoscales it, so the count set here is the one that stays.
+  **A cluster that does not serve the HPA API is `false`, not `null`**:
+  `unsupported` is knowledge, and reporting it as a gap would warn an operator
+  about a controller their cluster cannot run.
+* `null` — the autoscaler listing did not answer, with `reason` naming why. This
+  must never render as "nothing will undo this", which is the whole sentence an
+  operator would act on.
+
+Matching is by `scaleTargetRef` kind and name, plus the API group **only when the
+autoscaler carries one** — `apiVersion` is optional in the schema, and requiring
+it would report "nothing is autoscaling this" about an autoscaler that is.
+
+### 21.6 What §21 does not do
+
+**It does not edit `spec.metrics` or `spec.behavior`.** Both are structured
+enough that a form would be a worse editor than §4's, and neither is the thing
+somebody reaches for during an incident. **It does not create or delete
+autoscalers** — §4 does that, with the same funnel. **It does not report why a
+metric is unreadable** beyond the condition's own reason and message: the answer
+is usually an aggregated API, and §19 is the page that lists those.

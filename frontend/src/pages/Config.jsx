@@ -35,8 +35,10 @@ import {
   DescriptionList,
   NullableCell,
   PageHeader,
+  StatusBadge,
 } from '../components/ui';
 import { api } from '../api/client';
+import HpaBoundsDialog from '../components/HpaBoundsDialog';
 import { useCluster } from '../contexts/ClusterContext';
 import { formatBytes } from '../utils/format';
 import { useGates } from './_data';
@@ -50,7 +52,12 @@ import {
   YamlPanel,
 } from './_parts';
 
-const CHECKS = [{ id: 'reveal', verb: 'get', group: 'core', resource: 'secrets' }];
+const CHECKS = [
+  { id: 'reveal', verb: 'get', group: 'core', resource: 'secrets' },
+  // §21's write is a patch on the autoscaler itself, so the button is gated on
+  // the verb the write will actually use rather than on anything in it.
+  { id: 'patch', verb: 'patch', group: 'autoscaling', resource: 'horizontalpodautoscalers' },
+];
 
 /**
  * Base64 → text, correctly for anything that is not ASCII.
@@ -203,6 +210,12 @@ function SecretDetail({ row, gate }) {
 export default function Config() {
   const { activeClusterId } = useCluster();
   const { gate } = useGates(CHECKS, { enabled: activeClusterId != null });
+  const [boundsFor, setBoundsFor] = useState(null);
+  // Bumped after a write so the HPA listing is read again — by changing a
+  // number, not by reaching into a hook this page does not own. A table still
+  // showing the bounds somebody just changed is the moment a console stops
+  // being believed.
+  const [hpaToken, setHpaToken] = useState(0);
 
   const tabs = useMemo(
     () => [
@@ -294,7 +307,190 @@ export default function Config() {
         detail: (row) => <SecretDetail row={row} gate={gate} />,
       },
 
-      genericTab({ key: 'hpas', title: 'HPAs', group: 'autoscaling', version: 'v2', plural: 'horizontalpodautoscalers', namespaced: true }),
+      // §21. Not a `genericTab`: an HPA's raw manifest does not answer the one
+      // question worth asking about it — whether it is scaling at all. An
+      // autoscaler whose ScalingActive condition is false is inert, and it
+      // looks completely ordinary in `kubectl get hpa` and in a generic row.
+      {
+        key: 'hpas',
+        title: 'HPAs',
+        group: 'autoscaling',
+        version: 'v2',
+        plural: 'horizontalpodautoscalers',
+        namespaced: true,
+        refreshToken: hpaToken,
+        rowKey: (row) => `${row.namespace}/${row.name}`,
+        emptyDescription: 'The listing succeeded and returned no autoscalers in this scope.',
+        detailTitle: (row) => `HPA ${row?.namespace}/${row?.name}`,
+        columns: [
+          { key: 'name', title: 'Name', sortable: true },
+          { key: 'namespace', title: 'Namespace', sortable: true },
+          {
+            key: 'target',
+            title: 'Target',
+            value: (row) => (row.target ? `${row.target.kind}/${row.target.name}` : ''),
+            cell: (row) =>
+              row.target ? (
+                `${row.target.kind}/${row.target.name}`
+              ) : (
+                <NullableCell value={null} reason="This autoscaler declares no scaleTargetRef." />
+              ),
+          },
+          {
+            key: 'scaling_active',
+            title: 'Scaling',
+            sortable: true,
+            value: (row) => (row.scaling_active == null ? '' : row.scaling_active ? 'yes' : 'no'),
+            cell: (row) =>
+              row.scaling_active === false ? (
+                <StatusBadge
+                  status="NotReady"
+                  label="Not scaling"
+                  tooltip={
+                    row.conditions?.ScalingActive?.message ||
+                    'The controller cannot compute a desired replica count, so this autoscaler is doing nothing.'
+                  }
+                />
+              ) : row.scaling_active === true ? (
+                <StatusBadge status="Ready" label="Scaling" />
+              ) : (
+                <NullableCell
+                  value={null}
+                  reason="No ScalingActive condition has been written yet. That is a fresh autoscaler, not a broken one."
+                />
+              ),
+          },
+          {
+            key: 'replicas',
+            title: 'Replicas',
+            value: (row) => row.current_replicas ?? -1,
+            cell: (row) => (
+              <NullableCell
+                value={row.current_replicas}
+                reason="The controller has published no replica count for this autoscaler yet."
+              />
+            ),
+          },
+          {
+            key: 'bounds',
+            title: 'Bounds',
+            value: (row) => row.max_replicas ?? -1,
+            cell: (row) => (
+              <span>
+                {row.min_replicas ?? '?'}–{row.max_replicas ?? '?'}
+                {row.scaling_limited === true && (
+                  <>
+                    {' '}
+                    <StatusBadge
+                      status="Unknown"
+                      label="at limit"
+                      tooltip="The desired count is being clamped to one of these bounds. During an incident this is the answer to “why is this not scaling up”."
+                    />
+                  </>
+                )}
+              </span>
+            ),
+          },
+          {
+            key: 'metrics',
+            title: 'Metrics',
+            // Never a bare number: a metric with no reading is an em dash, not
+            // 0%. A CPU target drawn at zero reads as an idle workload.
+            cell: (row) =>
+              (row.metrics ?? []).length === 0 ? (
+                <Muted>none</Muted>
+              ) : (
+                <span>
+                  {row.metrics.map((metric, i) => (
+                    <span key={`${metric.kind}-${metric.name}-${i}`}>
+                      {i > 0 && ', '}
+                      {metric.name}{' '}
+                      {metric.current == null ? (
+                        <NullableCell
+                          value={null}
+                          reason="The controller has published no reading for this metric — a missing metrics API looks exactly like this. It is not a reading of zero."
+                        />
+                      ) : (
+                        metric.current
+                      )}
+                      <Muted>/{metric.target ?? '?'}</Muted>
+                    </span>
+                  ))}
+                </span>
+              ),
+          },
+          { key: 'age_seconds', title: 'Age', sortable: true, cell: (row) => <AgeCell seconds={row.age_seconds} /> },
+        ],
+        actions: (row) => {
+          // `gate` is a function of the check id, not a map — see `useGates`.
+          // Read here rather than hoisted so the reason is the current one.
+          const patch = gate('patch');
+          return [
+            {
+              title: 'Set bounds…',
+              onClick: () => setBoundsFor(row),
+              isDisabled: !patch.allowed,
+              tooltip: patch.reason,
+            },
+          ];
+        },
+        detail: (row) => (
+          <>
+            <DescriptionList
+              items={[
+                {
+                  label: 'Scaling',
+                  value:
+                    row.scaling_active === false ? (
+                      <StatusBadge
+                        status="NotReady"
+                        label={row.conditions?.ScalingActive?.reason || 'Not scaling'}
+                        tooltip={row.conditions?.ScalingActive?.message}
+                      />
+                    ) : row.scaling_active === true ? (
+                      <StatusBadge status="Ready" label="Scaling" />
+                    ) : (
+                      <NullableCell value={null} reason="Not observed by the controller yet." />
+                    ),
+                },
+                {
+                  label: 'Able to scale',
+                  value:
+                    row.able_to_scale === false ? (
+                      <StatusBadge
+                        status="NotReady"
+                        label={row.conditions?.AbleToScale?.reason || 'No'}
+                        tooltip={row.conditions?.AbleToScale?.message}
+                      />
+                    ) : row.able_to_scale === true ? (
+                      <StatusBadge status="Ready" label="Yes" />
+                    ) : (
+                      <NullableCell value={null} reason="Not observed by the controller yet." />
+                    ),
+                },
+                { label: 'Bounds', value: `${row.min_replicas ?? '?'}–${row.max_replicas ?? '?'}` },
+                {
+                  label: 'Desired',
+                  value: (
+                    <NullableCell
+                      value={row.desired_replicas}
+                      reason="The controller has published no desired count for this autoscaler."
+                    />
+                  ),
+                },
+              ]}
+            />
+            <YamlPanel
+              group="autoscaling"
+              version="v2"
+              plural="horizontalpodautoscalers"
+              name={row.name}
+              namespace={row.namespace}
+              height={340}
+            />
+          </>
+        ),
+      },
       // VerticalPodAutoscaler is a CRD, not a built-in API — this tab shows
       // "Not present on this cluster" (§ unsupported) on most clusters, which
       // is expected and not an error.
@@ -343,7 +539,7 @@ export default function Config() {
         namespaced: false,
       }),
     ],
-    [gate],
+    [gate, hpaToken],
   );
 
   if (activeClusterId == null) {
@@ -356,10 +552,23 @@ export default function Config() {
   }
 
   return (
-    <ResourceTabsPage
-      title="Configuration"
-      subtitle="ConfigMaps and Secrets. Secret values are never in a listing; revealing one is a deliberate, audited act."
-      tabs={tabs}
-    />
+    <>
+      {boundsFor && (
+        <HpaBoundsDialog
+          namespace={boundsFor.namespace}
+          name={boundsFor.name}
+          onClose={() => setBoundsFor(null)}
+          onApplied={() => {
+            setBoundsFor(null);
+            setHpaToken((n) => n + 1);
+          }}
+        />
+      )}
+      <ResourceTabsPage
+        title="Configuration"
+        subtitle="ConfigMaps and Secrets. Secret values are never in a listing; revealing one is a deliberate, audited act."
+        tabs={tabs}
+      />
+    </>
   );
 }

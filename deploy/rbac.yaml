@@ -563,6 +563,22 @@ rules:
     resources: ["namespaces"]
     verbs: ["patch"]
 
+  # §21 setting an autoscaler's replica bounds — one merge patch on
+  # `spec.minReplicas` and `spec.maxReplicas`. Stated on its own rather than
+  # folded into a broader autoscaling grant because of what it permits: a
+  # ceiling lowered below the running replica count is applied at the
+  # controller's next scale decision, seconds away, and pods are terminated
+  # then — it is a scale-down, not a limit on future growth. §21 names how many
+  # pods move as a consequence the caller acknowledges by code, dry-runs the
+  # patch and audits both bounds either side; the grant itself is the control.
+  # Withholding it disables the Set bounds button with the reason (§11.4) while
+  # the HPA table keeps reporting the bounds, the metrics and — the part that
+  # matters most — whether the autoscaler is scaling at all, all of which are
+  # reads served by the reader role above.
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["patch"]
+
   # §13 writes. Three separate rules because they are three separate RBAC
   # resources, and an install may reasonably want one without the others: an
   # account allowed to write Ingresses is very often not allowed to write

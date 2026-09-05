@@ -1924,6 +1924,91 @@ export const FIXTURES = {
   },
 
   /**
+   * §21. Three autoscalers, one of each state the table has to keep apart: one
+   * scaling normally, one **inert** — ScalingActive false because the metrics
+   * API is gone, which looks entirely ordinary in `kubectl get hpa` — and one
+   * the controller has not observed at all, whose conditions are absent rather
+   * than false.
+   */
+  autoscalers: {
+    items: [
+      {
+        name: 'checkout-hpa',
+        namespace: 'prod',
+        target: { api_version: 'apps/v1', kind: 'Deployment', name: 'checkout' },
+        min_replicas: 2,
+        max_replicas: 10,
+        current_replicas: 8,
+        desired_replicas: 8,
+        metrics: [
+          { kind: 'Resource', name: 'cpu', container: null,
+            target_type: 'Utilization', target: '70%', current: '81%' },
+        ],
+        able_to_scale: true,
+        scaling_active: true,
+        // At its ceiling and wanting more — during an incident this is the
+        // answer to "why is this not scaling up".
+        scaling_limited: true,
+        conditions: {
+          AbleToScale: { status: 'True', reason: 'ReadyForNewScale', message: null },
+          ScalingActive: { status: 'True', reason: 'ValidMetricFound', message: null },
+          ScalingLimited: { status: 'True', reason: 'TooManyReplicas',
+                            message: 'the desired replica count is more than the maximum' },
+        },
+        age_seconds: 864000,
+      },
+      {
+        name: 'payments-hpa',
+        namespace: 'prod',
+        target: { api_version: 'apps/v1', kind: 'Deployment', name: 'payments' },
+        min_replicas: 3,
+        max_replicas: 20,
+        current_replicas: 3,
+        desired_replicas: 3,
+        // The metric is declared and has no reading. `null`, never 0.
+        metrics: [
+          { kind: 'Resource', name: 'cpu', container: null,
+            target_type: 'Utilization', target: '70%', current: null },
+        ],
+        able_to_scale: true,
+        scaling_active: false,
+        scaling_limited: null,
+        conditions: {
+          AbleToScale: { status: 'True', reason: 'SucceededGetScale', message: null },
+          ScalingActive: {
+            status: 'False', reason: 'FailedGetResourceMetric',
+            message: 'unable to get metrics for resource cpu: no metrics returned from resource metrics API',
+          },
+          ScalingLimited: null,
+        },
+        age_seconds: 3600,
+      },
+      {
+        name: 'fresh-hpa',
+        namespace: 'prod',
+        target: { api_version: 'apps/v1', kind: 'Deployment', name: 'reports' },
+        min_replicas: 1,
+        max_replicas: 5,
+        current_replicas: null,
+        desired_replicas: null,
+        metrics: [
+          { kind: 'Resource', name: 'cpu', container: null,
+            target_type: 'Utilization', target: '80%', current: null },
+        ],
+        able_to_scale: null,
+        scaling_active: null,
+        scaling_limited: null,
+        conditions: { AbleToScale: null, ScalingActive: null, ScalingLimited: null },
+        age_seconds: 20,
+      },
+    ],
+    continue: null,
+    remaining: null,
+    partial: false,
+    unavailable: [],
+  },
+
+  /**
    * §19. A cluster with one of each finding, because the page's whole job is to
    * surface them: a lease that stopped renewing, an aggregated API that is not
    * Available, a CRD that never Established, a `failurePolicy: Fail` webhook
@@ -2141,6 +2226,135 @@ export function currentPodSecurity(project = FIXTURES.project) {
  * large enough and it comes back with consequences to acknowledge. A fixture
  * that always answered one of those could not test the other.
  */
+/**
+ * §21's plan for one autoscaler, derived from the body the way the backend is.
+ *
+ * Derived rather than canned so a spec cannot assert against a consequence list
+ * the real endpoint would not have produced for those bounds — the two that
+ * depend on the running replica count are exactly the ones whose arithmetic,
+ * got backwards in a fixture, would hide the bug they exist to catch.
+ */
+export function boundsPlanFor(body, { autoscaler = null } = {}) {
+  const hpa = autoscaler ?? FIXTURES.autoscalers.items[0];
+  const running = hpa.current_replicas;
+  const consequences = [];
+
+  if (hpa.scaling_active === false) {
+    consequences.push({
+      code: 'hpa_not_scaling',
+      label: 'This autoscaler is not scaling anything right now',
+      consequence:
+        'Its ScalingActive condition is false, so the controller cannot compute a desired ' +
+        `replica count (${hpa.conditions?.ScalingActive?.reason}: ` +
+        `${hpa.conditions?.ScalingActive?.message}). Changing the bounds is still a real write ` +
+        'and the new numbers will be stored — but nothing scales until the controller can read ' +
+        'its metrics again, and the workload stays at whatever count it has.',
+      mitigation:
+        'Check that the metrics API this autoscaler needs is answering — the cluster status page ' +
+        'lists aggregated APIServices and says which are unavailable.',
+    });
+  }
+  if (hpa.able_to_scale === false) {
+    consequences.push({
+      code: 'hpa_cannot_reach_target',
+      label: 'This autoscaler cannot reach the workload it targets',
+      consequence: 'Its AbleToScale condition is false. New bounds do not fix that.',
+      mitigation: 'Check that the target still exists under the name and kind the autoscaler names.',
+    });
+  }
+  if (running == null) {
+    consequences.push({
+      code: 'hpa_replicas_unknown',
+      label: 'Whether this takes effect immediately is unknown',
+      consequence:
+        "This autoscaler's status carries no current replica count, so this console cannot tell " +
+        'you whether the bounds you are setting are above or below what is running.',
+      mitigation: "Read the workload's own replica count before confirming.",
+    });
+  } else {
+    if (body.maxReplicas < running) {
+      consequences.push({
+        code: 'hpa_max_below_current',
+        label: `${running - body.maxReplicas} pod(s) are terminated as soon as this is written`,
+        consequence:
+          `${running} replicas are running and the new ceiling is ${body.maxReplicas}. An HPA ` +
+          'clamps to its bounds at its next scale decision, which is seconds away — this is not ' +
+          'a limit that applies to future growth, it is a scale-down now.',
+        mitigation: `Set maxReplicas to ${running} or above to cap growth without shedding what is running.`,
+      });
+    }
+    if (body.minReplicas > running) {
+      consequences.push({
+        code: 'hpa_min_above_current',
+        label: `${body.minReplicas - running} pod(s) are started as soon as this is written`,
+        consequence:
+          `${running} replicas are running and the new floor is ${body.minReplicas}. The HPA ` +
+          'scales up to the floor regardless of what the metrics say.',
+        mitigation: 'Check the cluster has room for them.',
+      });
+    }
+  }
+  if (body.minReplicas === 0) {
+    consequences.push({
+      code: 'hpa_scale_to_zero_gated',
+      label: 'A floor of zero needs a feature gate this console cannot read',
+      consequence:
+        'minReplicas: 0 is only accepted when the API server runs with the HPAScaleToZero ' +
+        'feature gate enabled. No API reports whether it is.',
+      mitigation: 'Preview first — a dry run goes through the same validation as the real write.',
+    });
+  }
+
+  const unchanged =
+    body.minReplicas === hpa.min_replicas && body.maxReplicas === hpa.max_replicas;
+
+  return {
+    namespace: hpa.namespace,
+    name: hpa.name,
+    current: hpa,
+    requested: { minReplicas: body.minReplicas, maxReplicas: body.maxReplicas },
+    resourceVersion: '9040',
+    blocked: unchanged
+      ? {
+          message: `This autoscaler already runs between ${hpa.min_replicas} and ${hpa.max_replicas} replicas.`,
+          hint: 'Change one of the bounds, or nothing needs to happen.',
+          context: { minReplicas: hpa.min_replicas, maxReplicas: hpa.max_replicas },
+        }
+      : null,
+    // Never both, exactly as the endpoint guarantees.
+    consequences: unchanged ? [] : consequences,
+    gate: { enabled: true, detail: 'This deployment permits setting autoscaler bounds.' },
+  };
+}
+
+/** §21's write response: the §1.5 envelope plus the three keys §21 adds. */
+export function boundsWriteFor(body, { autoscaler = null } = {}) {
+  const plan = boundsPlanFor(body, { autoscaler });
+  const hpa = plan.current;
+  return {
+    dryRun: body.dryRun !== false,
+    // Derived, never echoed from the request: §1.5 makes `applied` the only
+    // evidence a cluster changed.
+    applied: body.dryRun === false,
+    verb: 'patch',
+    target: {
+      group: 'autoscaling', version: 'v2', resource: 'horizontalpodautoscalers',
+      namespace: hpa.namespace, name: hpa.name,
+    },
+    diff: {
+      unified:
+        '--- live\n+++ projected\n@@\n' +
+        `-  minReplicas: ${hpa.min_replicas}\n-  maxReplicas: ${hpa.max_replicas}\n` +
+        `+  minReplicas: ${body.minReplicas}\n+  maxReplicas: ${body.maxReplicas}\n`,
+      digest: 'sha256:hpa',
+    },
+    warnings: [],
+    consequences: plan.consequences,
+    current: hpa,
+    requested: { minReplicas: body.minReplicas, maxReplicas: body.maxReplicas },
+  };
+}
+
 export function expandPlanFor(body, { claim = null, mountedBy = [], expansion = null } = {}) {
   const target = claim ?? FIXTURES.claims.items[0];
   const bytes = parseQuantity(body.size);
@@ -2561,6 +2775,11 @@ export async function mockApi(
     expandPlan = null,
     expandWrite = null,
     expandOptions = undefined,
+    autoscalers = null,
+    boundsPlan = null,
+    boundsWrite = null,
+    autoscalerOptions = undefined,
+    scaleGovernedBy = null,
   } = {},
 ) {
   // Counted so a spec can hand back a different manifest on the second read —
@@ -2712,6 +2931,21 @@ export async function mockApi(
     // response at 200.
     if (path === '/cluster-status') return json(clusterStatus ?? FIXTURES.clusterStatus);
     if (path === '/resources/core/v1/services') return json(services ?? FIXTURES.services);
+    if (path === '/resources/autoscaling/v2/horizontalpodautoscalers') {
+      return json(autoscalers ?? FIXTURES.autoscalers);
+    }
+    // §21. Like §20's, the plan answers 200 even when nothing would change —
+    // `blocked` is set instead — because that is the endpoint's contract, and a
+    // fixture that returned 422 there would let a dialog that hides the
+    // autoscaler behind an error panel pass.
+    if (/^\/autoscaling\/hpas\/[^/]+\/[^/]+\/bounds\/plan$/.test(path)) {
+      const body = JSON.parse(route.request().postData() || '{}');
+      return json(boundsPlan ? boundsPlan(body) : boundsPlanFor(body, autoscalerOptions ?? {}));
+    }
+    if (/^\/autoscaling\/hpas\/[^/]+\/[^/]+\/bounds$/.test(path)) {
+      const body = JSON.parse(route.request().postData() || '{}');
+      return json(boundsWrite ? boundsWrite(body) : boundsWriteFor(body, autoscalerOptions ?? {}));
+    }
     if (path === '/resources/core/v1/persistentvolumeclaims') {
       return json(claims ?? FIXTURES.claims);
     }
@@ -2844,6 +3078,35 @@ export async function mockApi(
       });
     }
     if (/^\/nodes\/[^/]+$/.test(path)) return json(nodeDetail ?? FIXTURES.nodeDetail);
+    // §6's scale, with §21's `governedBy`. Mocked here rather than in a spec
+    // because the key it carries is the whole point: a scale on an autoscaled
+    // workload succeeds and is reverted, and the response is the only place
+    // that says so.
+    if (/^\/workloads\/[^/]+\/[^/]+\/[^/]+\/scale$/.test(path)) {
+      const body = JSON.parse(route.request().postData() || '{}');
+      const hpa = FIXTURES.autoscalers.items[0];
+      return json({
+        dryRun: body.dryRun !== false,
+        applied: body.dryRun === false,
+        verb: 'patch',
+        target: { group: 'apps', version: 'v1', resource: 'deployments',
+                  namespace: 'prod', name: 'checkout', subresource: 'scale' },
+        diff: {
+          unified: `--- live\n+++ projected\n@@\n-  replicas: 3\n+  replicas: ${body.replicas}\n`,
+          digest: 'sha256:scale',
+        },
+        warnings: [],
+        governedBy: scaleGovernedBy ?? {
+          governed: true,
+          autoscaler: hpa,
+          reason: null,
+          detail:
+            `${hpa.name} autoscales this Deployment between ${hpa.min_replicas} and ` +
+            `${hpa.max_replicas} replicas. Its next scale decision overrides the count set ` +
+            'here — usually within seconds — unless it is not scaling at all.',
+        },
+      });
+    }
     if (path === '/workloads') return json(workloads ?? FIXTURES.workloads);
     if (path === '/access/preflight') {
       return json(

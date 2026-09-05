@@ -23,11 +23,78 @@
  * guess presented as the status quo. The field starts empty and Preview is
  * disabled with the reason — which is contract rule 11.2 applied to an input
  * rather than to a cell.
+ *
+ * **And an autoscaled workload says so, on the preview and after the write.**
+ * §21's `governedBy` names the HorizontalPodAutoscaler that will put the count
+ * back — usually within seconds. The scale itself succeeds and `applied: true`
+ * is true; what is misleading is the belief that the number *stays*. It is
+ * tri-state, because "we could not read the autoscalers" must never render as
+ * "nothing will undo this".
  */
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Alert, Form, FormGroup, NumberInput } from '@patternfly/react-core';
 import MutationDialog from './MutationDialog';
 import { workloads as workloadsApi } from '../api/client';
+
+/**
+ * Which autoscaler will override the count being set (§21).
+ *
+ * Three renderings for three answers. `governed: null` is the one that must not
+ * be collapsed into `false`: the autoscaler listing did not answer, and
+ * "nothing will undo this" is exactly the sentence an operator would act on.
+ */
+function GovernedBy({ result, phase }) {
+  const governed = result?.governedBy;
+  if (!governed) return null;
+  const executed = phase === 'done';
+
+  if (governed.governed === true) {
+    const hpa = governed.autoscaler;
+    const inert = hpa?.scaling_active === false;
+    return (
+      <Alert
+        isInline
+        variant={inert ? 'info' : 'warning'}
+        className="admin-confirm__alert"
+        data-testid="scale-governed"
+        data-governed="true"
+        title={
+          executed
+            ? `${hpa?.name} decides this workload's replica count`
+            : `${hpa?.name} will override the count you are setting`
+        }
+      >
+        {governed.detail}
+        {inert && (
+          <p style={{ marginBlockStart: '0.5rem' }}>
+            That autoscaler is <strong>not scaling right now</strong> — its ScalingActive condition
+            is false — so this count will hold until the controller can read its metrics again. That
+            is a reprieve, not a fix.
+          </p>
+        )}
+      </Alert>
+    );
+  }
+
+  if (governed.governed === null) {
+    return (
+      <Alert
+        isInline
+        variant="warning"
+        className="admin-confirm__alert"
+        data-testid="scale-governed"
+        data-governed="unknown"
+        title="Whether an autoscaler will undo this is unknown"
+      >
+        {governed.detail}
+      </Alert>
+    );
+  }
+
+  // `governed: false` is good news and gets no banner — a console that alerted
+  // on the ordinary case would train people past the two above.
+  return null;
+}
 
 // Mirrors `_NO_SCALE` in backend/app/api/workloads.py. Kept verbatim: the
 // backend is the authority and this is a pre-emptive copy of its answer.
@@ -74,6 +141,13 @@ export function ScaleDialog({
     return Math.max(0, Math.min(MAX_REPLICAS, Math.trunc(next)));
   };
 
+  // Rendered after the write as well as on the preview: an operator who
+  // confirmed without reading it still needs to know the count will move back.
+  const renderExtra = useCallback(
+    ({ result, phase }) => <GovernedBy result={result} phase={phase} />,
+    [],
+  );
+
   return (
     <MutationDialog
       isOpen={isOpen}
@@ -95,6 +169,7 @@ export function ScaleDialog({
           : `Replicas must be a whole number between 0 and ${MAX_REPLICAS}.`)
       }
       request={(dryRun) => workloadsApi.scale(plural, namespace, name, { replicas, dryRun })}
+      renderExtra={renderExtra}
       onClose={onClose}
       onApplied={onApplied}
       summarize={(result) =>
@@ -103,8 +178,11 @@ export function ScaleDialog({
               variant: 'success',
               title: `${name} is now set to ${replicas} ${replicas === 1 ? 'replica' : 'replicas'}`,
               body:
-                'The API server accepted the new desired count. Pods reach it asynchronously — watch the ' +
-                'ready count on the workload for the actual state.',
+                result?.governedBy?.governed === true
+                  ? 'The API server accepted the new desired count — and an autoscaler owns this ' +
+                    'workload, so its next scale decision replaces that count. See the panel below.'
+                  : 'The API server accepted the new desired count. Pods reach it asynchronously — watch ' +
+                    'the ready count on the workload for the actual state.',
             }
           : {
               variant: 'warning',

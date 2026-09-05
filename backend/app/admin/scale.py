@@ -35,10 +35,12 @@ import logging
 from typing import Any
 
 from app.admin.apply import patch_fn
+from app.resources import reader
+from app.resources.envelope import collect
 from app.resources.reader import read_object
 from app.admin.mutate import mutate
 from app.errors import Invalid
-from app.resources.shaping import get_field
+from app.resources.shaping import get_field, hpa_row
 from app.services.workloads import KindSpec, resolve_plural
 
 logger = logging.getLogger(__name__)
@@ -88,6 +90,113 @@ def _refuse(spec: KindSpec, action: str, explanation: str, namespace: str, name:
 
 
 # --------------------------------------------------------------------------- #
+# Which autoscaler will undo this (§21)
+# --------------------------------------------------------------------------- #
+
+def _targets(autoscaler: Any, spec: KindSpec, name: str) -> bool:
+    """Whether this HPA's ``scaleTargetRef`` names this workload.
+
+    Kind and name are compared always; the API group only when the autoscaler
+    carries one, because ``scaleTargetRef.apiVersion`` is optional in the schema
+    and an HPA written without it still governs the workload. A stricter match
+    that required it would report "nothing is autoscaling this" about an
+    autoscaler that is — the reassuring wrong answer, on the field that decides
+    whether a manual scale survives.
+    """
+    ref = get_field(autoscaler, "spec", "scaleTargetRef")
+    if ref is None:
+        return False
+    if get_field(ref, "kind") != spec.kind or get_field(ref, "name") != name:
+        return False
+    api_version = get_field(ref, "apiVersion")
+    if not api_version:
+        return True
+    group = api_version.split("/")[0] if "/" in api_version else ""
+    return group == spec.group
+
+
+def governing_autoscaler(spec: KindSpec, namespace: str, name: str) -> dict[str, Any]:
+    """Whether a HorizontalPodAutoscaler owns this workload's replica count.
+
+    **This is why a manual scale on an autoscaled workload is not what it looks
+    like.** The write succeeds, the API server accepts it, `applied: true` is
+    true — and the HPA's next scale decision, seconds later, puts the count back.
+    An operator who scaled a service to 10 during an incident and watched it
+    return to 3 has been told something correct and misleading, which is the
+    defect standard with a green tick on it.
+
+    ``governed`` is **tri-state**. ``True`` and ``False`` are answers; ``None``
+    means the autoscaler listing did not answer, and it must not be rendered as
+    "nothing will revert this" — that sentence is the whole reason to look.
+    """
+    unavailable: list[dict[str, Any]] = []
+    items: list[Any] | None = None
+    with collect(unavailable, "autoscaling", "horizontalpodautoscalers", namespace=namespace):
+        listing = reader.list_resource(
+            "autoscaling", "v2", "horizontalpodautoscalers",
+            namespace=namespace, limit=500,
+        )
+        # Assigned last, so a listing that raised leaves `items` at None rather
+        # than at a partial tally that reads as "nothing autoscales this".
+        items = list(listing.get("items") or [])
+
+    if items is None:
+        reason = unavailable[0]["reason"] if unavailable else "unreadable"
+        # `unsupported` is knowledge, not a gap. A cluster that does not serve
+        # the HorizontalPodAutoscaler API has no autoscaler that could revert
+        # this, and reporting that as "we could not look" would put a warning in
+        # front of an operator about a controller their cluster cannot run.
+        if reason == "unsupported":
+            return {
+                "governed": False,
+                "autoscaler": None,
+                "reason": reason,
+                "detail": (
+                    "This cluster does not serve the HorizontalPodAutoscaler API, "
+                    "so nothing autoscales this workload and the replica count set "
+                    "here is the one that stays."
+                ),
+            }
+        return {
+            "governed": None,
+            "autoscaler": None,
+            "reason": reason,
+            "detail": (
+                f"The autoscaler listing for {namespace} did not answer "
+                f"({reason}), so this console cannot say whether a "
+                "HorizontalPodAutoscaler will put this replica count back. It is "
+                "not saying that none will."
+            ),
+        }
+
+    match = next((item for item in items if _targets(item, spec, name)), None)
+    if match is None:
+        return {
+            "governed": False,
+            "autoscaler": None,
+            "reason": None,
+            "detail": (
+                f"No HorizontalPodAutoscaler in {namespace} targets this "
+                f"{spec.kind}, so the replica count set here is the one that "
+                "stays."
+            ),
+        }
+
+    row = hpa_row(match)
+    return {
+        "governed": True,
+        "autoscaler": row,
+        "reason": None,
+        "detail": (
+            f"{row['name']} autoscales this {spec.kind} between "
+            f"{row['min_replicas']} and {row['max_replicas']} replicas. Its next "
+            "scale decision overrides the count set here — usually within "
+            "seconds — unless it is not scaling at all."
+        ),
+    }
+
+
+# --------------------------------------------------------------------------- #
 # Scale
 # --------------------------------------------------------------------------- #
 
@@ -118,7 +227,12 @@ def scale_workload(
     before = _read(spec, namespace, name, subresource="scale")
     current = get_field(before, "spec", "replicas")
 
-    return mutate(
+    # Read before the write, and on the dry run too: the preview is where an
+    # operator decides, and "an HPA will undo this" is the single most useful
+    # thing to know at that moment.
+    governed_by = governing_autoscaler(spec, namespace, name)
+
+    result = mutate(
         verb="patch",
         group=spec.group,
         version=spec.version,
@@ -136,6 +250,10 @@ def scale_workload(
         # put "replicas 0 -> 5" in the trail for a workload that was running.
         detail=f"replicas {current if current is not None else 'unknown'} -> {replicas}",
     )
+    # `applied: true` here means the Scale subresource was written. Whether the
+    # count *stays* is a different question, and this is the answer to it.
+    result["governedBy"] = governed_by
+    return result
 
 
 # --------------------------------------------------------------------------- #

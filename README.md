@@ -360,6 +360,15 @@ version being that there is no undo for a deleted StatefulSet.
   Kubernetes: a namespace created together with a quota, a limit range, a
   binding and, if asked, network isolation — five ordinary writes through the
   funnel, each with its own diff and audit row. See §17.
+* **Autoscalers that say whether they are autoscaling** — an HPA whose
+  `ScalingActive` condition is false is not scaling anything, usually because the
+  metric it needs cannot be read, and it looks entirely ordinary in
+  `kubectl get hpa`. The table says so, every metric's current reading sits
+  beside its target (an em dash when there is no reading — never 0%, which reads
+  as an idle workload), and the bounds go through the funnel: lowering a ceiling
+  below the running replica count is named as the scale-down it is, with the
+  number of pods that stop. Scaling a workload an autoscaler owns now says which
+  autoscaler will put the count back. See §21.
 * **Pod Security, set with the pods that would break** — change a namespace's
   admission level and the preview carries the API server's own warnings naming
   the pods already running that do not meet it, because Pod Security admission

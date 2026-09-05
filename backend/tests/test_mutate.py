@@ -38,6 +38,7 @@ from app.admin.mutate import FeatureGate, Switch, mutate, read_only_switch, requ
 from app.audit import recorder
 from app.config import settings
 from app.errors import Conflict, Invalid, MutationsDisabled, RBACDenied, UpstreamError
+from app.resources import catalog
 from tests.conftest import obj
 
 LIVE = {
@@ -768,12 +769,44 @@ class FakeCluster:
         return [request for request in self.requests if request.method == method]
 
 
+#: §6's scale now also asks which HorizontalPodAutoscaler governs the workload
+#: (see `app.admin.scale.governing_autoscaler`), so a cluster these tests scale
+#: against has to be able to answer that. Seeded with discovery and an empty
+#: autoscaler listing — "nothing autoscales this" — which is the shape every
+#: pre-§21 scale test was implicitly written against. A test that wants the other
+#: answer stubs the listing path itself.
+HPA_LIST_PATH = "/apis/autoscaling/v2/namespaces/prod/horizontalpodautoscalers"
+
+
+def _seed_autoscaling_discovery(api_server: "FakeCluster") -> None:
+    api_server.objects["/api"] = {"versions": ["v1"]}
+    api_server.objects["/api/v1"] = {"resources": []}
+    api_server.objects["/apis"] = {"groups": [{
+        "name": "autoscaling",
+        "preferredVersion": {"groupVersion": "autoscaling/v2", "version": "v2"},
+        "versions": [{"groupVersion": "autoscaling/v2", "version": "v2"}],
+    }]}
+    api_server.objects["/apis/autoscaling/v2"] = {"resources": [{
+        "name": "horizontalpodautoscalers", "kind": "HorizontalPodAutoscaler",
+        "namespaced": True, "verbs": ["get", "list", "watch", "patch"],
+    }]}
+    api_server.objects[HPA_LIST_PATH] = {"items": []}
+
+
 @pytest.fixture
 def cluster(fake_k8s):
+    # Discovery is cached per cluster and this fixture hands out a *new* one
+    # each time. Without the invalidation a test that removes a group from
+    # discovery still resolves it from whatever the previous test cached, and
+    # the "this cluster does not serve HPAs" path passes or fails depending on
+    # which tests ran before it.
+    catalog.invalidate_cache(all_clusters=True)
     api_server = FakeCluster()
     fake_k8s.api_client.returns("call_api", api_server)
     allow(fake_k8s)
-    return api_server
+    _seed_autoscaling_discovery(api_server)
+    yield api_server
+    catalog.invalidate_cache(all_clusters=True)
 
 
 DEPLOYMENT_PATH = "/apis/apps/v1/namespaces/prod/deployments/checkout"
@@ -976,3 +1009,135 @@ def test_rolling_back_to_a_pruned_revision_says_which_ones_exist(db_engine, clus
     assert "14" in caught.value.detail
     assert "revisionHistoryLimit" in caught.value.hint
     assert cluster.of("PATCH") == []
+
+
+# --------------------------------------------------------------------------- #
+# §21 — which autoscaler will undo a manual scale
+# --------------------------------------------------------------------------- #
+#
+# A manual scale on an autoscaled workload succeeds, is accepted by the API
+# server, and is reverted seconds later by the HPA's next scale decision. The
+# write is real and `applied: true` is true; what is missing is that the *count*
+# does not stay. `governedBy` is that missing half, and it is tri-state because
+# "we could not read the autoscalers" must never render as "nothing will undo
+# this" — that sentence is the entire reason to look.
+
+def _hpa(name="checkout-hpa", *, kind="Deployment", target="checkout",
+         api_version="apps/v1", minimum=2, maximum=10, scaling_active="True"):
+    body = {
+        "apiVersion": "autoscaling/v2", "kind": "HorizontalPodAutoscaler",
+        "metadata": {"name": name, "namespace": "prod"},
+        "spec": {
+            "scaleTargetRef": {"kind": kind, "name": target},
+            "minReplicas": minimum, "maxReplicas": maximum,
+        },
+        "status": {
+            "currentReplicas": 3, "desiredReplicas": 3,
+            "conditions": [{"type": "ScalingActive", "status": scaling_active,
+                            "reason": "ValidMetricFound", "message": None}],
+        },
+    }
+    if api_version is not None:
+        body["spec"]["scaleTargetRef"]["apiVersion"] = api_version
+    return body
+
+
+def _scale(cluster, replicas=5):
+    cluster.objects[SCALE_PATH] = SCALE
+    return scale_workload("deployments", "prod", "checkout", replicas, True)
+
+
+def test_a_scale_says_which_autoscaler_will_put_the_count_back(db_engine, cluster):
+    cluster.objects[HPA_LIST_PATH] = {"items": [_hpa()]}
+
+    governed = _scale(cluster)["governedBy"]
+
+    assert governed["governed"] is True
+    assert governed["autoscaler"]["name"] == "checkout-hpa"
+    assert "overrides the count set here" in governed["detail"]
+
+
+def test_a_scale_on_an_unautoscaled_workload_says_the_count_stays(db_engine, cluster):
+    cluster.objects[HPA_LIST_PATH] = {"items": [
+        _hpa("other-hpa", target="payments"),
+    ]}
+
+    governed = _scale(cluster)["governedBy"]
+
+    assert governed["governed"] is False
+    assert governed["autoscaler"] is None
+    assert "the one that stays" in governed["detail"]
+
+
+def test_an_autoscaler_listing_that_failed_is_null_never_not_governed(
+    db_engine, cluster, fake_k8s,
+):
+    """The reassuring wrong answer, on the field that decides whether the number
+    the operator just typed survives the minute."""
+    del cluster.objects[HPA_LIST_PATH]
+    # A GET the fake cannot answer raises; what matters is that a *cluster*
+    # failure lands as `None` rather than as "nothing autoscales this".
+    from kubernetes.client.rest import ApiException
+
+    def refuse(path, method, **kwargs):
+        if path == HPA_LIST_PATH:
+            raise ApiException(status=403, reason="Forbidden")
+        return FakeCluster.__call__(cluster, path, method, **kwargs)
+
+    fake_k8s.api_client.returns("call_api", refuse)
+    cluster.objects[SCALE_PATH] = SCALE
+
+    governed = scale_workload("deployments", "prod", "checkout", 5, True)["governedBy"]
+
+    assert governed["governed"] is None
+    assert governed["reason"] == "forbidden"
+    assert "not saying that none will" in governed["detail"]
+
+
+def test_a_cluster_with_no_hpa_api_is_not_governed_rather_than_unknown(
+    db_engine, cluster,
+):
+    """`unsupported` is knowledge. A cluster that cannot run an HPA has none that
+    could revert this, and reporting that as a gap would warn an operator about a
+    controller their cluster does not serve."""
+    cluster.objects["/apis"] = {"groups": []}
+    del cluster.objects["/apis/autoscaling/v2"]
+    del cluster.objects[HPA_LIST_PATH]
+
+    governed = _scale(cluster)["governedBy"]
+
+    assert governed["governed"] is False
+    assert governed["reason"] == "unsupported"
+    assert "does not serve the HorizontalPodAutoscaler API" in governed["detail"]
+
+
+def test_an_autoscaler_targeting_another_kind_by_the_same_name_does_not_match(
+    db_engine, cluster,
+):
+    """`checkout` the Deployment and `checkout` the StatefulSet are two
+    workloads, and only one of them is governed."""
+    cluster.objects[HPA_LIST_PATH] = {"items": [_hpa(kind="StatefulSet")]}
+
+    assert _scale(cluster)["governedBy"]["governed"] is False
+
+
+def test_an_autoscaler_with_no_api_version_on_its_target_ref_still_matches(
+    db_engine, cluster,
+):
+    """`scaleTargetRef.apiVersion` is optional in the schema, and an HPA written
+    without it still governs the workload. Requiring it would report "nothing is
+    autoscaling this" about an autoscaler that is."""
+    cluster.objects[HPA_LIST_PATH] = {"items": [_hpa(api_version=None)]}
+
+    assert _scale(cluster)["governedBy"]["governed"] is True
+
+
+def test_the_governing_autoscaler_is_reported_on_the_dry_run_too(db_engine, cluster):
+    """The preview is where an operator decides, so it is where the fact that an
+    HPA will undo this has to arrive."""
+    cluster.objects[HPA_LIST_PATH] = {"items": [_hpa()]}
+
+    result = _scale(cluster)
+
+    assert result["applied"] is False
+    assert result["governedBy"]["governed"] is True

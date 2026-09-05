@@ -40,6 +40,7 @@ from app.middleware.logging import RequestLoggingMiddleware, setup_logging
 from app.middleware.auth import AuthenticationMiddleware
 
 from app.api.access import router as access_router
+from app.api.autoscaling import router as autoscaling_router
 from app.api.audit import router as audit_router
 from app.api.cli import router as cli_router
 from app.api.cluster_status import router as cluster_status_router
@@ -163,6 +164,7 @@ app.include_router(routes_router)
 app.include_router(portal_router)
 app.include_router(projects_router)
 app.include_router(storage_router)
+app.include_router(autoscaling_router)
 app.include_router(nodes_router)
 app.include_router(network_router)
 app.include_router(access_router)
