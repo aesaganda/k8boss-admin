@@ -1367,6 +1367,165 @@ def limitrange_row(obj: Any) -> dict[str, Any]:
 #: ``(group, plural) -> shaper``. Keyed on the *real* group name, so the core
 #: group is the empty string; §1.4's ``core`` spelling is translated away before
 #: anything reaches here.
+# --------------------------------------------------------------------------- #
+# §21 — HorizontalPodAutoscalers
+# --------------------------------------------------------------------------- #
+
+#: The three conditions an HPA controller writes. `ScalingActive` is the one
+#: that matters and the one nothing surfaces: false means the autoscaler is not
+#: scaling *at all* — usually because the metric it needs cannot be read — and
+#: an HPA in that state looks completely normal in `kubectl get hpa`.
+HPA_CONDITIONS = ("AbleToScale", "ScalingActive", "ScalingLimited")
+
+
+def _hpa_metric_identity(entry: Any) -> tuple:
+    """What makes two metric entries the same metric, across spec and status.
+
+    `spec.metrics` and `status.currentMetrics` are two lists in no guaranteed
+    order, and pairing them by index is wrong the moment a metric is added or
+    the controller has not observed one of them yet. Pairing by identity means an
+    unpaired spec entry stays unpaired — which is the `null` current value that
+    says "this metric has no reading", rather than borrowing its neighbour's.
+    """
+    kind = get_field(entry, "type")
+    body = get_field(entry, kind[:1].lower() + kind[1:]) if kind else None
+    if kind == "Resource":
+        return (kind, get_field(body, "name"))
+    if kind == "ContainerResource":
+        return (kind, get_field(body, "name"), get_field(body, "container"))
+    if kind == "Object":
+        described = get_field(body, "describedObject")
+        return (
+            kind,
+            get_field(body, "metric", "name"),
+            get_field(described, "kind"),
+            get_field(described, "name"),
+        )
+    if kind in ("Pods", "External"):
+        return (kind, get_field(body, "metric", "name"))
+    return (kind,)
+
+
+def _hpa_quantity(target: Any, *, current: bool = False) -> str | None:
+    """One side of a metric comparison, as the string an operator reads.
+
+    Rendered here rather than in the frontend because the three target types
+    carry the number in three different fields with two different units, and a
+    caller that reached for the wrong one would silently compare a percentage
+    against a byte count. `None` means the value is absent — never `0`, which on
+    a CPU metric reads as an idle workload.
+    """
+    if target is None:
+        return None
+    utilization = get_field(target, "averageUtilization")
+    if utilization is not None:
+        return f"{utilization}%"
+    average = get_field(target, "averageValue")
+    if average is not None:
+        return str(average)
+    value = get_field(target, "value")
+    if value is not None:
+        return str(value)
+    return None
+
+
+def _hpa_metric_rows(spec_metrics: Any, status_metrics: Any) -> list[dict[str, Any]]:
+    """Every metric this HPA scales on, with its target and its current reading.
+
+    Driven by **spec**, not by status: the metrics an HPA is configured to use
+    are the question, and one the controller could not read is exactly the row
+    worth seeing. A status-driven list would drop it.
+    """
+    observed = {}
+    for entry in (status_metrics or []):
+        observed[_hpa_metric_identity(entry)] = entry
+
+    rows: list[dict[str, Any]] = []
+    for entry in (spec_metrics or []):
+        kind = get_field(entry, "type")
+        body = get_field(entry, kind[:1].lower() + kind[1:]) if kind else None
+        identity = _hpa_metric_identity(entry)
+        seen = observed.get(identity)
+        seen_body = None
+        if seen is not None:
+            seen_kind = get_field(seen, "type")
+            seen_body = get_field(seen, seen_kind[:1].lower() + seen_kind[1:]) if seen_kind else None
+
+        name = get_field(body, "name") or get_field(body, "metric", "name")
+        rows.append({
+            "kind": kind,
+            "name": name,
+            "container": get_field(body, "container"),
+            "target_type": get_field(body, "target", "type"),
+            "target": _hpa_quantity(get_field(body, "target")),
+            # `None` when the controller has published no reading for this
+            # metric. That is the state an HPA sits in when metrics-server is
+            # gone, and it is the reason this row exists.
+            "current": _hpa_quantity(get_field(seen_body, "current")) if seen_body else None,
+        })
+    return rows
+
+
+def hpa_row(obj: Any) -> dict[str, Any]:
+    """§21 HorizontalPodAutoscaler row — including whether it is scaling at all.
+
+    The fields that are not obvious:
+
+    * **`scaling_active` is tri-state.** `False` means the controller cannot
+      compute a desired replica count, so this HPA is inert — the workload sits
+      at whatever it was and nothing scales it. `None` means the condition has
+      not been written yet, which is a fresh HPA rather than a broken one, and
+      rendering either as healthy is the confident wrong answer this project
+      treats as a defect.
+    * **`scaling_limited` true is not a fault.** It means the desired count hit
+      `minReplicas` or `maxReplicas`. During an incident that is the answer to
+      "why is this not scaling up" — the HPA wants more and the ceiling says no.
+    * **Every metric's `current` may be `None`** while its `target` is set. A
+      caller must not render that as `0`: a CPU metric drawn at 0% reads as an
+      idle workload, and idle is what gets scaled down.
+    """
+    conditions: dict[str, Any] = {name: None for name in HPA_CONDITIONS}
+    for condition in get_field(obj, "status", "conditions", default=[]) or []:
+        name = get_field(condition, "type")
+        if name in conditions:
+            conditions[name] = {
+                "status": get_field(condition, "status"),
+                "reason": get_field(condition, "reason"),
+                "message": get_field(condition, "message"),
+            }
+
+    def flag(name: str) -> bool | None:
+        entry = conditions[name]
+        return None if entry is None else entry["status"] == "True"
+
+    target_ref = get_field(obj, "spec", "scaleTargetRef")
+    return {
+        "name": get_field(obj, "metadata", "name"),
+        "namespace": get_field(obj, "metadata", "namespace"),
+        "target": None if target_ref is None else {
+            "api_version": get_field(target_ref, "apiVersion"),
+            "kind": get_field(target_ref, "kind"),
+            "name": get_field(target_ref, "name"),
+        },
+        "min_replicas": get_field(obj, "spec", "minReplicas"),
+        "max_replicas": get_field(obj, "spec", "maxReplicas"),
+        # Both from status and both nullable. A fresh HPA the controller has not
+        # observed has neither, and reporting that as 0 replicas describes a
+        # running workload as stopped.
+        "current_replicas": get_field(obj, "status", "currentReplicas"),
+        "desired_replicas": get_field(obj, "status", "desiredReplicas"),
+        "metrics": _hpa_metric_rows(
+            get_field(obj, "spec", "metrics", default=[]),
+            get_field(obj, "status", "currentMetrics", default=[]),
+        ),
+        "able_to_scale": flag("AbleToScale"),
+        "scaling_active": flag("ScalingActive"),
+        "scaling_limited": flag("ScalingLimited"),
+        "conditions": conditions,
+        "age_seconds": age_seconds(get_field(obj, "metadata", "creationTimestamp")),
+    }
+
+
 ROW_SHAPERS: dict[tuple[str, str], Callable[[Any], dict[str, Any]]] = {
     ("", "pods"): pod_row,
     ("", "services"): service_row,
@@ -1378,6 +1537,7 @@ ROW_SHAPERS: dict[tuple[str, str], Callable[[Any], dict[str, Any]]] = {
     ("networking.k8s.io", "ingresses"): ingress_row,
     ("networking.k8s.io", "networkpolicies"): networkpolicy_row,
     ("storage.k8s.io", "storageclasses"): storageclass_row,
+    ("autoscaling", "horizontalpodautoscalers"): hpa_row,
     ("rbac.authorization.k8s.io", "roles"): role_row,
     ("rbac.authorization.k8s.io", "clusterroles"): clusterrole_row,
     ("rbac.authorization.k8s.io", "rolebindings"): rolebinding_row,

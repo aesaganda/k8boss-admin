@@ -156,7 +156,7 @@ reason.
 | `resources/catalog.py` | Discovery. A broken API group becomes an `unavailable` entry, never a smaller catalog |
 | `resources/reader.py` | Generic list/get/YAML, plus trimming (`managedFields` always, `last-applied-configuration` from lists), and `read_object` — one object by known group/version/plural, skipping the discovery round trip the generic path needs |
 | `resources/transport.py` | The one authenticated round trip that keeps its response headers, which is where the API server's `Warning:` values live. Used by both directions: the funnel's writes and `read_object`'s GET |
-| `resources/shaping.py` | Pure row shapers — `pod_row`, `phase_detail`, the §8 config/storage/access/network-policy rows, and the tri-state label-selector matcher |
+| `resources/shaping.py` | Pure row shapers — `pod_row`, `phase_detail`, the §8 config/storage/access/network-policy rows, `hpa_row` (whose three conditions and every metric reading are tri-state), and the tri-state label-selector matcher |
 | `resources/envelope.py` | `envelope()`, `collect()`, `unavailable_entry()` — the mechanism behind "empty is never blind" |
 | `services/workloads.py` | Six controller kinds into one row; `Unknown` status, `null`-vs-`0` counts |
 | `services/nodes.py` | Quantity parsing (`Decimal`), node rows, per-node requested totals |
@@ -175,6 +175,7 @@ reason.
 | `admin/debug.py` | §7.4 debug containers: attach an ephemeral container to a running pod, and decide from discovery — three-valued — whether the cluster serves them at all |
 | `admin/projects.py` | §17 the project: five creates through `apply.create_from_yaml`, never into a namespace that exists, with per-object outcomes and — on a dry run — the Namespace projected by the API server and the rest rendered and preflighted, because admission cannot project into a namespace that does not exist yet |
 | `admin/podsecurity.py` | §18 the Pod Security level: one merge patch on a namespace's six labels, whose dry run carries Pod Security admission's own `Warning:` headers naming the pods already running that violate the new level — passed through verbatim, never parsed |
+| `admin/hpa.py` | §21 an autoscaler's replica bounds: two integers through the funnel, refusing a no-op and an inverted range by arithmetic, and naming as consequences the two things a form field cannot — that a ceiling below the running count is a scale-down now, and that an HPA whose `ScalingActive` is false will act on the new bounds with nothing at all. Also `governing_autoscaler`, which is what lets §6's scale say that an HPA is about to revert it |
 | `admin/pvc.py` | §20 expanding a claim: one merge patch on `spec.resources.requests.storage`, refusing a shrink by arithmetic and a class that forbids expansion by name — but never on `allowVolumeExpansion` it could not read, which is `null` and decides nothing. `applied: true` attests the request, and the response carries the capacity it did not change |
 | `audit/recorder.py` | `record()` from the funnel and from the two privileged reads; `record_console_event()` for sign-ins and user changes; `query()`, `stream()` and `verify_chain()` for §10 |
 | `audit/integrity.py` | The hash chain. A flush listener that links every new record, and `verify()` — which reports `intact`, `broken` or `partial`, and never claims the third is the first |

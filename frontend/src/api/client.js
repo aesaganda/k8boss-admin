@@ -955,6 +955,54 @@ export const storage = {
   expand: (namespace, name, body) => api.put(`${claimPath(namespace, name)}/size`, body),
 };
 
+/* ── §21 Autoscaler bounds ──────────────────────────────────────────────── */
+
+const hpaPath = (namespace, name) =>
+  `/autoscaling/hpas/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}`;
+
+export const hpa = {
+  /**
+   * What changing an autoscaler's replica bounds would mean.
+   *
+   * The field to read first is `current.scaling_active`, and it is
+   * **three-valued**. `false` means the controller cannot compute a desired
+   * replica count — usually because the metric it needs is gone — so this
+   * autoscaler is inert and new bounds will be stored and acted on by nothing.
+   * `null` means the condition has not been written yet, which is a fresh HPA
+   * rather than a broken one. Only `true` means it is scaling.
+   *
+   * A request that changes neither bound answers `200` with `blocked` set, not
+   * `422`: this is the screen where the bounds are chosen, so it keeps
+   * answering with the current ones. `blocked` and `consequences` are never
+   * both populated.
+   *
+   * **Writes nothing and is not a dry run.** `retry: true` for the reason every
+   * plan sets it: a pure read replays for free.
+   *
+   * body: { minReplicas, maxReplicas, resourceVersion }
+   */
+  plan: (namespace, name, body) =>
+    request(`${hpaPath(namespace, name)}/bounds/plan`, { method: 'POST', body, retry: true }),
+
+  /**
+   * Set the bounds: one merge patch on `spec.minReplicas` and
+   * `spec.maxReplicas`, through the funnel.
+   *
+   * **`applied: true` means the bounds are stored, not that anything scaled.**
+   * The controller acts on them at its next scale decision, and only if it can
+   * read its metrics at all — `current.scaling_active` in the same response is
+   * that answer, read from before the write.
+   *
+   * Both bounds are sent on every request, including the one that is not
+   * changing: a bound left out would be ambiguous between "leave it" and "reset
+   * it", and the resolution that eventually happens is somebody's floor going
+   * back to 1.
+   *
+   * body: { minReplicas, maxReplicas, resourceVersion, acknowledgeConsequences, dryRun }
+   */
+  setBounds: (namespace, name, body) => api.put(`${hpaPath(namespace, name)}/bounds`, body),
+};
+
 /* ── §7 Pods — the detail reads, the logs, the streams ──────────────────── */
 
 const podPath = (namespace, name) =>
