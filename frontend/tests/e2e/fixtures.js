@@ -860,9 +860,39 @@ export const FIXTURES = {
     pod_count: null,
     conditions: [{ type: 'MemoryPressure', status: 'False', reason: 'KubeletHasSufficientMemory' }],
     taints: [],
+    // §24. Two of these matter to the label dialog: `team` is what
+    // `nodeSchedulingPods` below selects on, and the role label is what turns
+    // the ROLES column into something an edit can change.
+    labels: {
+      'kubernetes.io/hostname': 'ip-10-0-1-4',
+      'node-role.kubernetes.io/worker': '',
+      team: 'payments',
+    },
     pods: [],
     unavailable: [],
   },
+
+  /**
+   * §24. The pods on `nodeDetail`, in the shape the plan derivations below
+   * need — not a full PodSpec, because what they compute over is tolerations
+   * and placement keys and nothing else.
+   *
+   * Chosen so one node exercises every row the taint plan can produce: a pod
+   * that goes immediately, one that goes on a timer, one that stays, a
+   * DaemonSet, and one with nothing owning it.
+   */
+  nodeSchedulingPods: [
+    { namespace: 'prod', pod: 'checkout-7c9', controller: { kind: 'ReplicaSet', name: 'checkout-7c9' },
+      tolerations: [], selectorKeys: ['team'] },
+    { namespace: 'prod', pod: 'ledger-4f1', controller: { kind: 'StatefulSet', name: 'ledger' },
+      tolerations: [{ key: 'dedicated', operator: 'Equal', value: 'gpu', effect: 'NoExecute',
+                      tolerationSeconds: 300 }], selectorKeys: [] },
+    { namespace: 'kube-system', pod: 'cilium-x4k2', controller: { kind: 'DaemonSet', name: 'cilium' },
+      tolerations: [], selectorKeys: [] },
+    { namespace: 'ops', pod: 'one-off-import', controller: null, tolerations: [], selectorKeys: [] },
+    { namespace: 'prod', pod: 'sidecar-tolerant', controller: { kind: 'ReplicaSet', name: 'sidecar' },
+      tolerations: [{ key: null, operator: 'Exists' }], selectorKeys: [] },
+  ],
 
   // §5.5. Both gates on, one pod already there.
   nodeDebugEnabled: {
@@ -2426,6 +2456,335 @@ export function boundsPlanFor(body, { autoscaler = null } = {}) {
   };
 }
 
+/**
+ * §24 — does one toleration tolerate one taint? The API server's rules, kept in
+ * step with `app.resources.shaping.toleration_tolerates_taint`.
+ *
+ * Reproduced rather than canned for §21's reason: the two rules an
+ * approximation gets wrong — a blank `effect` matching every effect, and an
+ * empty key being a wildcard only with `Exists` — are exactly the ones whose
+ * mistake in a fixture would hide the bug it exists to catch.
+ */
+function toleratesTaint(toleration, taint) {
+  if (toleration.effect && toleration.effect !== taint.effect) return false;
+  const operator = toleration.operator || 'Equal';
+  if (!toleration.key) return operator === 'Exists';
+  if (toleration.key !== taint.key) return false;
+  if (operator === 'Exists') return true;
+  return (toleration.value || '') === (taint.value || '');
+}
+
+/** §24's deletion plan, derived: which pods a NoExecute taint removes, and when. */
+export function deletionPlanFor(taints, pods) {
+  const enforced = taints.filter((taint) => taint.effect === 'NoExecute');
+  const rows = [];
+  for (const pod of pods) {
+    let soonest = null;
+    for (const taint of enforced) {
+      const matches = (pod.tolerations || []).filter((t) => toleratesTaint(t, taint));
+      if (matches.some((t) => t.tolerationSeconds == null)) continue;
+      const delay = matches.length
+        ? Math.min(...matches.map((t) => Math.max(0, t.tolerationSeconds)))
+        : 0;
+      if (soonest == null || delay < soonest.delay_seconds) {
+        soonest = { delay_seconds: delay, taint };
+      }
+    }
+    if (!soonest) continue;
+    rows.push({
+      namespace: pod.namespace, pod: pod.pod, controller: pod.controller,
+      taint: soonest.taint, delay_seconds: soonest.delay_seconds,
+    });
+  }
+  return rows;
+}
+
+/**
+ * §24's taint plan, derived from the body the way the backend is.
+ *
+ * `podsChecked: false` produces `deleting: null` — not an empty list — because
+ * that is the distinction the dialog is built around and a fixture that blurred
+ * it would let a panel drawing "deletes nothing" over an unread node pass.
+ */
+export function taintPlanFor(body, { node = null, pods = null, podsChecked = true } = {}) {
+  const live = node ?? FIXTURES.nodeDetail;
+  const onNode = pods ?? FIXTURES.nodeSchedulingPods;
+  const current = live.taints ?? [];
+  const requested = body.taints ?? [];
+
+  const identity = (t) => `${t.key}:${t.effect}`;
+  const have = new Map(current.map((t) => [identity(t), t]));
+  const want = new Map(requested.map((t) => [identity(t), t]));
+  const added = requested.filter((t) => !have.has(identity(t)));
+  const removed = current.filter((t) => !want.has(identity(t)));
+  const changed = requested
+    .filter((t) => have.has(identity(t)) && (have.get(identity(t)).value || '') !== (t.value || ''))
+    .map((t) => ({ before: have.get(identity(t)), after: t }));
+
+  const enforced = [...added, ...changed.map((c) => c.after)]
+    .filter((t) => t.effect === 'NoExecute');
+  const deleting = podsChecked ? deletionPlanFor(enforced, onNode) : null;
+  const unchanged = !added.length && !removed.length && !changed.length;
+
+  const consequences = [];
+  if (!unchanged) {
+    if (enforced.length && deleting === null) {
+      consequences.push({
+        code: 'taint_pods_unknown',
+        label: 'Which pods this deletes could not be worked out',
+        consequence:
+          'This change adds a NoExecute taint and the pod listing for this node failed, so ' +
+          'this console cannot tell you which pods those are. It is not reporting there are none.',
+        mitigation: 'Retry once the listing works, or read the node\'s pods another way.',
+      });
+    }
+    if (deleting && deleting.length) {
+      const delayed = deleting.filter((row) => row.delay_seconds > 0);
+      consequences.push({
+        code: 'taint_deletes_pods',
+        label: `${deleting.length} pod(s) on this node are deleted by this taint`,
+        consequence:
+          'That removal is a delete, not an eviction: it does not go through the ' +
+          'pods/eviction subresource, so PodDisruptionBudgets do not apply to it.',
+        mitigation: 'Drain the node instead if you want budgets honoured, or use NoSchedule.',
+      });
+      if (deleting.some((row) => row.controller === null)) {
+        consequences.push({
+          code: 'taint_deletes_unmanaged',
+          label: 'Some of them have no controller and will not come back anywhere',
+          consequence: 'A pod with no controller is deleted and that is the end of it.',
+          mitigation: 'Check whether any of them is holding something you need.',
+        });
+      }
+      if (deleting.some((row) => row.controller?.kind === 'DaemonSet')) {
+        consequences.push({
+          code: 'taint_deletes_daemonset',
+          label: 'DaemonSet pods are removed and not replaced here',
+          consequence:
+            'The DaemonSet controller tolerates the node\'s own condition taints and nothing ' +
+            'else, so its pods are deleted and not placed back while the taint stands.',
+          mitigation: 'Add a matching toleration to the DaemonSets that must keep running here.',
+        });
+      }
+      if (delayed.length) {
+        consequences.push({
+          code: 'taint_delayed_deletion',
+          label: `${delayed.length} of them go later, the first in ` +
+            `${Math.min(...delayed.map((row) => row.delay_seconds))}s`,
+          consequence:
+            'These pods carry a tolerationSeconds, so the node looks unaffected for as long as ' +
+            'that timer runs and then empties on its own.',
+          mitigation: 'Expect the node to keep changing after this write completes.',
+        });
+      }
+    }
+    if (removed.length) {
+      consequences.push({
+        code: 'taint_removed',
+        label: 'This node stops excluding work',
+        consequence: 'The scheduler stops treating this node as reserved.',
+        mitigation: 'Cordon the node first if you want the taint gone without new work arriving.',
+      });
+    }
+    if (removed.some((t) => String(t.key).startsWith('node-role.kubernetes.io/control-plane') ||
+                            String(t.key).startsWith('node-role.kubernetes.io/master'))) {
+      consequences.push({
+        code: 'taint_control_plane_opened',
+        label: 'This removes the taint that keeps ordinary workloads off a control-plane node',
+        consequence: 'Application pods will be placed alongside the API server and etcd.',
+        mitigation: 'On a cluster with worker nodes this is almost never what was intended.',
+      });
+    }
+  }
+
+  return {
+    name: live.name,
+    resourceVersion: '884213',
+    current,
+    requested,
+    added,
+    removed,
+    changed,
+    deleting,
+    pods_checked: podsChecked,
+    unavailable: podsChecked
+      ? []
+      : [{ group: '', resource: 'pods', reason: 'forbidden',
+           message: 'pods is forbidden at the cluster scope' }],
+    blocked: unchanged
+      ? { message: "This node's taints already match what you sent.",
+          hint: 'Change a taint, or nothing needs to happen.', context: {} }
+      : null,
+    consequences: unchanged ? [] : consequences,
+    gate: { enabled: true, detail: 'This deployment permits editing node taints.' },
+  };
+}
+
+/** §24's taint write: the §1.5 envelope plus the keys §24 adds. */
+export function taintWriteFor(body, options = {}) {
+  const plan = taintPlanFor(body, options);
+  return {
+    dryRun: body.dryRun !== false,
+    // Derived, never echoed: §1.5 makes `applied` the only evidence of a change.
+    applied: body.dryRun === false,
+    verb: 'patch',
+    target: { group: '', version: 'v1', resource: 'nodes', name: plan.name },
+    diff: {
+      unified:
+        '--- live\n+++ projected\n@@\n' +
+        plan.removed.map((t) => `-    - key: ${t.key}\n`).join('') +
+        plan.added.map((t) => `+    - key: ${t.key}\n`).join(''),
+      digest: 'sha256:taints',
+      changed: true,
+    },
+    resourceVersion: '884214',
+    warnings: [],
+    auditId: 5160,
+    current: plan.current,
+    requested: plan.requested,
+    deleting: plan.deleting,
+    pods_checked: plan.pods_checked,
+    unavailable: plan.unavailable,
+    consequences: plan.consequences,
+  };
+}
+
+/** §24's label plan, derived from the body the way the backend is. */
+export function labelPlanFor(body, { node = null, pods = null, podsChecked = true } = {}) {
+  const live = node ?? FIXTURES.nodeDetail;
+  const onNode = pods ?? FIXTURES.nodeSchedulingPods;
+  const current = live.labels ?? {};
+  const requested = body.labels ?? {};
+
+  const added = {};
+  const changed = {};
+  const removed = {};
+  for (const [key, value] of Object.entries(requested)) {
+    if (!(key in current)) added[key] = value;
+    else if (current[key] !== value) changed[key] = { before: current[key], after: value };
+  }
+  for (const [key, value] of Object.entries(current)) {
+    if (!(key in requested)) removed[key] = value;
+  }
+
+  const touched = [...new Set([...Object.keys(removed), ...Object.keys(changed)])].sort();
+  const named = [...new Set([...Object.keys(added), ...touched])].sort();
+  const dependents = podsChecked
+    ? onNode
+        .map((pod) => ({
+          namespace: pod.namespace, pod: pod.pod, controller: pod.controller,
+          keys: (pod.selectorKeys || []).filter((key) => touched.includes(key)),
+        }))
+        .filter((row) => row.keys.length)
+    : null;
+
+  const unchanged = !Object.keys(added).length && !Object.keys(changed).length &&
+    !Object.keys(removed).length;
+
+  const consequences = [];
+  if (!unchanged) {
+    if (Object.keys(removed).length) {
+      consequences.push({
+        code: 'label_removed',
+        label: `${Object.keys(removed).length} label(s) removed: ${Object.keys(removed).sort().join(', ')}`,
+        consequence:
+          'Nothing running on this node is disturbed by this. Node affinity is ' +
+          'requiredDuringSchedulingIgnoredDuringExecution, so pods scheduled here because of ' +
+          'these labels keep running exactly as they are.',
+        mitigation: 'The effect shows up at the next rollout rather than now.',
+      });
+    }
+    if (named.some((key) => key.startsWith('kubernetes.io/') || key.startsWith('topology.kubernetes.io/') ||
+                            key.startsWith('node.kubernetes.io/') || key.startsWith('beta.kubernetes.io/') ||
+                            key.startsWith('k8s.io/') || key.startsWith('node-role.kubernetes.io/'))) {
+      consequences.push({
+        code: 'label_reserved_prefix',
+        label: "This changes labels the cluster's own components own",
+        consequence:
+          'The kubelet re-applies some of these when it next registers and never re-applies ' +
+          'others, and this console cannot tell you which.',
+        mitigation: 'Prefer a label of your own for scheduling decisions.',
+      });
+    }
+    if (named.some((key) => key.startsWith('node-role.kubernetes.io/'))) {
+      consequences.push({
+        code: 'label_role_changed',
+        label: 'This changes what this node reports as its role',
+        consequence: 'It decides the ROLES column in `kubectl get nodes` and on this console.',
+        mitigation: 'If you are trying to stop work running here, a taint does that.',
+      });
+    }
+    if (touched.length && dependents === null) {
+      consequences.push({
+        code: 'label_pods_unknown',
+        label: 'Which pods depend on these labels could not be worked out',
+        consequence: 'The pod listing for this node failed. It is not reporting that none do.',
+        mitigation: 'Retry once the listing works.',
+      });
+    } else if (dependents && dependents.length) {
+      consequences.push({
+        code: 'label_pods_depend',
+        label: `${dependents.length} pod(s) here were placed by a rule naming these labels`,
+        consequence:
+          dependents.map((row) => `${row.namespace}/${row.pod}`).join(', ') +
+          ' declare a nodeSelector or required node affinity that mentions a key you are ' +
+          'changing. They keep running — the rule is not re-evaluated.',
+        mitigation: 'Check that each of them can be scheduled somewhere else.',
+      });
+    }
+  }
+
+  return {
+    name: live.name,
+    resourceVersion: '884213',
+    current,
+    requested,
+    added,
+    changed,
+    removed,
+    dependents,
+    pods_checked: podsChecked,
+    unavailable: podsChecked
+      ? []
+      : [{ group: '', resource: 'pods', reason: 'forbidden',
+           message: 'pods is forbidden at the cluster scope' }],
+    blocked: unchanged
+      ? { message: "This node's labels already match what you sent.",
+          hint: 'Change a label, or nothing needs to happen.', context: {} }
+      : null,
+    consequences: unchanged ? [] : consequences,
+    gate: { enabled: true, detail: 'This deployment permits editing node labels.' },
+  };
+}
+
+/** §24's label write: the §1.5 envelope plus the keys §24 adds. */
+export function labelWriteFor(body, options = {}) {
+  const plan = labelPlanFor(body, options);
+  return {
+    dryRun: body.dryRun !== false,
+    applied: body.dryRun === false,
+    verb: 'patch',
+    target: { group: '', version: 'v1', resource: 'nodes', name: plan.name },
+    diff: {
+      unified:
+        '--- live\n+++ projected\n@@\n' +
+        Object.keys(plan.removed).map((key) => `-    ${key}\n`).join('') +
+        Object.keys(plan.added).map((key) => `+    ${key}\n`).join(''),
+      digest: 'sha256:labels',
+      changed: true,
+    },
+    resourceVersion: '884214',
+    warnings: [],
+    auditId: 5161,
+    current: plan.current,
+    requested: plan.requested,
+    dependents: plan.dependents,
+    pods_checked: plan.pods_checked,
+    unavailable: plan.unavailable,
+    consequences: plan.consequences,
+  };
+}
+
 /** §21's write response: the §1.5 envelope plus the three keys §21 adds. */
 export function boundsWriteFor(body, { autoscaler = null } = {}) {
   const plan = boundsPlanFor(body, { autoscaler });
@@ -3035,6 +3394,18 @@ export async function mockApi(
     preflight = null,
     nodeDetail = null,
     nodeDebug = null,
+    // §24. `nodeSchedulingOptions` varies the node and its pods for the two
+    // derivations above; the four overrides replace them outright for the
+    // handful of specs that need a shape the derivation cannot produce.
+    nodeSchedulingOptions = null,
+    taintPlan = null,
+    taintWrite = null,
+    labelPlan = null,
+    labelWrite = null,
+    // Every §24 write the page made, in order. A spec asserting on the *body*
+    // is how "the whole list is sent, not a delta" and "a removed label goes as
+    // an explicit null" are checked from outside the component.
+    nodeSchedulingWrites = [],
     nodeDebugCreate = null,
     nodeDebugDeletes = [],
     cli = null,
@@ -3385,6 +3756,27 @@ export async function mockApi(
         warnings: [],
         auditId: 5151,
       });
+    }
+    // §24. Ordered before the node detail branch below: every one of these
+    // lives under /nodes/…, and a router matching the detail first would answer
+    // a taint plan with a node object.
+    if (/^\/nodes\/[^/]+\/taints\/plan$/.test(path)) {
+      const body = JSON.parse(route.request().postData() || '{}');
+      return json(taintPlan ? taintPlan(body) : taintPlanFor(body, nodeSchedulingOptions ?? {}));
+    }
+    if (/^\/nodes\/[^/]+\/taints$/.test(path)) {
+      const body = JSON.parse(route.request().postData() || '{}');
+      nodeSchedulingWrites.push({ kind: 'taints', body });
+      return json(taintWrite ? taintWrite(body) : taintWriteFor(body, nodeSchedulingOptions ?? {}));
+    }
+    if (/^\/nodes\/[^/]+\/labels\/plan$/.test(path)) {
+      const body = JSON.parse(route.request().postData() || '{}');
+      return json(labelPlan ? labelPlan(body) : labelPlanFor(body, nodeSchedulingOptions ?? {}));
+    }
+    if (/^\/nodes\/[^/]+\/labels$/.test(path)) {
+      const body = JSON.parse(route.request().postData() || '{}');
+      nodeSchedulingWrites.push({ kind: 'labels', body });
+      return json(labelWrite ? labelWrite(body) : labelWriteFor(body, nodeSchedulingOptions ?? {}));
     }
     if (/^\/nodes\/[^/]+$/.test(path)) return json(nodeDetail ?? FIXTURES.nodeDetail);
     // §6's scale, with §21's `governedBy`. Mocked here rather than in a spec

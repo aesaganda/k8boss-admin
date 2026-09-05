@@ -140,7 +140,7 @@ def _warnings_from(headers: Any) -> list[str]:
     return [w for w in parsed if w]
 
 
-def _read_node(name: str) -> dict[str, Any]:
+def read_node(name: str) -> dict[str, Any]:
     """The live node as a trimmed dict, for the ``before`` side of the diff.
 
     Trimmed of ``managedFields``, which on a node reconciled by a cloud
@@ -209,7 +209,7 @@ def _post_eviction(namespace: str, name: str, grace_period_seconds: int | None) 
     )
 
 
-def _list_node_pods(node_name: str) -> list[Any]:
+def list_node_pods(node_name: str) -> list[Any]:
     """Every pod the API server says is on this node."""
     with _api_errors(verb="list", group="", resource="pods", name=node_name):
         listing = get_core_v1().list_pod_for_all_namespaces(
@@ -241,7 +241,7 @@ def _pdb_index(unavailable: list[dict[str, Any]]) -> dict[str, list[dict[str, An
 # The plan
 # --------------------------------------------------------------------------- #
 
-def _controller_ref(pod: Any) -> Any | None:
+def controller_ref(pod: Any) -> Any | None:
     """The ownerReference that will recreate this pod, or None if nothing will."""
     for ref in shaping.get_field(pod, "metadata", "ownerReferences", default=[]) or []:
         if shaping.get_field(ref, "controller") is True:
@@ -318,7 +318,7 @@ def classify_pod(
     """
     namespace = shaping.get_field(pod, "metadata", "namespace")
     name = shaping.get_field(pod, "metadata", "name")
-    controller = _controller_ref(pod)
+    controller = controller_ref(pod)
     entry: dict[str, Any] = {
         "namespace": namespace,
         "pod": name,
@@ -448,7 +448,7 @@ def cordon_node(name: str, unschedulable: bool, dry_run: bool) -> dict[str, Any]
     operator investigating a bad node wants to stop the bleeding without
     disturbing what is up.
     """
-    before = _read_node(name)
+    before = read_node(name)
     was = bool(shaping.get_field(before, "spec", "unschedulable", default=False))
     target = bool(unschedulable)
 
@@ -499,7 +499,7 @@ def drain_node(
     "we wrote to the cluster" and that is true of a drain that failed on half its
     pods. The UI headline hangs off ``drained``.
     """
-    before = _read_node(name)
+    before = read_node(name)
     # apply_fn owns the plan and the results; this is how they get back out to
     # the response, since mutate's contract is about the object being changed.
     outcome: dict[str, Any] = {}
@@ -513,7 +513,7 @@ def drain_node(
 
         unavailable: list[dict[str, Any]] = []
         budgets = _pdb_index(unavailable)
-        pods = _list_node_pods(name)
+        pods = list_node_pods(name)
         plan = build_plan(
             pods,
             ignore_daemonsets=ignore_daemonsets,
@@ -703,6 +703,9 @@ __all__ = [
     "MIRROR_POD_ANNOTATION",
     "build_plan",
     "classify_pod",
+    "controller_ref",
     "cordon_node",
     "drain_node",
+    "list_node_pods",
+    "read_node",
 ]

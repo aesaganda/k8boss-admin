@@ -3801,3 +3801,210 @@ stronger, so it is absent rather than caveated.
 returns a rule list, but only for the caller — there is no such API for another
 subject. Asking fifty questions is asking fifty questions, which is why the
 batch is bounded rather than open-ended.
+
+---
+
+## 24. Node taints and labels — the two fields that decide what runs here
+
+### 24.1 Why this is not "edit the node YAML"
+
+Both writes are small, and §4's editor can already send either. What the editor
+cannot do is answer the question that decides whether an operator has written a
+scheduling rule or caused an outage, and there are three of those questions.
+
+**`NoExecute` is not a stronger `NoSchedule`.** `NoSchedule` and
+`PreferNoSchedule` are consulted when the scheduler is *placing* a pod: adding
+one moves nothing that is already running. `NoExecute` is evaluated against the
+pods that are already there, and the ones that do not tolerate it are removed by
+the taint manager in kube-controller-manager. In a form the three are three
+entries in one dropdown.
+
+**That removal is a delete, not an eviction.** §5's drain goes through the
+`pods/eviction` subresource, which is where PodDisruptionBudgets are enforced.
+This console says so in the drain dialog, in `docs/safety-model.md`, and in the
+sentence telling operators that `force` will not get them past a budget. **The
+taint manager does not use that subresource, so a `NoExecute` taint takes an
+application below its budget without being refused** — from a dialog two clicks
+away from the one that has been teaching the opposite. §24 states that as a
+consequence the operator acknowledges by name, not as a note beside a form.
+
+**A label change evicts nothing, and that is the trap.** Node affinity is
+`requiredDuringSchedulingIgnoredDuringExecution`; the rule is checked when a pod
+is placed and never again. Removing a label a running pod's `nodeSelector`
+requires does not disturb that pod at all — it changes where it can be placed
+*next*, which is discovered during a rollout by somebody who was not here.
+
+### 24.2 `POST /api/nodes/{name}/taints/plan`
+
+```json
+{ "taints": [ { "key": "dedicated", "value": "gpu", "effect": "NoExecute" } ] }
+```
+
+**The whole list on every request**, including the taints that are not changing.
+`spec.taints` is an atomic list in the Kubernetes API — a patch replaces it
+outright — so there is no add-one operation to expose, and inventing one would
+mean this console reconstructing the list from a delta and the operator
+confirming a diff built from an assumption rather than from what they sent. An
+empty list removes every taint.
+
+`effect` is one of `NoSchedule`, `PreferNoSchedule`, `NoExecute`. The uniqueness
+rule is the **`(key, effect)` pair**, not the key: `dedicated=a:NoSchedule` and
+`dedicated=b:NoExecute` are both legal on one node.
+
+The response:
+
+```json
+{
+  "name": "ip-10-0-1-4",
+  "resourceVersion": "884213",
+  "current":  [ … ],
+  "requested": [ … ],
+  "added":   [ … ],
+  "removed": [ … ],
+  "changed": [ { "before": { … }, "after": { … } } ],
+  "deleting": [
+    { "namespace": "prod", "pod": "checkout-7c9",
+      "controller": { "kind": "ReplicaSet", "name": "checkout-7c9" },
+      "taint": { "key": "dedicated", "value": "gpu", "effect": "NoExecute" },
+      "delay_seconds": 0 }
+  ],
+  "pods_checked": true,
+  "unavailable": [],
+  "blocked": null,
+  "consequences": [ … ],
+  "gate": { "enabled": true, "detail": "…" }
+}
+```
+
+Ungated and unaudited: two reads and set arithmetic. It does **not** dry-run the
+patch — a dry run is a write request the caller has not made yet, and it needs
+the preflight the funnel does.
+
+`changed` is a category of its own rather than a removal plus an addition,
+because it behaves like one: a taint whose *value* moves is still one taint to
+the API server, and a pod tolerating the old value with `operator: Equal` stops
+tolerating the new one. **A value edit deletes pods exactly as a new taint
+does**, which is not what "changed" sounds like.
+
+`deleting` is `null` — never `[]` — when the node's pod listing failed, with the
+reason in `unavailable[]` and `pods_checked: false`. §0.1's corollary applies to
+the most destructive write in this document: an empty list renders as "this taint
+deletes nothing" over a node nobody counted.
+
+`delay_seconds` is a **real zero** when the pod does not tolerate the taint — the
+taint manager removes it as soon as the taint is written, and nothing was left
+unread to produce that number. A pod whose matching toleration carries a
+`tolerationSeconds` gets that value instead and is still on the list: it is
+going, later. That third state is why the field is not a boolean. The node looks
+entirely healthy for five minutes and then empties.
+
+**An unbounded toleration wins outright.** The taint manager takes the minimum
+`tolerationSeconds` over the tolerations that match a taint and treats a matching
+toleration with none as infinite, so one unbounded match means the pod stays,
+however many bounded ones sit beside it.
+
+A request that changes nothing answers `200` with `blocked` set rather than
+`422`, as §20's and §21's plans do: this is the screen where the taints are
+*decided*, and an error alone would withhold the current list at the moment it is
+the fact needed to pick a different one. `blocked` and `consequences` are never
+both populated.
+
+### 24.3 `PUT /api/nodes/{name}/taints`
+
+The plan's body plus `dryRun` (defaulting to true, §0.3) and
+`acknowledgeConsequences`. `PUT` because §0.4 applies: the caller sends the
+`resourceVersion` they were looking at, it is checked here — which is what
+produces a `409 conflict` carrying `context.currentResourceVersion` and
+`context.currentTaints` — and it rides inside the merge patch, so the API server
+refuses a stale write too.
+
+Order of refusals, each before the cluster is touched: request validation, the
+node read (which must answer), the concurrency check, the no-op check recomputed
+against the node as it is *now*, and the acknowledgement check over consequences
+recomputed the same way. Consequences are **never trusted from the plan**: pods
+arrive on a node on their own, so "this deletes two pods" can be a different
+number by the time the write lands, and what the operator must have accepted is
+the one that is true at write time.
+
+Through `mutate()` like every other write: gate (`ADMIN_ALLOW_MUTATIONS` alone —
+drain carries no switch of its own either, and a second gate on the lesser action
+would say the reverse of what is true), preflight `patch core/nodes`, `dryRun=All`
+on a preview, diff, audit.
+
+The §1.5 response gains `current`, `requested`, `deleting`, `pods_checked`,
+`unavailable` and `consequences`.
+
+**`applied: true` means the taint list on the node is what you sent.** It does
+not mean any pod has gone. The taint manager acts on its own schedule and a pod
+with a `tolerationSeconds` is still running by design, so the node is not empty
+and the response does not say it is.
+
+### 24.4 Consequence codes — taints
+
+| Code | When |
+|---|---|
+| `taint_deletes_pods` | A `NoExecute` taint being added or re-valued removes pods running here. Carries the sentence that PodDisruptionBudgets do not apply |
+| `taint_deletes_unmanaged` | Some of them have no controller — deleted and gone, here and everywhere |
+| `taint_deletes_daemonset` | Some are DaemonSet-managed. The DaemonSet controller tolerates the node's own *condition* taints and nothing else, so a taint you write removes its pods and it will not place them back while the taint stands. Usually log shipping, the CNI agent or node metrics |
+| `taint_delayed_deletion` | Some tolerate it only for a bounded time and go when the timer expires |
+| `taint_pods_unknown` | A `NoExecute` taint is being added **and** the pod listing failed. The one case where the console cannot say what the button does |
+| `taint_removed` | The node stops excluding work it was reserved against |
+| `taint_control_plane_opened` | `node-role.kubernetes.io/control-plane` (or the pre-1.24 `master`) is being removed, so application pods will be scheduled alongside the API server and etcd |
+
+### 24.5 `POST /api/nodes/{name}/labels/plan` and `PUT /api/nodes/{name}/labels`
+
+```json
+{ "labels": { "team": "payments", "disktype": "ssd" } }
+```
+
+**The complete map**, for the same reason the taint list is complete: a key the
+caller leaves out is a key this removes. A patch of only what changed cannot
+express a removal without a second field, and a form whose "delete" list is
+separate from its "set" map is a form where the two disagree.
+
+Values are strings. A number or a boolean is refused here as `422 invalid`
+naming the key, rather than by the API server, which refuses it with a schema
+error naming a type.
+
+The plan returns `current`, `requested`, `added`, `changed` (`{before, after}`
+per key), `removed`, `dependents`, `pods_checked`, `unavailable`, `blocked`,
+`consequences` and `gate`.
+
+`dependents` names the pods **on this node** whose `spec.nodeSelector` or whose
+required node affinity mentions a key being removed or re-valued — keys only, no
+evaluation. Evaluating the rule would be a second and more confident claim:
+nothing is re-checked for a running pod, so the verdict would describe a
+placement that already happened. `null`, never `[]`, when the pod listing failed.
+
+The write carries the same refusal order as §24.3, the same `PUT` concurrency
+rule (`context.currentLabels` on a `409`), and the same gate. A removed key is
+sent to the API server as an explicit `null` inside the merge patch: a merge
+patch over a map *merges*, so a key the caller dropped would survive untouched.
+
+**`applied: true` means the labels are stored, and nothing else.** No pod moves
+because of this write.
+
+### 24.6 Consequence codes — labels
+
+| Code | When |
+|---|---|
+| `label_removed` | Keys are being removed. States that nothing running is evicted, and that the effect appears at the next rollout |
+| `label_reserved_prefix` | A `kubernetes.io/`-family key is being added, removed or re-valued. The kubelet re-applies some of these when it next registers and never re-applies others, and which is which depends on its flags and on a cloud provider no API here reports — so the console says it cannot tell you. `topology.kubernetes.io/zone` is named specifically: volume topology is matched against it |
+| `label_role_changed` | A `node-role.kubernetes.io/*` key is being added, removed or re-valued, changing the ROLES column in `kubectl get nodes` and on §5's node list. Both directions, because a role appearing is as much a change as one disappearing. It grants and removes nothing — a node-role label is a label |
+| `label_pods_depend` | Pods here were placed by a rule naming a key that is changing |
+| `label_pods_unknown` | Keys are changing **and** the pod listing failed |
+
+### 24.7 What §24 is not
+
+**It does not move a workload.** Removing a label that a Deployment's
+`nodeSelector` names leaves every one of its pods exactly where they are. Drain
+moves pods; a label change changes where the scheduler will put them next.
+
+**It does not defeat a PodDisruptionBudget on purpose.** A `NoExecute` taint
+bypasses budgets because of how Kubernetes implements taint-based removal, not
+because this console offers a way around them. There is no flag here that turns
+that off and none that turns it on, which is why the fact is disclosed rather
+than made configurable.
+
+**It does not report whether a removed label comes back.** The kubelet's
+re-registration behaviour is not visible through any API this console reads.

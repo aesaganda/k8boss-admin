@@ -406,6 +406,18 @@ def node_row(
             }
             for taint in shaping.get_field(node, "spec", "taints", default=[]) or []
         ],
+        # §24. `{}` here is a real empty map: the node was read, and a node with
+        # no labels at all is a node the kubelet has not registered normally —
+        # which is a fact worth seeing rather than a gap. `roles` above is
+        # derived from this same map and stays, because it is the answer most
+        # pages want and re-deriving it in the browser would be a second
+        # implementation of a rule the API does not state anywhere.
+        "labels": {
+            str(key): str(value)
+            for key, value in (
+                shaping.get_field(node, "metadata", "labels", default={}) or {}
+            ).items()
+        },
     }
 
 

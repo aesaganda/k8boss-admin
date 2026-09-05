@@ -518,6 +518,46 @@ export const nodes = {
   drain: (name, body) => api.post(`/nodes/${encodeURIComponent(name)}/drain`, body),
 
   /**
+   * §24 — what changing this node's taints would do, before anything is sent.
+   * body: `{ taints, resourceVersion }`.
+   *
+   * `deleting` is the list of pods a NoExecute taint removes, and it is `null`
+   * — never `[]` — when the node's pod listing failed; `pods_checked` says
+   * which happened. An empty list means the taint removes nothing. A null means
+   * nobody counted, and the plan carries a consequence saying so.
+   */
+  taintPlan: (name, body) =>
+    api.post(`/nodes/${encodeURIComponent(name)}/taints/plan`, body),
+
+  /**
+   * §24 — replace the node's taints. body:
+   * `{ taints, resourceVersion, acknowledgeConsequences, dryRun }`.
+   *
+   * The whole list, not a delta: `spec.taints` is atomic in the API, so a patch
+   * replaces it outright.
+   */
+  setTaints: (name, body) => api.put(`/nodes/${encodeURIComponent(name)}/taints`, body),
+
+  /**
+   * §24 — what changing this node's labels would do. body:
+   * `{ labels, resourceVersion }`.
+   *
+   * `dependents` names the pods on this node placed by a rule that mentions a
+   * key being removed. They are not evicted by the change — node affinity is
+   * IgnoredDuringExecution — which is exactly why they are worth naming.
+   */
+  labelPlan: (name, body) =>
+    api.post(`/nodes/${encodeURIComponent(name)}/labels/plan`, body),
+
+  /**
+   * §24 — replace the node's labels. body:
+   * `{ labels, resourceVersion, acknowledgeConsequences, dryRun }`.
+   *
+   * The whole map: a key left out is a key this removes.
+   */
+  setLabels: (name, body) => api.put(`/nodes/${encodeURIComponent(name)}/labels`, body),
+
+  /**
    * Debug pods this console created for one node (§5.5).
    *
    * The envelope carries `enabled` — this deployment's two gates answered
