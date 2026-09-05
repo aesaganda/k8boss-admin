@@ -33,6 +33,8 @@ import {
 } from '../components/ui';
 import CordonDialog from '../components/CordonDialog';
 import DrainDialog from '../components/DrainDialog';
+import NodeTaintsDialog from '../components/NodeTaintsDialog';
+import NodeLabelsDialog from '../components/NodeLabelsDialog';
 import { nodes as nodesApi } from '../api/client';
 import { useCluster } from '../contexts/ClusterContext';
 import { formatBytes, formatCpu } from '../utils/format';
@@ -69,6 +71,8 @@ export default function NodeDetail() {
   const { activeClusterId } = useCluster();
   const [cordonOpen, setCordonOpen] = useState(false);
   const [drainOpen, setDrainOpen] = useState(false);
+  const [taintsOpen, setTaintsOpen] = useState(false);
+  const [labelsOpen, setLabelsOpen] = useState(false);
   // `{ pod, tab }` — which pod's console is open and which half of it.
   const [podConsole, setPodConsole] = useState(null);
 
@@ -150,6 +154,16 @@ export default function NodeDetail() {
           <ActionButton key="drain" gate={gate('drain')} isDanger onClick={() => setDrainOpen(true)}>
             Drain…
           </ActionButton>,
+          // §24. Both reuse the cordon gate deliberately: the permission is
+          // byte-identical (`patch core/nodes`), and a second check would ask
+          // the API server the same question a third time per page load to
+          // produce the same answer under a different name.
+          <ActionButton key="taints" gate={gate('cordon')} onClick={() => setTaintsOpen(true)}>
+            Taints…
+          </ActionButton>,
+          <ActionButton key="labels" gate={gate('cordon')} onClick={() => setLabelsOpen(true)}>
+            Labels…
+          </ActionButton>,
         ]}
       />
 
@@ -181,6 +195,39 @@ export default function NodeDetail() {
                             ? 'spec.unschedulable is true. Pods already running here are untouched; only new scheduling is blocked.'
                             : undefined
                         }
+                      />
+                    ),
+                  },
+                  {
+                    label: 'Taints',
+                    value: (
+                      <ChipList
+                        values={(node.taints ?? []).map(
+                          (taint) =>
+                            `${taint.key}${taint.value ? `=${taint.value}` : ''}:${taint.effect}`,
+                        )}
+                        max={4}
+                        color={
+                          // A NoExecute taint is the one that removes running
+                          // pods, so it does not share a colour with the two
+                          // that only steer new placement.
+                          (node.taints ?? []).some((taint) => taint.effect === 'NoExecute')
+                            ? 'red'
+                            : 'grey'
+                        }
+                        emptyText="none"
+                      />
+                    ),
+                  },
+                  {
+                    label: 'Labels',
+                    value: (
+                      <ChipList
+                        values={Object.entries(node.labels ?? {}).map(
+                          ([key, value]) => (value ? `${key}=${value}` : key),
+                        )}
+                        max={4}
+                        emptyText="none"
                       />
                     ),
                   },
@@ -337,6 +384,32 @@ export default function NodeDetail() {
             setDrainOpen(false);
             reload();
           }}
+        />
+      )}
+
+      {taintsOpen && (
+        <NodeTaintsDialog
+          name={name}
+          onClose={() => setTaintsOpen(false)}
+          // Reload, but do not close — unlike Cordon and Drain above. §24's
+          // summary is the sentence an operator needs *after* the write: that
+          // the taints are stored and that pods leave on the taint manager's
+          // own schedule, so the node is not empty yet. Unmounting on success
+          // would throw that away and leave a toast carrying only the headline.
+          onApplied={reload}
+        />
+      )}
+
+      {labelsOpen && (
+        <NodeLabelsDialog
+          name={name}
+          onClose={() => setLabelsOpen(false)}
+          // Reload, but do not close — unlike Cordon and Drain above. §24's
+          // summary is the sentence an operator needs *after* the write: that
+          // the taints are stored and that pods leave on the taint manager's
+          // own schedule, so the node is not empty yet. Unmounting on success
+          // would throw that away and leave a toast carrying only the headline.
+          onApplied={reload}
         />
       )}
 

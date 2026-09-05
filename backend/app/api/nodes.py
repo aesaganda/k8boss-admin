@@ -24,6 +24,13 @@ defaults are the safety argument:
   ``terminationGracePeriodSeconds``". A number here overrides what the
   application asked for, and ``0`` is an immediate SIGKILL — neither is something
   to arrive at by default.
+
+§24's four endpoints add the same shape one layer along: a plan that is a read,
+and a ``PUT`` that carries the consequences the operator accepted. Neither the
+taint list nor the label map is validated by pydantic beyond its container type,
+on purpose — :mod:`app.admin.node_scheduling` refuses them with sentences that
+name the effect and say what ``NoExecute`` does, which a schema error over a list
+index cannot.
 """
 
 from __future__ import annotations
@@ -35,7 +42,7 @@ from fastapi import APIRouter, Path, Query
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.api.bodies import MutationBody
-from app.admin import node_debug
+from app.admin import node_debug, node_scheduling
 from app.admin.nodes import cordon_node, drain_node
 from app.services.nodes import get_node, list_nodes
 
@@ -184,6 +191,137 @@ def drain(name: str, body: DrainRequest) -> dict[str, Any]:
         ignore_daemonsets=body.ignore_daemonsets,
         delete_emptydir_data=body.delete_emptydir_data,
         force=body.force,
+    )
+
+
+class TaintPlanRequest(BaseModel):
+    """The complete taint list the node should end up with."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    taints: list[dict[str, Any]] = Field(
+        ...,
+        description=(
+            "Every taint the node should carry afterwards, as "
+            "{key, value, effect}. The whole list, not a delta: spec.taints is "
+            "an atomic list in the API, so a patch replaces it outright and "
+            "there is no add-one operation to expose. An empty list removes "
+            "every taint."
+        ),
+    )
+    resourceVersion: str | None = Field(  # noqa: N815
+        None,
+        description=(
+            "The node's resourceVersion as read. Sent back on the write, where "
+            "it rides inside the merge patch and §0.4 is enforced twice."
+        ),
+    )
+
+
+class TaintRequest(MutationBody, TaintPlanRequest):
+    """The plan's body plus the two fields that make it a write."""
+
+    acknowledgeConsequences: list[str] = Field(  # noqa: N815
+        default_factory=list,
+        description=(
+            "Every consequence code the plan returned, named. Recomputed "
+            "server-side against the node as it is at write time — pods arrive "
+            "and leave on their own, so 'this deletes two pods' can be a "
+            "different number by the time the write lands."
+        ),
+    )
+
+
+class LabelPlanRequest(BaseModel):
+    """The complete label map the node should end up with."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    labels: dict[str, Any] = Field(
+        ...,
+        description=(
+            "Every label the node should carry afterwards. The whole map: a key "
+            "left out is a key this removes. Values are strings — a number or a "
+            "boolean is refused here rather than by the API server, which names "
+            "a type instead of the key."
+        ),
+    )
+    resourceVersion: str | None = Field(  # noqa: N815
+        None, description="The node's resourceVersion as read. See TaintPlanRequest.",
+    )
+
+
+class LabelRequest(MutationBody, LabelPlanRequest):
+    """The plan's body plus the two fields that make it a write."""
+
+    acknowledgeConsequences: list[str] = Field(  # noqa: N815
+        default_factory=list,
+        description="Every consequence code the plan returned, named.",
+    )
+
+
+@router.post("/nodes/{name}/taints/plan")
+def get_taint_plan(request: TaintPlanRequest, name: str) -> dict[str, Any]:
+    """§24 — the taint diff, and which pods a NoExecute taint would delete.
+
+    Ungated and unaudited: two reads and set arithmetic. It writes nothing and
+    does not dry-run the patch — a dry run is a write request the caller has not
+    made yet.
+
+    ``deleting`` is ``null``, never ``[]``, when the node's pod listing failed,
+    and ``pods_checked`` says which of the two happened. An empty list here means
+    the taint removes nothing; a null means nobody counted.
+    """
+    return node_scheduling.plan_taints(name, request.model_dump(by_alias=True))
+
+
+@router.put("/nodes/{name}/taints")
+def set_taints(request: TaintRequest, name: str) -> dict[str, Any]:
+    """§24 — replace the node's taints, through the funnel. §1.5 response.
+
+    ``PUT`` because §0.4 applies: the caller sends the version they were looking
+    at, it is checked here — which is what produces a `409` carrying the taints
+    as they are *now* — and it rides inside the merge patch, so the API server
+    refuses a stale write too.
+
+    **`applied: true` means the taint list is stored**, not that any pod has
+    gone. The taint manager removes pods on its own schedule, and a pod with a
+    ``tolerationSeconds`` is still running by design; ``deleting`` in the same
+    response says who is on the way out.
+    """
+    return node_scheduling.set_taints(
+        name,
+        request.model_dump(by_alias=True, exclude={"acknowledgeConsequences", "dry_run"}),
+        dry_run=request.dry_run,
+        acknowledge_consequences=request.acknowledgeConsequences,
+    )
+
+
+@router.post("/nodes/{name}/labels/plan")
+def get_label_plan(request: LabelPlanRequest, name: str) -> dict[str, Any]:
+    """§24 — the label diff, and the pods placed here by a rule that names a key.
+
+    Ungated and unaudited. ``dependents`` is ``null`` when the pod listing
+    failed, for the reason ``deleting`` is on the taint plan.
+    """
+    return node_scheduling.plan_labels(name, request.model_dump(by_alias=True))
+
+
+@router.put("/nodes/{name}/labels")
+def set_labels(request: LabelRequest, name: str) -> dict[str, Any]:
+    """§24 — replace the node's labels, through the funnel. §1.5 response.
+
+    **Nothing is evicted by this write, and that is the thing to know.** Node
+    affinity is ``requiredDuringSchedulingIgnoredDuringExecution``: the rule is
+    checked when a pod is placed and never again, so pods scheduled here by a
+    label you are removing keep running unchanged. What changes is where they can
+    go next time, which is discovered at the next rollout.
+    """
+    return node_scheduling.set_labels(
+        name,
+        request.model_dump(by_alias=True, exclude={"acknowledgeConsequences", "dry_run"}),
+        dry_run=request.dry_run,
+        acknowledge_consequences=request.acknowledgeConsequences,
     )
 
 

@@ -458,6 +458,14 @@ rules:
 
   # §5 cordon and drain, node half. `patch nodes` sets spec.unschedulable. Note
   # this grants cordon of ANY node, including control-plane nodes.
+  #
+  # §24's taints and labels ride on this same rule and need nothing else, which
+  # is the part to read twice before granting it: the verb that cordons a node
+  # also writes a NoExecute taint, and that taint DELETES the pods which do not
+  # tolerate it. It does not go through pods/eviction, so the budget rule below
+  # is no part of the permission and no PodDisruptionBudget refuses it. An
+  # account trusted to cordon is, on this API, already trusted to empty the
+  # machine — see docs/safety-model.md §15.
   - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["patch", "update"]

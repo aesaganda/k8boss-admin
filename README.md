@@ -448,6 +448,21 @@ version being that there is no undo for a deleted StatefulSet.
   for StatefulSets and DaemonSets. A kind with no revision concept says so rather
   than returning an empty list.
 * Cordon, uncordon and drain.
+* **A node's taints and labels, with the pods a taint deletes** — `NoSchedule`
+  and `PreferNoSchedule` steer where new work is placed and move nothing;
+  `NoExecute` removes the pods already running that do not tolerate it, and the
+  three are three entries in one dropdown. So the preview names those pods
+  before the confirming call, says which go at once and which carry a
+  `tolerationSeconds` and go later — a node that looks fine for five minutes and
+  then empties — and states the thing this console had otherwise taught the
+  opposite of: **that removal is a delete, not an eviction, so a
+  PodDisruptionBudget does not refuse it**, unlike drain. A pod listing that
+  failed makes the deletion list `null` rather than empty, and the operator has
+  to acknowledge by name that the console cannot say what the button does.
+  Labels get the mirror-image preview: nothing is evicted by a label change,
+  because node affinity is `requiredDuringSchedulingIgnoredDuringExecution` —
+  what changes is where those pods can go *next*, so the pods placed here by a
+  rule naming a key you are removing are listed as exactly that. See §24.
 * Create, edit and delete NetworkPolicies, from a default-deny starter manifest —
   through the same dry-run-then-confirm funnel as every other write, so the diff
   is shown before a segmentation change reaches a cluster.

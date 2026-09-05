@@ -561,6 +561,130 @@ def ingress_row(obj: Any) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- #
+# §24 — taints and tolerations
+# --------------------------------------------------------------------------- #
+
+#: The three effects ``core/v1.Taint`` accepts.
+#:
+#: They are not three degrees of the same thing. ``NoSchedule`` and
+#: ``PreferNoSchedule`` are rules the scheduler consults when it is *placing* a
+#: pod, so adding one moves nothing that is already running. ``NoExecute`` is
+#: evaluated against pods that are already there, and the ones that do not
+#: tolerate it are removed. In a form they are three entries in one dropdown.
+TAINT_EFFECTS = ("NoSchedule", "PreferNoSchedule", "NoExecute")
+
+#: The effect that touches running pods. Named because the difference between it
+#: and the other two is the entire risk of §24's taint write.
+EFFECT_NO_EXECUTE = "NoExecute"
+
+
+def toleration_tolerates_taint(toleration: Any, taint: Any) -> bool:
+    """Does one ``Toleration`` tolerate one ``Taint``? The API server's own rules.
+
+    Reproduced here rather than approximated, because the answer decides which
+    pods §24 reports as being deleted by a taint, and a matcher that erred either
+    way would be wrong in a way that reads as certainty. Two rules are the ones
+    an approximation gets wrong:
+
+    * **An empty ``effect`` matches every effect.** A toleration that names a key
+      and no effect tolerates that taint whether it is ``NoSchedule`` or
+      ``NoExecute``. Treating a blank field as "no match" would report pods as
+      being deleted that are not going anywhere.
+    * **An empty ``key`` is a wildcard only with ``Exists``.** ``{operator:
+      Exists}`` with no key tolerates *everything*, which is what a DaemonSet
+      that must run on every node writes and what §5.5's debug pod carries. With
+      any other operator the API server rejects it, so it is not treated as a
+      wildcard here either.
+
+    ``operator`` defaults to ``Equal`` when absent, as the API does.
+    """
+    effect = get_field(toleration, "effect")
+    if effect and effect != get_field(taint, "effect"):
+        return False
+
+    key = get_field(toleration, "key")
+    operator = get_field(toleration, "operator") or "Equal"
+    if not key:
+        return operator == "Exists"
+    if key != get_field(taint, "key"):
+        return False
+    if operator == "Exists":
+        return True
+    # `Equal` compares values, and an absent value is the empty string on both
+    # sides — a taint with no value is tolerated by a toleration with no value.
+    return (get_field(toleration, "value") or "") == (get_field(taint, "value") or "")
+
+
+def taint_tolerated_by(pod: Any, taint: Any) -> tuple[bool, int | None]:
+    """``(tolerated, seconds)`` — how one pod stands against one taint.
+
+    ``seconds`` is what makes this a triple rather than a boolean, and it is the
+    case an operator does not expect:
+
+    * ``(False, None)`` — the pod does not tolerate the taint. Under
+      ``NoExecute`` it is deleted as soon as the taint is written.
+    * ``(True, None)`` — tolerated with no time limit. The pod stays.
+    * ``(True, 300)`` — tolerated for 300 seconds and then deleted anyway. The
+      node looks completely fine for five minutes and then empties, which is
+      what every pod carrying the default ``node.kubernetes.io/not-ready``
+      toleration does.
+
+    **An unbounded toleration wins outright.** The taint manager takes the
+    minimum ``tolerationSeconds`` over the tolerations that match, and treats a
+    matching toleration with none as infinite — so one unbounded match means the
+    pod stays, however many bounded ones sit beside it.
+    """
+    tolerated = False
+    minimum: int | None = None
+    for toleration in get_field(pod, "spec", "tolerations", default=[]) or []:
+        if not toleration_tolerates_taint(toleration, taint):
+            continue
+        tolerated = True
+        seconds = get_field(toleration, "tolerationSeconds")
+        if isinstance(seconds, bool) or not isinstance(seconds, int):
+            # Absent, which is the common case, or a type the API server's
+            # schema does not permit. Either way there is no deadline to report.
+            return True, None
+        seconds = max(0, seconds)
+        minimum = seconds if minimum is None else min(minimum, seconds)
+    return tolerated, minimum
+
+
+def node_label_dependencies(pod: Any) -> list[str]:
+    """The node-label keys this pod's placement rules name, sorted and deduped.
+
+    Keys only — no evaluation. The question §24 asks is "which pods were placed
+    here by a rule that mentions the label you are removing", and answering it
+    needs the key, not the verdict. Evaluating the rule would be a second, more
+    confident claim: node affinity is
+    ``requiredDuringSchedulingIgnoredDuringExecution``, so nothing is re-checked
+    once a pod is running, and a pod whose rule no longer matches keeps running
+    exactly as before. What changes is the *next* placement.
+
+    Both sources are read because they are written interchangeably:
+    ``spec.nodeSelector`` and required node affinity's ``matchExpressions`` and
+    ``matchFields``. Preferred affinity is deliberately left out — it is a
+    tie-breaker, and reporting it beside a hard requirement would overstate what
+    removing the label costs.
+    """
+    keys: set[str] = set()
+    for key in (get_field(pod, "spec", "nodeSelector", default={}) or {}):
+        keys.add(str(key))
+
+    required = get_field(
+        pod, "spec", "affinity", "nodeAffinity",
+        "requiredDuringSchedulingIgnoredDuringExecution",
+    )
+    for term in get_field(required, "nodeSelectorTerms", default=[]) or []:
+        for field in ("matchExpressions", "matchFields"):
+            for expression in get_field(term, field, default=[]) or []:
+                key = get_field(expression, "key")
+                if key:
+                    keys.add(str(key))
+    return sorted(keys)
+
+
+# --------------------------------------------------------------------------- #
 # §8 — network policy
 # --------------------------------------------------------------------------- #
 
@@ -1638,8 +1762,10 @@ def shaper_for(group: str, plural: str) -> Callable[[Any], dict[str, Any]] | Non
 
 
 __all__ = [
+    "EFFECT_NO_EXECUTE",
     "LAST_APPLIED_ANNOTATION",
     "ROW_SHAPERS",
+    "TAINT_EFFECTS",
     "age_seconds",
     "clusterrole_row",
     "clusterrolebinding_row",
@@ -1653,6 +1779,7 @@ __all__ = [
     "ingress_row",
     "label_selector_matches",
     "networkpolicy_row",
+    "node_label_dependencies",
     "parse_bytes",
     "parse_cpu_cores",
     "parse_quantity",
@@ -1671,4 +1798,6 @@ __all__ = [
     "serviceaccount_row",
     "shaper_for",
     "storageclass_row",
+    "taint_tolerated_by",
+    "toleration_tolerates_taint",
 ]

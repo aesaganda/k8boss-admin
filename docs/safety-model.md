@@ -282,6 +282,13 @@ Delete ignores PodDisruptionBudgets. Drain additionally preflights `create` on
 node is not permission to evict what is running on it, and finding that out three
 pods in is not a discovery anyone wants to make.
 
+*And there is one path through this console that is not an eviction.* A
+`NoExecute` taint written by §24 removes pods through the taint manager, which
+**deletes** them — no eviction subresource, so no budget. It is two clicks from
+this dialog and it is the exception to everything in the paragraph above, so it
+is stated there as an acknowledgement the operator ticks rather than as a note
+beside a form. See "Taints and labels" below.
+
 ---
 
 ## 7. Audit
@@ -1145,6 +1152,9 @@ Being honest about the edges is part of the model:
   that fills between the preview and the confirm can still make the real write
   behave differently. The window is seconds; it is not zero.
 * **`force` on a drain does not defeat a PodDisruptionBudget.** See §6.
+* **A `NoExecute` taint does not honour one.** Not a hole in this console — it
+  is how Kubernetes implements taint-based removal, and there is no flag here
+  that turns it on or off. See §24.
 * **Nothing here bounds an operator OLM installs.** §16 preflights the
   Subscription it writes and can say nothing about the RBAC OLM then grants the
   operator; see §12.5. Nor does §16 uninstall anything — deleting a Subscription
@@ -1262,3 +1272,94 @@ needs restarted, does not watch the claim afterwards, and does not report
 whether the expansion completed. A live read of the claim answers that, and
 `status.capacity` is where the answer is — which is the point of showing it in
 the first place.
+
+---
+
+## 15. Taints and labels (§24) — the write that deletes without evicting
+
+Two fields on a node, both writable from §4's YAML editor already. §24 exists
+because between them they hold the one path in this console that removes running
+pods without going anywhere near the guardrail the rest of the document promises,
+and the one path that changes nothing today and breaks a rollout next week.
+
+### 15.1 `NoExecute` deletes, and a budget does not stop it
+
+`NoSchedule` and `PreferNoSchedule` are consulted when the scheduler is
+*placing* a pod. Adding one moves nothing. `NoExecute` is evaluated against the
+pods already on the node, and the ones that do not tolerate it are removed by the
+taint manager in kube-controller-manager. In a form the three are three entries
+in one dropdown, and the difference between the first two and the third is a node
+that keeps serving versus a node that empties.
+
+The removal is a **delete**. It does not go through `pods/eviction`, which is
+where PodDisruptionBudgets are enforced — so a `NoExecute` taint takes an
+application below its budget and nothing refuses it.
+
+That is a problem this console partly created. §6 spends three paragraphs
+teaching the operator that eviction honours budgets and that `force` will not get
+them past one. Both sentences are true, and they are what the same operator has
+just read, two clicks away. Offering the taint write beside them without saying
+so would have handed them a bigger hammer while the console described a smaller
+one. So the plan names every pod the taint removes, and the fact that budgets do
+not apply is `taint_deletes_pods` — a consequence acknowledged by name, refused
+until it is.
+
+The mitigation the console offers is the honest one: **drain the node instead**
+if budgets matter, or use `NoSchedule`, which stops new work arriving and leaves
+what is running alone.
+
+### 15.2 The pod that is neither staying nor going
+
+A pod can tolerate a `NoExecute` taint for a bounded time — `tolerationSeconds`
+on the matching toleration. It is not in the set that goes now and not in the set
+that stays: the node looks entirely healthy for as long as the timer runs and
+then empties on its own, after whoever wrote the taint has stopped watching.
+
+So `delay_seconds` is a number rather than a flag: `0` for a pod that goes at
+once, the timer for a pod that goes later, and absent from the list entirely for
+one that stays. An unbounded toleration wins over any number of bounded ones,
+which is what the taint manager does, and getting that backwards would put pods
+on a deletion list they are not on.
+
+### 15.3 An unread pod listing is the one case the console cannot answer
+
+Which pods do not tolerate a taint is computed from the node's own pod listing.
+When that listing fails, `deleting` is `null` and `pods_checked` is `false` —
+never an empty list, which renders as "this taint deletes nothing" over a node
+nobody counted. §0.1's corollary, pointed at the most destructive write in this
+document.
+
+It is also the only consequence in the codebase that says the console does not
+know what the button does, and the operator has to accept that by name before the
+write proceeds.
+
+### 15.4 A label change evicts nothing, and that is the trap
+
+Node affinity is `requiredDuringSchedulingIgnoredDuringExecution`. The second
+half of that name is load-bearing: the rule is checked when a pod is placed and
+never again. Removing a label a running pod's `nodeSelector` requires does not
+disturb the pod at all.
+
+An operator who removed a label to move a workload has not moved it. What they
+changed is where the scheduler will put it *next*, which is discovered during a
+rollout, by somebody else. So the plan names the pods on this node whose
+placement rules mention a key that is leaving — keys only, never a verdict, since
+evaluating a rule that is not re-evaluated would be a more confident claim than
+the API supports — and the consequence says in those words that nothing moves
+today.
+
+### 15.5 What the console will not guess about a label
+
+The kubelet re-applies some `kubernetes.io/`-family labels when it next
+registers and never re-applies others. Which is which depends on its flags and on
+a cloud provider that no API this console reads reports. So `label_reserved_prefix`
+says it cannot tell you, rather than picking the reassuring half of that. It
+names `topology.kubernetes.io/zone` specifically, because volume topology is
+matched against it and a node that has lost it stops being chosen for zonal
+volumes.
+
+`node-role.kubernetes.io/*` gets its own consequence in both directions, added
+and removed alike: it decides the ROLES column in `kubectl get nodes` and on §5's
+node list, which is what every operator reading either believes the machine is
+for. It grants nothing and removes nothing — a node-role label is a label — and
+saying so is the point, because the name suggests otherwise.
