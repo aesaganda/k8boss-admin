@@ -953,6 +953,39 @@ export const storage = {
    * the same response is what a workload has today, read from before the write.
    */
   expand: (namespace, name, body) => api.put(`${claimPath(namespace, name)}/size`, body),
+
+  /**
+   * §22. What taking a snapshot of this claim would give you — which
+   * VolumeSnapshotClass applies, what its deletion policy is, and the
+   * consequences to acknowledge.
+   *
+   * `snapshotClass.deletion_policy` is **tri-state**: `Delete`, `Retain`, or
+   * `null` when the classes could not be read or the cluster marks no default.
+   * `null` is never rendered as either — one would warn about data loss that
+   * will not happen, the other would withhold a warning about loss that will.
+   *
+   * Omitting `snapshotClass` from the body is **meaningful**: it asks the
+   * controller for the cluster default, which is a real thing the API does.
+   *
+   * body: `{ name, snapshotClass }`
+   */
+  snapshotPlan: (namespace, name, body) =>
+    api.post(`${claimPath(namespace, name)}/snapshot/plan`, body),
+
+  /**
+   * §22. Create the VolumeSnapshot — a §1.5 mutation, so it goes through
+   * `MutationDialog` like every other write. body: the plan body plus
+   * `{ acknowledgeConsequences, dryRun }`.
+   *
+   * **`applied: true` means the object exists, not that a snapshot was taken.**
+   * The controller does that afterwards and reports it by setting
+   * `status.readyToUse` — which starts out `null` and can end at `false` with an
+   * error. Nothing in this response is evidence that there is anything to
+   * restore from; the VolumeSnapshots tab is where that answer lives, and its
+   * `ready_to_use` is a tri-state for exactly this reason.
+   */
+  snapshot: (namespace, name, body) =>
+    api.post(`${claimPath(namespace, name)}/snapshot`, body),
 };
 
 /* ── §21 Autoscaler bounds ──────────────────────────────────────────────── */

@@ -168,6 +168,20 @@ rules:
     resources: ["endpointslices"]
     verbs: ["get", "list", "watch"]
 
+  # §22 volume snapshots. `snapshot.storage.k8s.io` is CRD-backed and shipped by
+  # the external-snapshotter, not by Kubernetes, so on a cluster without it both
+  # of these degrade to §1.2's `unsupported` — "not present on this cluster",
+  # rendered calm rather than red, exactly like the Gateway and VPA tabs.
+  #
+  # The classes are listed rather than fetched by name because the *default*
+  # class is only discoverable from every class's annotations: no endpoint
+  # answers "which one is the default". Without this grant a snapshot's deletion
+  # policy is `null` — never `Delete` and never `Retain` — and §22 makes the
+  # operator acknowledge that it is unknown.
+  - apiGroups: ["snapshot.storage.k8s.io"]
+    resources: ["volumesnapshots", "volumesnapshotclasses", "volumesnapshotcontents"]
+    verbs: ["get", "list", "watch"]
+
   # §8 config, storage and access rows.
   - apiGroups: [""]
     resources: ["configmaps", "serviceaccounts", "persistentvolumeclaims", "persistentvolumes", "resourcequotas", "limitranges"]
@@ -578,6 +592,22 @@ rules:
   - apiGroups: ["autoscaling"]
     resources: ["horizontalpodautoscalers"]
     verbs: ["patch"]
+
+  # §22 taking a volume snapshot — one create in the claim's namespace. Stated
+  # on its own because of what it does and does not permit: it creates a
+  # VolumeSnapshot, and creating one is *not* the same as being able to delete
+  # it. Under a class with deletionPolicy: Delete, deleting that object destroys
+  # the snapshot in the storage system, and that verb is deliberately not
+  # granted here — §4's generic delete is where it lives, behind its own rule,
+  # so an install can let operators take snapshots without letting them remove
+  # one somebody is relying on.
+  #
+  # Withholding this disables the Snapshot action with the reason (§11.4) while
+  # the Volume Snapshots tab keeps reporting what exists and whether each one is
+  # actually usable, which are reads.
+  - apiGroups: ["snapshot.storage.k8s.io"]
+    resources: ["volumesnapshots"]
+    verbs: ["create"]
 
   # §13 writes. Three separate rules because they are three separate RBAC
   # resources, and an install may reasonably want one without the others: an

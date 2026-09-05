@@ -1368,6 +1368,85 @@ def limitrange_row(obj: Any) -> dict[str, Any]:
 #: group is the empty string; §1.4's ``core`` spelling is translated away before
 #: anything reaches here.
 # --------------------------------------------------------------------------- #
+# §22 — VolumeSnapshots
+# --------------------------------------------------------------------------- #
+
+#: The annotation that marks a VolumeSnapshotClass as the cluster default. Only
+#: one spelling: unlike StorageClass, this API was never beta under a different
+#: group, so there is no second key to read.
+SNAPSHOT_DEFAULT_CLASS_ANNOTATION = "snapshot.storage.kubernetes.io/is-default-class"
+
+
+def volumesnapshotclass_row(obj: Any) -> dict[str, Any]:
+    """§22 VolumeSnapshotClass row.
+
+    ``deletion_policy`` is the field worth putting in front of somebody, and it
+    is not a preference: ``Delete`` means that removing the namespaced
+    VolumeSnapshot object destroys the snapshot in the storage system, and
+    ``Retain`` means it leaves it behind. The same click is bookkeeping under one
+    and irreversible data loss under the other, and which one applies is decided
+    by this cluster-scoped object that the person deleting a snapshot has very
+    likely never opened.
+    """
+    annotations = get_field(obj, "metadata", "annotations", default={}) or {}
+    return {
+        "name": get_field(obj, "metadata", "name"),
+        "driver": get_field(obj, "driver"),
+        "deletion_policy": get_field(obj, "deletionPolicy"),
+        "is_default": (
+            str(annotations.get(SNAPSHOT_DEFAULT_CLASS_ANNOTATION, "")).lower() == "true"
+        ),
+        "age_seconds": age_seconds(get_field(obj, "metadata", "creationTimestamp")),
+    }
+
+
+def volumesnapshot_row(obj: Any) -> dict[str, Any]:
+    """§22 VolumeSnapshot row.
+
+    **``ready_to_use`` is tri-state, and the API means it to be.** The field is a
+    ``*bool`` on purpose:
+
+    * ``True`` — the snapshot exists and can be restored from.
+    * ``False`` — the controller looked and it is not usable. ``error`` usually
+      says why, and a snapshot can sit here for hours.
+    * ``None`` — **the controller has not reported yet.** A snapshot of a large
+      volume is not instant, and this is what the first seconds or minutes look
+      like.
+
+    Collapsing ``None`` into ``False`` tells an operator their backup failed
+    while it is being taken. Collapsing it into ``True`` is far worse: it says a
+    restorable snapshot exists when none may. Both are the confident wrong
+    answer, and only one of them gets somebody to delete the source volume.
+
+    ``source_claim`` and ``source_content`` are mutually exclusive in the API —
+    a snapshot is taken *of a claim*, or adopted from *content* that already
+    exists in the storage system — and which one it is changes what the object
+    means, so both are reported rather than flattened into one "source".
+    """
+    source = get_field(obj, "spec", "source", default={}) or {}
+    error = get_field(obj, "status", "error", default=None)
+    return {
+        "name": get_field(obj, "metadata", "name"),
+        "namespace": get_field(obj, "metadata", "namespace"),
+        "source_claim": get_field(source, "persistentVolumeClaimName"),
+        "source_content": get_field(source, "volumeSnapshotContentName"),
+        "snapshot_class": get_field(obj, "spec", "volumeSnapshotClassName"),
+        "ready_to_use": get_field(obj, "status", "readyToUse"),
+        "bound_content": get_field(obj, "status", "boundVolumeSnapshotContentName"),
+        # `creationTime` is when the *storage system* took the snapshot, which is
+        # not when the object was created — the gap between them is exactly the
+        # window `ready_to_use: None` describes.
+        "creation_time": rfc3339(get_field(obj, "status", "creationTime")),
+        "restore_size_bytes": parse_bytes(get_field(obj, "status", "restoreSize")),
+        "error": None if error is None else {
+            "message": get_field(error, "message"),
+            "time": rfc3339(get_field(error, "time")),
+        },
+        "age_seconds": age_seconds(get_field(obj, "metadata", "creationTimestamp")),
+    }
+
+
+# --------------------------------------------------------------------------- #
 # §21 — HorizontalPodAutoscalers
 # --------------------------------------------------------------------------- #
 
@@ -1538,6 +1617,8 @@ ROW_SHAPERS: dict[tuple[str, str], Callable[[Any], dict[str, Any]]] = {
     ("networking.k8s.io", "networkpolicies"): networkpolicy_row,
     ("storage.k8s.io", "storageclasses"): storageclass_row,
     ("autoscaling", "horizontalpodautoscalers"): hpa_row,
+    ("snapshot.storage.k8s.io", "volumesnapshots"): volumesnapshot_row,
+    ("snapshot.storage.k8s.io", "volumesnapshotclasses"): volumesnapshotclass_row,
     ("rbac.authorization.k8s.io", "roles"): role_row,
     ("rbac.authorization.k8s.io", "clusterroles"): clusterrole_row,
     ("rbac.authorization.k8s.io", "rolebindings"): rolebinding_row,

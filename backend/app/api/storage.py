@@ -1,5 +1,5 @@
 """
-Storage writes (§20) — expanding a PersistentVolumeClaim.
+Storage writes — expanding a PersistentVolumeClaim (§20) and snapshotting one (§22).
 
 Thin, like every router here: parse, call, envelope. Every decision about
 whether a claim can grow, what growing it means, and what a green result does
@@ -27,6 +27,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.api.bodies import MutationBody
 from app.admin import pvc as pvc_admin
+from app.admin import snapshot as snapshot_admin
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +90,85 @@ def get_expand_plan(
     facts needed. The write refuses.
     """
     return pvc_admin.plan(namespace, name, request.model_dump(by_alias=True))
+
+
+class SnapshotPlanRequest(BaseModel):
+    """The name for the snapshot, and optionally which class takes it."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    name: str = Field(
+        ...,
+        description=(
+            "The VolumeSnapshot's name. Not generated: the name is how anyone "
+            "finds this snapshot again, and a generated one would be a string "
+            "nobody recognises during the incident it was taken for."
+        ),
+    )
+    snapshotClass: str | None = Field(  # noqa: N815
+        None,
+        description=(
+            "The VolumeSnapshotClass to use. **Omitting it is meaningful** — it "
+            "asks the controller for the cluster default, which is a real thing "
+            "the API does, and is not the same as a class this console could not "
+            "read. The plan keeps those two apart."
+        ),
+    )
+
+
+class SnapshotRequest(MutationBody, SnapshotPlanRequest):
+    """The plan's body plus the two fields that make it a write."""
+
+    acknowledgeConsequences: list[str] = Field(  # noqa: N815
+        default_factory=list,
+        description=(
+            "Every consequence code the plan returned, named. Recomputed "
+            "server-side against the cluster at write time — the default snapshot "
+            "class can change, and two of these are on every snapshot."
+        ),
+    )
+
+
+@router.post(_CLAIM + "/snapshot/plan")
+def get_snapshot_plan(
+    request: SnapshotPlanRequest,
+    namespace: str = Path(..., min_length=1, max_length=63, description="The namespace."),
+    name: str = Path(..., min_length=1, max_length=253, description="The claim."),
+) -> dict[str, Any]:
+    """§22 — which class would take this snapshot, and what a snapshot is not.
+
+    Ungated, like §17's, §18's, §20's and §21's plans: one claim read and one
+    class listing. Writes nothing and records no audit row.
+
+    `snapshotClass.deletion_policy` is tri-state — `Delete`, `Retain`, or `null`
+    when the classes could not be read or the cluster marks no default. `null`
+    is never rendered as either: one would warn about data loss that will not
+    happen, the other would withhold a warning about data loss that will.
+    """
+    return snapshot_admin.plan(namespace, name, request.model_dump(by_alias=True))
+
+
+@router.post(_CLAIM + "/snapshot")
+def take_snapshot(
+    request: SnapshotRequest,
+    namespace: str = Path(..., min_length=1, max_length=63, description="The namespace."),
+    name: str = Path(..., min_length=1, max_length=253, description="The claim."),
+) -> dict[str, Any]:
+    """§22 — create the VolumeSnapshot, through the funnel, with the diff first.
+
+    **`applied: true` means the object exists, not that a snapshot was taken.**
+    The controller does that afterwards and reports it by setting
+    `status.readyToUse`, which starts out `null` and can end at `false` with an
+    error. Nothing in this response is evidence that there is anything to restore
+    from; §22's row is where that answer lives.
+    """
+    return snapshot_admin.take_snapshot(
+        namespace,
+        name,
+        request.model_dump(by_alias=True, exclude={"acknowledgeConsequences", "dry_run"}),
+        dry_run=request.dry_run,
+        acknowledge_consequences=request.acknowledgeConsequences,
+    )
 
 
 @router.put(_CLAIM + "/size")
