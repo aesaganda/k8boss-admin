@@ -16,7 +16,25 @@ test.describe('shell', () => {
 
     const nav = page.getByRole('navigation', { name: 'Console navigation' });
     await expect(nav.getByRole('link', { name: 'Overview' })).toBeVisible();
-    await expect(nav.getByRole('link', { name: 'API explorer' })).toBeVisible();
+    await expect(nav.getByRole('button', { name: 'Cluster' })).toHaveAttribute('aria-expanded', 'false');
+    await expect(nav.getByRole('button', { name: 'Workloads' })).toHaveAttribute('aria-expanded', 'false');
+    await expect(nav.getByRole('button', { name: 'Custom Resources' })).toHaveAttribute('aria-expanded', 'false');
+    await expect(nav.getByRole('button', { name: 'Administration' })).toHaveAttribute('aria-expanded', 'false');
+
+    const network = nav.getByRole('button', { name: 'Network' });
+    await expect(network).toHaveAttribute('aria-expanded', 'false');
+    await network.click();
+    await expect(page).toHaveURL(/\/network$/);
+    await expect(nav.getByRole('link', { name: 'Routes', exact: true })).toBeVisible();
+    await expect(nav.getByRole('link', { name: 'Gateway (beta)' })).toBeVisible();
+  });
+
+  test('keeps the active network page visible in its navigation group', async ({ page }) => {
+    await page.goto('/routes');
+
+    const nav = page.getByRole('navigation', { name: 'Console navigation' });
+    await expect(nav.getByRole('button', { name: 'Network' })).toHaveAttribute('aria-expanded', 'true');
+    await expect(nav.getByRole('link', { name: 'Routes', exact: true })).toHaveAttribute('aria-current', 'page');
   });
 
   test('keeps the sidebar mounted while a page chunk loads', async ({ page }) => {
@@ -26,6 +44,7 @@ test.describe('shell', () => {
 
     // Navigating to a route whose chunk has not been fetched must not blank the
     // shell: the Suspense boundary lives around <Outlet/> only.
+    await nav.getByRole('button', { name: 'Cluster' }).click();
     await nav.getByRole('link', { name: 'Nodes' }).click();
     await expect(nav).toBeVisible();
     await expect(page).toHaveURL(/\/nodes$/);
