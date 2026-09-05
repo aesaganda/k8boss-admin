@@ -2462,6 +2462,68 @@ export function boundsWriteFor(body, { autoscaler = null } = {}) {
  * emitted it would let a dialog that ignores `Retain` pass, and one that never
  * did would hide the warning this feature exists to give.
  */
+/**
+ * §23's subject review, derived from the request the way the backend is.
+ *
+ * `groups_complete` is computed from the subject kind rather than canned,
+ * because it is the field the whole panel turns on: a fixture that always said
+ * `true` would let a panel that never renders the conditional-answer banner
+ * pass, and one that always said `false` would hide the ServiceAccount case.
+ */
+export function subjectReviewFor(body, { outcomes = null } = {}) {
+  const isServiceAccount = body.subject.kind === 'ServiceAccount';
+  const supplied = body.subject.groups ?? [];
+  const groups = isServiceAccount
+    ? [
+        'system:authenticated',
+        'system:serviceaccounts',
+        `system:serviceaccounts:${body.subject.namespace}`,
+        ...supplied,
+      ]
+    : ['system:authenticated', ...supplied.filter((g) => g !== 'system:authenticated')];
+
+  // One outcome per check, cycling through the four the table has to keep
+  // apart: allowed, explicitly denied, nothing granted it, and undecided.
+  const cycle = outcomes ?? [
+    { allowed: true, denied: false, reason: 'RBAC: allowed by ClusterRoleBinding "admins"', evaluationError: null },
+    { allowed: false, denied: true, reason: 'denied by webhook authorizer', evaluationError: null },
+    { allowed: false, denied: false, reason: null, evaluationError: null },
+    { allowed: false, denied: false, reason: null, evaluationError: 'the webhook authorizer timed out' },
+  ];
+
+  const results = (body.checks ?? []).map((check, i) => ({
+    verb: check.verb,
+    group: check.group ?? 'core',
+    resource: check.resource,
+    namespace: check.namespace ?? null,
+    name: check.name ?? null,
+    subresource: check.subresource ?? null,
+    ...cycle[i % cycle.length],
+  }));
+
+  return {
+    subject: {
+      kind: body.subject.kind,
+      name: body.subject.name,
+      namespace: body.subject.namespace ?? null,
+      username: isServiceAccount
+        ? `system:serviceaccount:${body.subject.namespace}:${body.subject.name}`
+        : body.subject.name,
+      groups,
+      groups_complete: isServiceAccount,
+      groups_detail: isServiceAccount
+        ? `The API server assigns exactly these groups to every ServiceAccount in ${body.subject.namespace}, so this answer is complete.`
+        : "A user's real group memberships come from whatever authenticated them — OIDC "
+          + 'claims, a certificate\u2019s organisation, a proxy header — and no API on this '
+          + `cluster reports them. This answer is about a user named ${body.subject.name} in `
+          + 'exactly the groups listed, which may be fewer than they actually hold.',
+    },
+    results,
+    undecided: results.filter((r) => r.evaluationError).length,
+    auditId: 4821,
+  };
+}
+
 export function snapshotPlanFor(body, { claim = null, snapshotClass = undefined } = {}) {
   const target = claim ?? FIXTURES.claims.items[0];
   const resolved =
@@ -3004,6 +3066,8 @@ export async function mockApi(
     snapshotPlan = null,
     snapshotWrite = null,
     snapshotOptions = undefined,
+    subjectReview = null,
+    subjectReviewOptions = undefined,
     autoscalers = null,
     boundsPlan = null,
     boundsWrite = null,
@@ -3353,6 +3417,14 @@ export async function mockApi(
       });
     }
     if (path === '/workloads') return json(workloads ?? FIXTURES.workloads);
+    // §23. A POST that reads: the API server answers a question about somebody
+    // else's access, and the backend writes one audit row for having asked.
+    if (path === '/access/subject-review') {
+      const body = JSON.parse(route.request().postData() || '{}');
+      return json(
+        subjectReview ? subjectReview(body) : subjectReviewFor(body, subjectReviewOptions ?? {}),
+      );
+    }
     if (path === '/access/preflight') {
       return json(
         route.request().method() === 'POST'

@@ -360,6 +360,15 @@ version being that there is no undo for a deleted StatefulSet.
   Kubernetes: a namespace created together with a quota, a limit range, a
   binding and, if asked, network isolation — five ordinary writes through the
   funnel, each with its own diff and audit row. See §17.
+* **Access review — what can this subject actually do** — ask the API server
+  itself whether a named user or ServiceAccount may act, instead of subtracting
+  role bindings and hoping. It runs the whole authorization chain, so it sees
+  webhook and node authorizers that reading RBAC cannot, and it takes no action
+  as the subject — which is why this exists while per-user impersonation stays a
+  proposal (ADR-0007). For a user the answer is stated as conditional on the
+  groups you name, because nothing on a cluster reports a person's real group
+  memberships and an answer that hid that would be wrong about an administrator.
+  See §23.
 * **Volume snapshots, without calling one a backup** — take a snapshot of a
   claim before the risky thing, and the dialog says what you are actually
   getting: a point-in-time reference held inside the same storage system as the

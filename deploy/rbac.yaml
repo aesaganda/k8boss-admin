@@ -106,6 +106,23 @@ rules:
     resources: ["selfsubjectaccessreviews"]
     verbs: ["create"]
 
+  # §23 asking what *another* subject may do. Deliberately separate from the
+  # rule above, and deliberately in the reader role: it changes nothing on the
+  # cluster, and answering "did removing that binding actually take her access
+  # away" is exactly what a read-only console should be able to do.
+  #
+  # It is nonetheless the most revealing grant in this role. Anyone who can
+  # issue these can map the authorization state of every identity on the
+  # cluster — nothing §8's Role and RoleBinding listings do not already imply,
+  # but far more precisely and including authorizers that are not RBAC at all.
+  # There is no separate feature switch: **this grant is the switch**. Remove
+  # the rule and §23's tab reports that the console may not ask, naming this
+  # permission, while everything else keeps working. Every review is audited
+  # regardless — one row per request, naming who asked about whom.
+  - apiGroups: ["authorization.k8s.io"]
+    resources: ["subjectaccessreviews"]
+    verbs: ["create"]
+
   # §4 catalog — API discovery. These are non-resource URLs, not resources.
   # /version backs the server_version field of §2 health and §3 overview;
   # /api, /apis and their children are how app/resources/catalog.py enumerates
