@@ -1877,6 +1877,105 @@ export const FIXTURES = {
    * thing in the table that shows an unfinished resize), and one Pending with
    * no capacity at all.
    */
+  /**
+   * §22. Four snapshots, one for each state the Ready column has to keep apart:
+   * ready, still being taken (`readyToUse` absent — the *bool the API declares
+   * on purpose), failed with the controller's reason, and one adopted from
+   * content that already existed in the storage system rather than taken from a
+   * claim.
+   */
+  snapshots: {
+    items: [
+      {
+        name: 'postgres-nightly',
+        namespace: 'prod',
+        source_claim: 'postgres-data',
+        source_content: null,
+        snapshot_class: 'csi-ebs',
+        ready_to_use: true,
+        bound_content: 'snapcontent-9f2a',
+        creation_time: '2026-09-05T02:00:11Z',
+        restore_size_bytes: 53687091200,
+        error: null,
+        age_seconds: 39600,
+      },
+      {
+        // Being taken right now. `null`, not false — the difference between
+        // "your backup is running" and "your backup failed".
+        name: 'postgres-before-upgrade',
+        namespace: 'prod',
+        source_claim: 'postgres-data',
+        source_content: null,
+        snapshot_class: 'csi-ebs',
+        ready_to_use: null,
+        bound_content: null,
+        creation_time: null,
+        restore_size_bytes: null,
+        error: null,
+        age_seconds: 12,
+      },
+      {
+        name: 'analytics-failed',
+        namespace: 'prod',
+        source_claim: 'analytics-data',
+        source_content: null,
+        snapshot_class: 'csi-ebs',
+        ready_to_use: false,
+        bound_content: null,
+        creation_time: null,
+        restore_size_bytes: null,
+        error: {
+          message:
+            'Failed to check and update snapshot content: failed to take snapshot of the '
+            + 'volume vol-04f2: rpc error: code = ResourceExhausted',
+          time: '2026-09-05T09:12:00Z',
+        },
+        age_seconds: 7200,
+      },
+      {
+        name: 'imported-2026-08',
+        namespace: 'prod',
+        source_claim: null,
+        source_content: 'snapcontent-imported',
+        snapshot_class: null,
+        ready_to_use: true,
+        bound_content: 'snapcontent-imported',
+        creation_time: '2026-08-01T00:00:00Z',
+        restore_size_bytes: 107374182400,
+        error: null,
+        age_seconds: 3024000,
+      },
+    ],
+    continue: null,
+    remaining: null,
+    partial: false,
+    unavailable: [],
+  },
+
+  /** §22. One class that destroys on delete, one that retains. */
+  snapshotClasses: {
+    items: [
+      {
+        name: 'csi-ebs',
+        driver: 'ebs.csi.aws.com',
+        deletion_policy: 'Delete',
+        is_default: true,
+        age_seconds: 8640000,
+      },
+      {
+        name: 'csi-ebs-retain',
+        driver: 'ebs.csi.aws.com',
+        deletion_policy: 'Retain',
+        is_default: false,
+        age_seconds: 8640000,
+      },
+    ],
+    continue: null,
+    remaining: null,
+    partial: false,
+    unavailable: [],
+  },
+
   claims: {
     items: [
       {
@@ -2355,6 +2454,131 @@ export function boundsWriteFor(body, { autoscaler = null } = {}) {
   };
 }
 
+/**
+ * §22's plan, derived from the body the way the backend is.
+ *
+ * The deletion consequence is the one that depends on cluster state, so it is
+ * computed here from the class rather than canned — a fixture that always
+ * emitted it would let a dialog that ignores `Retain` pass, and one that never
+ * did would hide the warning this feature exists to give.
+ */
+export function snapshotPlanFor(body, { claim = null, snapshotClass = undefined } = {}) {
+  const target = claim ?? FIXTURES.claims.items[0];
+  const resolved =
+    snapshotClass === undefined
+      ? { ...FIXTURES.snapshotClasses.items[0], reason: null,
+          detail: 'No class was named, so the cluster default csi-ebs applies. '
+            + 'Its deletionPolicy is Delete.' }
+      : snapshotClass;
+
+  const consequences = [
+    {
+      code: 'snapshot_is_not_a_backup',
+      label: 'A snapshot is not a backup',
+      consequence:
+        'For nearly every CSI driver this is a point-in-time reference held inside the same '
+        + 'storage system as the volume — often the same array, the same zone. It does not '
+        + 'survive the loss of the storage holding it, because it is not anywhere else.',
+      mitigation: 'Keep taking whatever real backups you take.',
+    },
+    {
+      code: 'snapshot_is_crash_consistent',
+      label: 'The data is captured as if the power were cut',
+      consequence:
+        'Nothing here freezes the filesystem or asks the application to flush. What is '
+        + 'captured is what would be on disk at that instant after an abrupt stop.',
+      mitigation: "For a database, take its own backup as well.",
+    },
+  ];
+
+  if (resolved?.deletion_policy === 'Delete') {
+    consequences.push({
+      code: 'snapshot_delete_destroys_data',
+      label: 'Deleting this snapshot later will destroy it in the storage system',
+      consequence:
+        `The class ${resolved.name} sets deletionPolicy: Delete, so removing this `
+        + 'VolumeSnapshot object removes the underlying snapshot too.',
+      mitigation: 'If it needs to outlive routine cleanup, use a class with deletionPolicy: Retain.',
+    });
+  } else if (resolved == null || resolved.deletion_policy == null) {
+    consequences.push({
+      code: 'snapshot_deletion_policy_unknown',
+      label: 'What deleting this snapshot will do is unknown',
+      consequence:
+        (resolved?.detail ?? 'The VolumeSnapshotClass listing did not answer.')
+        + ' Deleting the object later may or may not destroy the data.',
+      mitigation: 'Read the VolumeSnapshotClass before relying on this snapshot.',
+    });
+  }
+
+  if (target.status !== 'Bound') {
+    consequences.push({
+      code: 'snapshot_claim_not_bound',
+      label: `This claim is ${target.status}, so there may be nothing to capture`,
+      consequence:
+        'A claim that is not Bound has no volume behind it yet. The snapshot object will be '
+        + 'created and the controller will most likely leave it unready.',
+      mitigation: 'Wait for the claim to bind, then check that readyToUse becomes true.',
+    });
+  }
+
+  return {
+    namespace: target.namespace,
+    claim: {
+      name: target.name,
+      namespace: target.namespace,
+      phase: target.status,
+      volume: target.volume,
+      storage_class: target.storage_class,
+      capacity: target.status === 'Bound' ? '50Gi' : null,
+    },
+    requested: { name: body.name, snapshotClass: body.snapshotClass ?? null },
+    snapshotClass: resolved ?? {
+      name: null, deletion_policy: null, driver: null, is_default: null,
+      reason: 'forbidden',
+      detail: 'The VolumeSnapshotClass listing did not answer (forbidden).',
+    },
+    consequences,
+    gate: { enabled: true, detail: 'This deployment permits taking a volume snapshot.' },
+    partial: resolved == null,
+    unavailable: resolved == null
+      ? [{
+          headline: 'Snapshot classes could not be listed',
+          group: 'snapshot.storage.k8s.io', resource: 'volumesnapshotclasses',
+          namespace: null, reason: 'forbidden', detail: null,
+        }]
+      : [],
+  };
+}
+
+/** §22's write response: the §1.5 envelope plus the three keys §22 adds. */
+export function snapshotWriteFor(body, options = {}) {
+  const plan = snapshotPlanFor(body, options);
+  return {
+    dryRun: body.dryRun !== false,
+    // Derived, never echoed from the request: §1.5 makes `applied` the only
+    // evidence a cluster changed — and here it attests an *object*, not a
+    // snapshot, which the dialog has to say out loud.
+    applied: body.dryRun === false,
+    verb: 'create',
+    target: {
+      group: 'snapshot.storage.k8s.io', version: 'v1', resource: 'volumesnapshots',
+      namespace: plan.namespace, name: body.name,
+    },
+    diff: {
+      unified:
+        '--- live\n+++ projected\n@@\n+apiVersion: snapshot.storage.k8s.io/v1\n'
+        + `+kind: VolumeSnapshot\n+metadata:\n+  name: ${body.name}\n`
+        + `+spec:\n+  source:\n+    persistentVolumeClaimName: ${plan.claim.name}\n`,
+      digest: 'sha256:snap',
+    },
+    warnings: [],
+    consequences: plan.consequences,
+    claim: plan.claim,
+    snapshotClass: plan.snapshotClass,
+  };
+}
+
 export function expandPlanFor(body, { claim = null, mountedBy = [], expansion = null } = {}) {
   const target = claim ?? FIXTURES.claims.items[0];
   const bytes = parseQuantity(body.size);
@@ -2775,6 +2999,11 @@ export async function mockApi(
     expandPlan = null,
     expandWrite = null,
     expandOptions = undefined,
+    snapshots = null,
+    snapshotClasses = null,
+    snapshotPlan = null,
+    snapshotWrite = null,
+    snapshotOptions = undefined,
     autoscalers = null,
     boundsPlan = null,
     boundsWrite = null,
@@ -2945,6 +3174,22 @@ export async function mockApi(
     if (/^\/autoscaling\/hpas\/[^/]+\/[^/]+\/bounds$/.test(path)) {
       const body = JSON.parse(route.request().postData() || '{}');
       return json(boundsWrite ? boundsWrite(body) : boundsWriteFor(body, autoscalerOptions ?? {}));
+    }
+    if (path === '/resources/snapshot.storage.k8s.io/v1/volumesnapshots') {
+      return json(snapshots ?? FIXTURES.snapshots);
+    }
+    if (path === '/resources/snapshot.storage.k8s.io/v1/volumesnapshotclasses') {
+      return json(snapshotClasses ?? FIXTURES.snapshotClasses);
+    }
+    // §22. Ordered before the expand routes below only for readability — the
+    // two paths do not overlap.
+    if (/^\/storage\/claims\/[^/]+\/[^/]+\/snapshot\/plan$/.test(path)) {
+      const body = JSON.parse(route.request().postData() || '{}');
+      return json(snapshotPlan ? snapshotPlan(body) : snapshotPlanFor(body, snapshotOptions ?? {}));
+    }
+    if (/^\/storage\/claims\/[^/]+\/[^/]+\/snapshot$/.test(path)) {
+      const body = JSON.parse(route.request().postData() || '{}');
+      return json(snapshotWrite ? snapshotWrite(body) : snapshotWriteFor(body, snapshotOptions ?? {}));
     }
     if (path === '/resources/core/v1/persistentvolumeclaims') {
       return json(claims ?? FIXTURES.claims);

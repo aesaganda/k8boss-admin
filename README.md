@@ -360,6 +360,13 @@ version being that there is no undo for a deleted StatefulSet.
   Kubernetes: a namespace created together with a quota, a limit range, a
   binding and, if asked, network isolation — five ordinary writes through the
   funnel, each with its own diff and audit row. See §17.
+* **Volume snapshots, without calling one a backup** — take a snapshot of a
+  claim before the risky thing, and the dialog says what you are actually
+  getting: a point-in-time reference held inside the same storage system as the
+  volume, captured as if the power were cut, and destroyed later by deleting the
+  object if its class says `deletionPolicy: Delete`. The table's Ready column is
+  the API's own three-valued `readyToUse` — a snapshot still being taken is an
+  em dash, not a tick and not a cross. See §22.
 * **Autoscalers that say whether they are autoscaling** — an HPA whose
   `ScalingActive` condition is false is not scaling anything, usually because the
   metric it needs cannot be read, and it looks entirely ordinary in

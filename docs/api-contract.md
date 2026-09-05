@@ -3540,3 +3540,141 @@ somebody reaches for during an incident. **It does not create or delete
 autoscalers** — §4 does that, with the same funnel. **It does not report why a
 metric is unreadable** beyond the condition's own reason and message: the answer
 is usually an aggregated API, and §19 is the page that lists those.
+
+---
+
+## 22. Volume snapshots — and refusing to call one a backup
+
+### 22.1 What it is, and the belief it exists to correct
+
+An operator is about to do something they might regret — grow a claim (§20), run
+a migration, delete a workload — and they want a point they can get back to.
+`kubectl` writes the four-line object; §4's editor writes it too. §22 exists
+because of what neither can say, and on this API the gap between what the thing
+is called and what it is is the widest in Kubernetes.
+
+**A CSI snapshot is not a backup.** For nearly every driver it is a
+point-in-time reference held *inside the same storage system* as the volume —
+often the same array, the same zone, sometimes the same disk. It protects
+against the change about to be made. It does not survive the loss of the storage
+holding it, because it was never anywhere else. A console that renders a green
+`Ready` beside the word *snapshot* and says nothing else is handing somebody a
+reason to skip a real backup.
+
+**And it is crash-consistent, not quiesced.** Nothing here freezes a filesystem
+or asks an application to flush. What is captured is what would be on disk after
+an abrupt stop.
+
+`snapshot.storage.k8s.io` is CRD-backed, shipped by the external-snapshotter
+rather than by Kubernetes, so a cluster without it serves nothing here — §1.2's
+`unsupported`, rendered as an ordinary fact rather than red.
+
+### 22.2 The typed rows
+
+`volumesnapshot_row` and `volumesnapshotclass_row` are registered as §4 shapers,
+so the generic listing carries them.
+
+**`ready_to_use` is tri-state, and the API declares it `*bool` on purpose:**
+
+* `true` — the snapshot exists and can be restored from.
+* `false` — the controller looked and it is not usable; `error` usually says
+  why, and a snapshot can sit here for hours.
+* **`null` — the controller has not reported yet.** A snapshot of a large volume
+  is not instant, and this is what its first seconds or minutes look like.
+
+Collapsing `null` into `false` tells an operator their backup failed while it is
+being taken. Collapsing it into `true` is worse: it says a restorable snapshot
+exists when none may, and only that direction gets somebody to delete the source
+volume. `bound_content`, `creation_time` and `restore_size_bytes` are `null` for
+the same window and for the same reason — a restore size of `0` is not a snapshot
+of nothing.
+
+`source_claim` and `source_content` are **mutually exclusive** in the API and are
+reported separately rather than flattened into one "source": a snapshot taken of
+a claim and one adopted from content that already existed in the storage system
+are different objects meaning different things.
+
+On the class, **`deletion_policy`** is the field worth putting in front of
+somebody. It is not a preference: under `Delete` — the common default — removing
+the namespaced VolumeSnapshot destroys the snapshot in the storage system; under
+`Retain` it does not. The same click is bookkeeping under one and irreversible
+data loss under the other.
+
+### 22.3 `POST /api/storage/claims/{namespace}/{name}/snapshot/plan`
+
+```json
+{ "name": "postgres-before-upgrade", "snapshotClass": "csi-ebs" }
+```
+
+The name is **required and never generated**: it is how anyone finds the
+snapshot again, and a generated one is a string nobody recognises during the
+incident it was taken for. It is validated here as an RFC 1123 subdomain, so a
+bad name is a `422` naming the rule rather than a relayed admission error about a
+regex the operator never saw.
+
+**`snapshotClass` is optional and its absence is meaningful:** omitting it asks
+the controller for the cluster's default class, which is a real thing the API
+does, and is not the same as a class this console could not read. A class named
+but absent is a `422` whose hint lists the real ones — unlike §20's and §21's
+plans there is nothing to decide from, the name is simply wrong.
+
+Ungated and unaudited: one claim read and one class listing. Returns `claim`,
+`requested`, `snapshotClass`, `consequences`, `gate`, and §0.1's `partial` /
+`unavailable[]`.
+
+**`snapshotClass.deletion_policy` is tri-state.** `null` when the class listing
+was refused, or when no class was named and the cluster marks no default.
+Reporting that as `Delete` warns about data loss that will not happen; reporting
+it as `Retain` withholds a warning about loss that will. Neither is acceptable,
+so it stays unknown and the operator acknowledges that it is.
+
+The whole class listing is read rather than a single `get`, because the *default*
+class is discoverable only by looking at every class's annotations — no endpoint
+answers "which one is the default".
+
+### 22.4 `POST /api/storage/claims/{namespace}/{name}/snapshot`
+
+The plan's body plus `acknowledgeConsequences[]` and `dryRun` (default **true**).
+One create through the funnel, preflighting `create volumesnapshots`.
+
+Consequence codes: `snapshot_is_not_a_backup`, `snapshot_is_crash_consistent`,
+`snapshot_delete_destroys_data`, `snapshot_deletion_policy_unknown`,
+`snapshot_claim_not_bound`.
+
+The first two are on **every** snapshot. That is friction on purpose: both are
+what the word is routinely believed to mean and does not, and being wrong about
+either is discovered during a restore.
+
+`snapshot_claim_not_bound` is a consequence rather than a refusal — a claim can
+bind between the plan and the write, so §22 does not refuse, it just declines to
+pretend the result will be usable.
+
+`volumeSnapshotClassName` is **omitted entirely** from the created object when
+the caller named no class, rather than resolved here and pinned. Omitting it is
+what asks the controller for the default, and that resolution is the
+controller's to make at write time — pinning the name this console read a moment
+ago would quietly make the snapshot depend on which class was default when the
+dialog opened.
+
+**`applied: true` means a VolumeSnapshot object exists. It does not mean a
+snapshot has been taken.** The controller does that afterwards and reports it by
+setting `status.readyToUse`, which starts out `null` and can end at `false` with
+an error. Nothing in this response is evidence that there is anything to restore
+from — §22.2's row is where that answer lives, and it is a tri-state for exactly
+this reason.
+
+### 22.5 What §22 does not do
+
+**It does not restore.** Creating a PVC from a snapshot is a claim create with a
+`dataSource`, and it belongs with §20's neighbours rather than here; it is also
+the operation where getting the size and the class wrong silently produces an
+empty volume, which deserves its own plan.
+
+**It does not delete snapshots.** §4 does, through the same funnel — but note
+that the generic delete carries no `deletionPolicy` warning, which is why §22
+puts the policy in front of the operator at *creation*, the one moment in this
+console's life where it is guaranteed to reach the right person.
+
+**It does not schedule anything.** There is no snapshot on a timer here, and
+there will not be: that is a controller, and this console holds no state and runs
+no loops.
