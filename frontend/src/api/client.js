@@ -859,6 +859,35 @@ export const access = {
    */
   preflightMany: (checks) =>
     api.post('/access/preflight', { checks: (checks || []).map(withWireGroup) }),
+
+  /**
+   * §23. What may a *named* subject do? Asked of the API server's own
+   * authorization chain — RBAC, the node authorizer, any webhook authorizer —
+   * so it is authoritative in a way that subtracting §8's RoleBindings can
+   * never be. No action is taken as the subject; it is a question about them.
+   *
+   * **Read `subject.groups_complete` before the results.** A subject's access
+   * mostly arrives through their groups, and the API server only considers the
+   * groups in the review. For a ServiceAccount the groups are deterministic and
+   * the backend supplies them, so it is `true`. **For a User it is always
+   * `false`** — no API here reports a person's real memberships — and the honest
+   * reading is never "alice cannot do this" but "a user named alice, in exactly
+   * these groups, cannot do this".
+   *
+   * Per result: `allowed: false` with a non-null `evaluationError` is **not** a
+   * denial (§0.2, the rule `preflight` already keeps), and `denied: true` is an
+   * authorizer explicitly refusing — a different fact from nothing granting it.
+   *
+   * A privileged read: the backend writes one audit row naming who asked about
+   * whom, and returns its id as `auditId`.
+   *
+   * body: `{ subject: { kind, name, namespace, groups }, checks: [...] }`
+   */
+  subjectReview: (subject, checks) =>
+    api.post('/access/subject-review', {
+      subject,
+      checks: (checks || []).map(withWireGroup),
+    }),
 };
 
 /* ── §10 Audit ──────────────────────────────────────────────────────────── */

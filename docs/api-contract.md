@@ -3678,3 +3678,126 @@ console's life where it is guaranteed to reach the right person.
 **It does not schedule anything.** There is no snapshot on a timer here, and
 there will not be: that is a controller, and this console holds no state and runs
 no loops.
+
+---
+
+## 23. Subject access review — what may *this* subject do
+
+### 23.1 The question §9 does not ask
+
+§9's preflight asks `SelfSubjectAccessReview`: may **the console's own identity**
+do this? That is what every button needs, and it is not the question an
+administrator has. "What can alice do", "why can this ServiceAccount delete
+namespaces", "did removing that binding actually take her access away" — nothing
+here answered those, and both alternatives are worse:
+
+* **Subtracting §8's tables.** Roles, ClusterRoles and their bindings are all
+  listable, and it is tempting to compute an answer from them. That answer is
+  *derived*, and blind to every authorizer that is not RBAC — the node
+  authorizer, any webhook authorizer, ABAC where it survives. On a cluster with
+  an authorization webhook it is confidently wrong in both directions, about
+  somebody's access.
+* **Impersonation.** `docs/adr-0007-impersonation.md` records why every cluster
+  call here is made as one ServiceAccount and what per-user impersonation would
+  cost. People reach for it largely to answer *this* question, and
+  `SubjectAccessReview` answers it without taking a single action as anybody: it
+  is a question put to the API server, not an identity borrowed.
+
+`SubjectAccessReview` runs the API server's **whole authorization chain** and
+reports what it concluded. That is what makes §23 authoritative where a cleverer
+reading of §8 cannot be.
+
+### 23.2 `POST /api/access/subject-review`
+
+```json
+{
+  "subject": { "kind": "User", "name": "alice", "groups": ["platform-admins"] },
+  "checks": [ { "verb": "delete", "group": "core", "resource": "pods", "namespace": "prod" } ]
+}
+```
+
+`kind` is `User` or `ServiceAccount`. **Not `Group`** — the authorizer takes a
+user plus a list of groups, so a group cannot be the subject; ask about a user
+who is in it. A ServiceAccount requires `namespace`: its identity is
+`system:serviceaccount:<namespace>:<name>`, so the namespace is part of who it
+is rather than a filter on the question.
+
+Checks are shaped exactly like §9's, `core` for the core group per §1.4, and are
+echoed back in the caller's own spelling so a batch response joins to a batch
+request key-for-key. At most **50** per request — each is one round trip, and a
+caller asking about two hundred verbs wants a feature this is not (see §23.5).
+
+### 23.3 Groups, and the answer that is wrong without them
+
+**This is the failure §23 is built around.** A subject's access is mostly not
+attached to their name; it arrives through their groups, and the API server only
+considers the groups *in the review*. A review for `alice` with no groups asks
+what a user called alice with no memberships can do — a question nobody has — and
+answers "nothing", cleanly, about a cluster administrator.
+
+So the response carries **`subject.groups_complete`**, and it is to be read
+before any result:
+
+* **`true`** for a **ServiceAccount**. The API server's group assignment is
+  deterministic — `system:authenticated`, `system:serviceaccounts`,
+  `system:serviceaccounts:<namespace>` — so the backend supplies them and the
+  answer is complete.
+* **`false`** for a **User, always**, even when groups were supplied. A person's
+  real memberships come from whatever authenticated them — OIDC claims, a
+  certificate's organisation, a proxy header — and **no API on this cluster
+  reports them**. The honest reading is never "alice cannot do this" but "a user
+  named alice, in exactly these groups, cannot do this", and `groups_detail`
+  says so in words the UI renders verbatim.
+
+`system:authenticated` is added to every review, because every authenticated
+request carries it.
+
+### 23.4 The four outcomes
+
+Per result, three fields come back from the API and all three are kept:
+
+| Fields | Means |
+|---|---|
+| `allowed: true` | An authorizer said yes |
+| `denied: true` | An authorizer said **no**, explicitly |
+| `allowed: false`, `denied: false` | Nothing granted it — the ordinary "no", and what almost every RBAC-only cluster produces |
+| `evaluationError` non-null | The authorizer **could not decide** |
+
+The last is §0.2's rule, the one §9 already keeps: **an evaluation error is not a
+denial.** Reporting it as one sends somebody to grant a permission that is
+already there. `undecided` counts them so a caller does not have to scan.
+
+Flattening `denied` into `allowed: false` would hide a deliberate deny behind the
+same words as an absent grant — a distinction only a webhook authorizer makes
+visible, and exactly the one worth seeing when it appears.
+
+A review that could not be *issued* — the API server refused it, the transport
+failed — is reported the same way: `allowed: false` with an `evaluationError`
+naming what failed. Never a clean denial, which would answer a question nobody
+asked.
+
+### 23.5 The grant, the audit, and what §23 is not
+
+The console needs `create` on `authorization.k8s.io/subjectaccessreviews`. That
+grant **is** the control: anyone who can issue these can map the authorization
+state of every identity on the cluster, so there is no separate switch — the
+permission is the switch, and withholding it disables the feature with the
+reason. The preflight is about `subjectaccessreviews`, so a refusal names *that*
+permission rather than the resource in the question, which would send an operator
+to grant alice something when the missing grant is the console's.
+
+It is nonetheless a **privileged read**, like §4's Secret reveal, and audited the
+same way: one row per request naming who asked about whom. Nothing is exposed
+that §8's tables do not already imply, but "who asked what the CFO's account
+could reach" is a question worth being able to answer afterwards.
+
+**§23 does not answer "who can do X".** That question cannot be put to the
+authorizer at all — it can only be derived by reading every RBAC object and
+computing, which is precisely the blind, non-authoritative answer §23.1 exists to
+replace. Offering both on one page would let the weaker one be read as the
+stronger, so it is absent rather than caveated.
+
+**§23 does not enumerate a subject's permissions.** `SelfSubjectRulesReview`
+returns a rule list, but only for the caller — there is no such API for another
+subject. Asking fifty questions is asking fifty questions, which is why the
+batch is bounded rather than open-ended.

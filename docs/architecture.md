@@ -166,6 +166,7 @@ reason.
 | `services/cluster_status.py` | §19 the control plane's own health: leader-election leases, aggregated APIService conditions, CRD establishment, admission webhooks joined to their EndpointSlice counts, and kubelet version skew. Five independent reads, each **separately nullable** — one refused listing costs its section and nothing else, and no section is ever rolled up into a single verdict |
 | `admin/mutate.py` | **The single write funnel.** Gate → preflight → apply → diff → audit |
 | `admin/preflight.py` | `SelfSubjectAccessReview`. Keeps a clean denial distinct from a failed review |
+| `admin/access_review.py` | §23 `SubjectAccessReview` — what a *named* subject may do, asked of the API server's whole authorization chain rather than derived from §8's bindings. In `admin/` beside its sibling `preflight.py` because it needs it, and because `services/` may never import `app.admin`; it is a read, but not a read model. Keeps `groups_complete` honest — always false for a User, because no API here reports a person's real memberships — and audits every request as a privileged read |
 | `admin/diff.py` | Normalise both sides, render a unified diff, digest it for the audit row |
 | `admin/apply.py` | Generic create / replace / delete from submitted YAML |
 | `admin/scale.py` | Scale (via `/scale`), restart (template annotation), suspend |

@@ -20,6 +20,7 @@ import { useMemo } from 'react';
 import { AgeCell, DataTable, DescriptionList, NullableCell, PageHeader } from '../components/ui';
 import { useCluster } from '../contexts/ClusterContext';
 import { ChipList, Muted, NoClusterState, ResourceTabsPage, YamlPanel } from './_parts';
+import SubjectReviewPanel from '../components/SubjectReviewPanel';
 
 const RBAC = 'rbac.authorization.k8s.io';
 
@@ -281,6 +282,17 @@ export default function Access() {
         detail: (row) => (
           <YamlPanel group={RBAC} version="v1" plural="clusterrolebindings" name={row.name} height={420} />
         ),
+      },
+
+      // §23. First a tab whose rows are not a §4 listing — it is a question put
+      // to the API server, not a browse — so it uses `render` rather than the
+      // listing machinery. It sits here because the tabs beside it are exactly
+      // what somebody would otherwise try to subtract into this answer, and
+      // that derived answer is blind to every authorizer that is not RBAC.
+      {
+        key: 'review',
+        title: 'Access review',
+        render: () => <SubjectReviewPanel />,
       },
     ],
     [],

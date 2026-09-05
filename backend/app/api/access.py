@@ -1,5 +1,5 @@
 """
-Access preflight endpoints (§9).
+Access preflight endpoints (§9) and the subject access review (§23).
 
 Two routes over :mod:`app.admin.preflight`: one question, and a batch of them.
 The batch exists because the interesting callers ask many at once — cluster
@@ -28,6 +28,7 @@ from typing import Any
 from fastapi import APIRouter, Query
 from pydantic import BaseModel, Field
 
+from app.admin import access_review
 from app.admin import preflight
 from app.errors import Invalid
 
@@ -125,6 +126,77 @@ def post_preflight(body: PreflightBatch) -> dict[str, Any]:
             [check.model_dump() for check in body.checks]
         )
     }
+
+
+class ReviewSubject(BaseModel):
+    """Who the §23 review is about."""
+
+    kind: str = Field(
+        ...,
+        description=(
+            "`User` or `ServiceAccount`. **Not `Group`** — the authorizer takes a "
+            "user plus a list of groups, so a group cannot be the subject; ask "
+            "about a user who is in it."
+        ),
+    )
+    name: str = Field(..., description="The username, or the ServiceAccount's name.")
+    namespace: str | None = Field(
+        None,
+        description=(
+            "Required for a ServiceAccount: its identity is "
+            "`system:serviceaccount:<namespace>:<name>`, so the namespace is part "
+            "of who it is rather than a filter on the question."
+        ),
+    )
+    groups: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Groups to include in the review. **This is the field that decides "
+            "whether the answer is right.** The API server only considers the "
+            "groups in the review, and a subject's access mostly arrives through "
+            "them — so a review that omits a user's real groups answers 'no' "
+            "about somebody who can. `system:authenticated` is always added, and "
+            "a ServiceAccount's deterministic groups are added for it."
+        ),
+    )
+
+
+class SubjectReviewRequest(BaseModel):
+    """One subject, and the questions to ask about it."""
+
+    subject: ReviewSubject
+    checks: list[PreflightCheck] = Field(
+        ...,
+        description=(
+            f"Up to {access_review.MAX_CHECKS} checks, each shaped like §9's. One "
+            "round trip to the API server per check."
+        ),
+    )
+
+
+@router.post("/access/subject-review")
+def post_subject_review(body: SubjectReviewRequest) -> dict[str, Any]:
+    """§23 — what may *this* subject do? Asked of the API server, not derived.
+
+    `SubjectAccessReview` runs the API server's whole authorization chain — RBAC,
+    the node authorizer, any webhook authorizer — so the answer is authoritative
+    in a way that subtracting §8's RoleBindings can never be. And it takes no
+    action as the subject: it is a question about them, which is why this exists
+    while `docs/adr-0007-impersonation.md` stays proposed.
+
+    Read `subject.groups_complete` before reading the results. For a
+    ServiceAccount it is true and the answer is complete. **For a User it is
+    always false**: no API here reports a person's real group memberships, so the
+    honest reading is never "alice cannot do this" but "a user named alice, in
+    exactly these groups, cannot do this".
+
+    Per-check, `allowed: false` with a non-null `evaluationError` is **not** a
+    denial — §0.2, the same rule §9 keeps — and `denied: true` is an authorizer
+    explicitly refusing, which is a different fact from nothing having granted it.
+
+    A privileged read: one audit row per request names who asked about whom.
+    """
+    return access_review.review(body.model_dump())
 
 
 __all__ = ["router"]
