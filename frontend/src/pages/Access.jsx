@@ -16,13 +16,52 @@
  * grants cluster-admin as granting nothing. An explicit `rules: []` is a real
  * zero and shows as one.
  */
-import { useMemo } from 'react';
-import { AgeCell, DataTable, DescriptionList, NullableCell, PageHeader } from '../components/ui';
+import { useMemo, useState } from 'react';
+import {
+  AgeCell,
+  DataTable,
+  DescriptionList,
+  NullableCell,
+  PageHeader,
+  StatusBadge,
+} from '../components/ui';
 import { useCluster } from '../contexts/ClusterContext';
-import { ChipList, Muted, NoClusterState, ResourceTabsPage, YamlPanel } from './_parts';
+import { ChipList, Muted, NoClusterState, ResourceTabsPage, YamlPanel, menuAction } from './_parts';
 import SubjectReviewPanel from '../components/SubjectReviewPanel';
+import CsrDecisionDialog, { SubjectPanel } from '../components/CsrDecisionDialog';
+import { useGates } from './_data';
 
 const RBAC = 'rbac.authorization.k8s.io';
+const CERTIFICATES = 'certificates.k8s.io';
+
+// §25. `update` on the approval *subresource*, which RBAC names separately from
+// the request itself. The second permission the API server checks — `approve` on
+// `certificates.k8s.io/signers`, named for the request's signerName — is not
+// checked here: it is per-signer, so a single answer for the tab would be about
+// a signer nobody has picked yet. The write preflights it by name, and a denial
+// there names the signer.
+const CSR_CHECKS = [
+  { id: 'decide', verb: 'update', group: CERTIFICATES, resource: 'certificatesigningrequests', subresource: 'approval' },
+];
+
+/**
+ * The five states §25 keeps apart, and the pair that matters.
+ *
+ * `Approved` and `Issued` are not one state. Approving records a condition and a
+ * *signer* then has to act; where none runs for the signerName the request stops
+ * at Approved with no certificate, indefinitely, looking like a success.
+ */
+const CSR_STATES = {
+  Pending: { status: 'progressing', label: 'Pending' },
+  Approved: {
+    status: 'Unknown',
+    label: 'Approved',
+    tooltip: 'Approved, and no certificate has been issued yet. A signer has to act — if none runs for this signerName, it stays here.',
+  },
+  Issued: { status: 'Ready', label: 'Issued' },
+  Denied: { status: 'failed', label: 'Denied' },
+  Failed: { status: 'failed', label: 'Failed' },
+};
 
 /** The rules of a Role or ClusterRole, as a table rather than a paragraph. */
 function RulesTable({ rules, ruleCount }) {
@@ -151,6 +190,10 @@ function bindingColumns({ namespaced }) {
 
 export default function Access() {
   const { activeClusterId } = useCluster();
+  // `{ name, decision }` — which request is being decided, and which way.
+  const [deciding, setDeciding] = useState(null);
+  const [csrRefresh, setCsrRefresh] = useState(0);
+  const { gate: csrGate } = useGates(CSR_CHECKS, { enabled: activeClusterId != null });
 
   const tabs = useMemo(
     () => [
@@ -284,6 +327,106 @@ export default function Access() {
         ),
       },
 
+      // §25. The request's own listing, with the field `kubectl get csr` does
+      // not have: what the certificate would *be*. It sits on this page because
+      // approving one is the fastest way to create an identity on a cluster, and
+      // the tabs beside it are where that identity's permissions are read
+      // afterwards — by which time the certificate exists.
+      {
+        key: 'csrs',
+        title: 'Certificate requests',
+        group: CERTIFICATES,
+        version: 'v1',
+        plural: 'certificatesigningrequests',
+        namespaced: false,
+        refreshToken: csrRefresh,
+        rowKey: (row) => row.name,
+        emptyDescription:
+          'The listing succeeded and returned no certificate signing requests. Kubernetes deletes finished ones on a timer, so an empty list on a healthy cluster is ordinary.',
+        detailTitle: (row) => `CertificateSigningRequest ${row?.name}`,
+        columns: [
+          { key: 'name', title: 'Name', sortable: true },
+          {
+            key: 'state',
+            title: 'State',
+            sortable: true,
+            cell: (row) => <StatusBadge {...(CSR_STATES[row.state] ?? { status: 'Unknown', label: row.state })} />,
+          },
+          {
+            key: 'subject',
+            title: 'Would become',
+            sortable: true,
+            value: (row) => row.subject?.common_name ?? '',
+            // The column this tab exists for. `Requested by` below is who
+            // asked; this is who they asked to be, and they are different
+            // fields that no other screen puts side by side.
+            cell: (row) =>
+              row.subject ? (
+                <span>
+                  {row.subject.common_name ?? <Muted>no common name</Muted>}
+                  {(row.subject.organizations ?? []).length > 0 && (
+                    <ChipList
+                      values={row.subject.organizations}
+                      max={2}
+                      color={row.subject.organizations.includes('system:masters') ? 'red' : 'blue'}
+                    />
+                  )}
+                </span>
+              ) : (
+                <NullableCell
+                  value={null}
+                  reason={row.decode_error ?? 'The request could not be decoded, so what it asks for is unknown — not empty.'}
+                />
+              ),
+          },
+          { key: 'requestor', title: 'Requested by', sortable: true },
+          {
+            key: 'signer_name',
+            title: 'Signer',
+            sortable: true,
+            cell: (row) => (
+              <span>
+                <code>{row.signer_name}</code>
+                {row.signer_known === false && (
+                  <>
+                    {' '}
+                    <StatusBadge
+                      status="Unknown"
+                      label="no built-in signer"
+                      tooltip="kube-controller-manager signs only the three kubernetes.io/… signerNames. Approving this leaves it Approved with no certificate unless a controller for it is running."
+                    />
+                  </>
+                )}
+              </span>
+            ),
+          },
+          { key: 'age_seconds', title: 'Age', sortable: true, cell: (row) => <AgeCell seconds={row.age_seconds} /> },
+        ],
+        actions: (row) => {
+          const gate = csrGate('decide');
+          // A decided request is not offered a second decision: the API server
+          // refuses one, and an enabled button that always fails is worse than
+          // an absent one.
+          if (row.state !== 'Pending') return [];
+          return [
+            menuAction('Approve…', gate, () => setDeciding({ name: row.name, decision: 'Approved' })),
+            menuAction('Deny…', gate, () => setDeciding({ name: row.name, decision: 'Denied' })),
+          ];
+        },
+        detail: (row) => (
+          <>
+            <SubjectPanel request={row} />
+            <YamlPanel
+              group={CERTIFICATES}
+              version="v1"
+              plural="certificatesigningrequests"
+              name={row.name}
+              height={300}
+            />
+          </>
+        ),
+      },
+
       // §23. First a tab whose rows are not a §4 listing — it is a question put
       // to the API server, not a browse — so it uses `render` rather than the
       // listing machinery. It sits here because the tabs beside it are exactly
@@ -295,7 +438,7 @@ export default function Access() {
         render: () => <SubjectReviewPanel />,
       },
     ],
-    [],
+    [csrGate, csrRefresh],
   );
 
   if (activeClusterId == null) {
@@ -308,10 +451,24 @@ export default function Access() {
   }
 
   return (
-    <ResourceTabsPage
-      title="Access control"
-      subtitle="Who can do what to this cluster. These are the objects the console's own ServiceAccount is subject to as well."
-      tabs={tabs}
-    />
+    <>
+      {deciding && (
+        <CsrDecisionDialog
+          name={deciding.name}
+          decision={deciding.decision}
+          onClose={() => setDeciding(null)}
+          // Reloads the tab but leaves the dialog open, like §24's. The summary
+          // is the sentence that matters after this write: approving records a
+          // condition, and `Issued` rather than `Approved` is what says a
+          // certificate exists.
+          onApplied={() => setCsrRefresh((token) => token + 1)}
+        />
+      )}
+      <ResourceTabsPage
+        title="Access control"
+        subtitle="Who can do what to this cluster. These are the objects the console's own ServiceAccount is subject to as well."
+        tabs={tabs}
+      />
+    </>
   );
 }

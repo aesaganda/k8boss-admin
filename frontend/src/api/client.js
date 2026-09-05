@@ -593,6 +593,36 @@ export const nodes = {
     ),
 };
 
+/* ── §25 certificate signing requests ───────────────────────────────────── */
+
+export const certificates = {
+  /**
+   * §25 — the decoded request, and what deciding it would mean.
+   * body: `{ decision }`, `Approved` or `Denied`.
+   *
+   * `request.subject` is the field this endpoint exists for: `spec.username`
+   * says who *asked*, and the subject says who they asked to **become**. A
+   * request whose organizations include `system:masters` is a cluster-admin
+   * credential, and on every other screen it looks like a kubelet renewal.
+   *
+   * `request.subject` is `null` — never an empty object — when the PKCS#10
+   * could not be decoded, with `request.decode_error` saying why.
+   */
+  plan: (name, decision) =>
+    api.post(`/certificates/signing-requests/${encodeURIComponent(name)}/plan`, { decision }),
+
+  /**
+   * §25 — approve or deny. body:
+   * `{ decision, resourceVersion, acknowledgeConsequences, dryRun }`.
+   *
+   * `applied: true` means the condition is recorded and nothing more: a signer
+   * still has to act, and `Issued` rather than `Approved` is the state that says
+   * a certificate exists. Neither decision can be taken back.
+   */
+  decide: (name, body) =>
+    api.put(`/certificates/signing-requests/${encodeURIComponent(name)}`, body),
+};
+
 /* ── §15 CLI pods — a pod with kubectl in it ────────────────────────────── */
 
 export const cli = {

@@ -1363,3 +1363,101 @@ and removed alike: it decides the ROLES column in `kubectl get nodes` and on §5
 node list, which is what every operator reading either believes the machine is
 for. It grants nothing and removes nothing — a node-role label is a label — and
 saying so is the point, because the name suggests otherwise.
+
+---
+
+## 16. Certificate requests (§25) — the approve button with the least on screen
+
+Approving a CertificateSigningRequest is the fastest way to create an identity on
+a Kubernetes cluster, and it is the action whose consequences are least visible
+at the moment of taking it. `kubectl get csr` shows who *asked*.
+`kubectl certificate approve` takes a name. Neither shows what the request asks
+to **become**.
+
+### 16.1 The two fields, and why only one of them is ever on screen
+
+`spec.username` is the submitter. The common name and organizations inside
+`spec.request` are the identity the certificate would carry. They are different
+fields and they routinely differ for good reasons — a bootstrap token asking for
+a kubelet's first certificate is exactly that shape.
+
+They also differ for the bad reason. A request from an ordinary user whose
+organization is `system:masters` is a cluster-admin credential: the API server's
+authorizer honours that group **before RBAC is consulted**, so no Role bounds it
+and no RoleBinding revokes it. The only way back is rotating the signing CA,
+which invalidates every certificate it ever issued.
+
+So §25 decodes the PKCS#10 and puts the subject on the screen. That is the whole
+feature; the write is two lines.
+
+### 16.2 The decode is total, and a failure is not an empty subject
+
+`spec.request` is bytes somebody else submitted. The decode runs inside a row
+shaper, so it must not raise: one malformed request would take down the listing
+that shows the other forty.
+
+It must also not succeed quietly. A decode that failed returns every derived
+field `null` with `decode_error` set — never an empty subject, which renders as
+a certificate that asks for nothing and is the most reassuring possible
+description of one nobody could read. On the decision screen that becomes a
+consequence the operator accepts by name: *approving means signing a certificate
+whose identity nobody here has seen.*
+
+### 16.3 Approved is not Issued, and the console will not merge them
+
+Approving records a condition. A **signer** then has to act, and
+`kube-controller-manager` signs only the three `kubernetes.io/…` signerNames —
+if it was started with a signing CA, which no API here reports.
+`kubernetes.io/legacy-unknown` is deprecated and is not signed by it at all.
+
+A request for any other signerName needs a controller somebody installed. Without
+one it sits `Approved` with no certificate, indefinitely, and every screen that
+collapsed the two states would report that as a success. So they are two states,
+the write says so in its own summary, and a signerName outside the built-in three
+is a consequence before the decision rather than a surprise after it.
+
+### 16.4 A decision cannot be taken back
+
+The API server refuses any update that rewrites an existing `Approved` or
+`Denied` condition. There is no un-approve — not here, not in `kubectl`.
+
+The console handles that in three places rather than one. A decided request is
+`blocked` on the plan, with the decision and its timestamp. It is offered no
+action in the listing, because a menu entry that always fails is worse than an
+absent one. And the dialog says the decision is final in a banner that is
+permanent rather than a checkbox: it is true of every decision, and a tick that
+always appears is a tick nobody reads on the one that matters.
+
+### 16.5 Two permissions, and the second is the one people miss
+
+Writing the decision needs `update certificatesigningrequests/approval`. It is
+not sufficient. The API server's `CertificateApproval` admission plugin
+separately requires the **`approve` verb on `certificates.k8s.io/signers`, named
+for this request's signerName**.
+
+A console that preflighted only the first would enable the button, pass its own
+check, and be refused by the API server — which is §13's `routes/custom-host`
+failure, in a place where the operator's conclusion would be that they cannot
+approve certificates at all. Both are preflighted. The signer check happens
+inside the apply step, after the gate, so a read-only console answers
+`mutations_disabled` instead of sending somebody to edit a ClusterRole that was
+never the obstacle.
+
+That permission is also why §25 has no deployment switch of its own. `approve` on
+`signers` is granted per signerName, so a cluster can let this console approve
+kubelet-serving certificates and nothing else. A boolean on the deployment would
+be a coarser copy of a control RBAC already expresses precisely — and the coarser
+copy is the one that ends up on. The shipped writer role reflects that: it grants
+the two node-lifecycle signers and deliberately not
+`kubernetes.io/kube-apiserver-client`, which is the signer a `system:masters`
+certificate comes through.
+
+### 16.6 The consequence list is empty for the ordinary case, on purpose
+
+Nearly every CSR on a running cluster is a kubelet renewing its own certificate:
+decoded cleanly, for a signer the cluster runs, subject equal to requestor. That
+raises nothing, and the operator previews and confirms.
+
+That is a deliberate decision rather than an omission. A checkbox on every
+request is a checkbox nobody reads on the one asking for `system:masters` — which
+is the request this whole section exists for.

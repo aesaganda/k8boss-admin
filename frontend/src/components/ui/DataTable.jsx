@@ -463,16 +463,27 @@ export function DataTable({
                   </span>
                 </Td>
               ))}
-              {hasActions && (
-                <Td
-                  isActionCell
-                  // Without this, opening the kebab also fires the row click and
-                  // the detail page swallowed the menu before it rendered.
-                  onClick={(event) => event.stopPropagation()}
-                >
-                  <ActionsColumn items={actions(row) ?? []} />
-                </Td>
-              )}
+              {hasActions &&
+                (() => {
+                  const items = actions(row) ?? [];
+                  return (
+                    <Td
+                      isActionCell
+                      // Without this, opening the kebab also fires the row click
+                      // and the detail page swallowed the menu before it
+                      // rendered.
+                      onClick={(event) => event.stopPropagation()}
+                    >
+                      {/* A row whose actions list is empty gets no kebab at all,
+                          rather than one that opens onto nothing. §25 is where
+                          this shows up: a certificate request that has already
+                          been approved cannot be decided again — the API server
+                          refuses it — so offering the menu would be offering a
+                          choice that does not exist. */}
+                      {items.length > 0 && <ActionsColumn items={items} />}
+                    </Td>
+                  );
+                })()}
             </Tr>
           );
         })}
