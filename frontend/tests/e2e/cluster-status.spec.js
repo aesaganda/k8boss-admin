@@ -228,7 +228,13 @@ test.describe('cluster status', () => {
     await mockApi(page);
     await page.goto('/');
 
-    await page.getByRole('link', { name: 'Status', exact: true }).click();
+    // Navigation sections start collapsed, and a collapsed NavExpandable keeps
+    // its children out of the accessibility tree — so the section is opened
+    // first, which is also what a person does. Same order as smoke.spec.js.
+    const nav = page.getByRole('navigation', { name: 'Console navigation' });
+    await nav.getByRole('button', { name: 'Cluster' }).click();
+
+    await nav.getByRole('link', { name: 'Status', exact: true }).click();
     await expect(page).toHaveURL(/\/cluster-status$/);
     await expect(page.getByRole('heading', { name: 'Cluster status' })).toBeVisible();
   });
