@@ -478,6 +478,27 @@ version being that there is no undo for a deleted StatefulSet.
   because node affinity is `requiredDuringSchedulingIgnoredDuringExecution` —
   what changes is where those pods can go *next*, so the pods placed here by a
   rule naming a key you are removing are listed as exactly that. See §24.
+* **Delete a namespace, having been shown what goes with it** — the one delete
+  whose own diff shows the wrong object. `kubectl delete namespace prod` prints
+  one line; §4's preview shows the namespace object's YAML disappearing, and
+  nothing on that screen is the database, the address or the admission webhook
+  that goes too. So this one reads them first: every namespaced kind the cluster
+  serves, listed live from discovery rather than from a curated list that goes
+  stale the first time somebody installs a CRD — and a kind whose listing was
+  refused is an em dash, never a `0`, because *"this namespace holds no
+  PersistentVolumeClaims"* is the sentence that ends with a deleted disk. Each
+  bound claim's volume is read for its reclaim policy: `Delete` destroys the
+  data and `Retain` keeps it as a `Released` volume, they are opposite outcomes
+  behind one button, and a volume the console could not read is reported as
+  **unknown** rather than as either. LoadBalancer Services are named with the
+  addresses that stop answering, and admission webhooks backed from inside the
+  namespace are named too — a cluster-scoped `failurePolicy: Fail` webhook that
+  loses its backend refuses every write it intercepts, cluster-wide. Every
+  object holding a finalizer is listed, because a namespace stuck in
+  `Terminating` is the usual complaint and this is why; the same plan run
+  against one already stuck is the diagnosis. You acknowledge each finding by
+  name and type the namespace's name, and `applied: true` means a
+  `deletionTimestamp` — not that the namespace is gone. See §26.
 * Create, edit and delete NetworkPolicies, from a default-deny starter manifest —
   through the same dry-run-then-confirm funnel as every other write, so the diff
   is shown before a segmentation change reaches a cluster.

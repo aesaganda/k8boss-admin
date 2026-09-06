@@ -865,6 +865,52 @@ export const projects = {
    * body: the plan body + { acknowledgeConsequences, dryRun }
    */
   create: (body) => api.post('/projects', body),
+
+  /**
+   * §26 — what deleting this namespace would take with it.
+   *
+   * The most expensive read this client makes: one listing per namespaced kind
+   * the cluster serves, because a curated kind list would be a completeness
+   * claim and the namespace whose contents matter is the one holding an
+   * operator's custom resources.
+   *
+   * Three fields are tri-state and every one of them is the difference between
+   * a safe delete and a destroyed database:
+   *
+   *   `inventory.kinds[].count: null`  the listing was refused. `0` would say
+   *                                    "this namespace holds no claims".
+   *   `volumes[].reclaim_policy: null` the volume behind the claim could not be
+   *                                    read, so whether its data is destroyed
+   *                                    or kept is unknown — never assume either.
+   *   `webhooks: null`                 the webhook configurations could not be
+   *                                    read. `[]` would say none point here.
+   *
+   * `retry: true` like every other plan: a pure read replays for free.
+   */
+  deletePlan: (name) =>
+    request(`/projects/${encodeURIComponent(name)}/delete-plan`, {
+      method: 'GET',
+      retry: true,
+    }),
+
+  /**
+   * §26 — delete the namespace, having said what goes with it.
+   *
+   * `applied: true` means the namespace has a `deletionTimestamp` and the
+   * namespace controller has started. It does **not** mean the namespace is
+   * gone: a finalizer whose controller is not running holds it in
+   * `Terminating` indefinitely, and the summary says so rather than reporting a
+   * deletion that has not finished.
+   *
+   * The body rides on a `DELETE`, which is legal and occasionally stripped by
+   * an intermediary. That fails in the safe direction — the backend's body is
+   * optional and defaults to `dryRun: true` with nothing acknowledged — so a
+   * lost body is a projection, never a deletion.
+   *
+   * body: { dryRun, acknowledgeConsequences }
+   */
+  remove: (name, body) =>
+    request(`/projects/${encodeURIComponent(name)}`, { method: 'DELETE', body }),
 };
 
 /* ── §18 Pod Security level ─────────────────────────────────────────────── */

@@ -1,5 +1,6 @@
 """
-Project endpoints (§17) and the Pod Security level a namespace declares (§18).
+Project endpoints (§17), the Pod Security level a namespace declares (§18), and
+what deleting a namespace takes with it (§26).
 
 Thin, like every router here. The read delegates to
 :mod:`app.services.projects`; the plan and the write delegate to
@@ -21,6 +22,7 @@ from fastapi import APIRouter, Path
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.api.bodies import MutationBody
+from app.admin import namespace_delete as namespace_delete_admin
 from app.admin import podsecurity as podsecurity_admin
 from app.admin import projects as projects_admin
 from app.services import projects as projects_service
@@ -131,6 +133,28 @@ class PodSecurityWriteRequest(MutationBody, PodSecurityPlanRequest):
     )
 
 
+class NamespaceDeleteRequest(MutationBody):
+    """§26's delete body: the dry-run flag and the consequences accepted by name.
+
+    Sent as a JSON body on a ``DELETE``, which is legal and occasionally
+    stripped by an intermediary that does not expect one. That failure mode is
+    the safe direction and is why the shape is acceptable here: a body this
+    endpoint never receives leaves ``dryRun`` at its ``true`` default and
+    ``acknowledgeConsequences`` empty, so the request becomes a projection, or a
+    422 naming what was not acknowledged. A lost body cannot delete a namespace.
+    """
+
+    acknowledgeConsequences: list[str] = Field(  # noqa: N815
+        default_factory=list,
+        description=(
+            "Every consequence code the delete plan returned. Recomputed "
+            "server-side against the namespace as it is at write time, because "
+            "a volume can be provisioned and a webhook installed between "
+            "reading the plan and confirming it."
+        ),
+    )
+
+
 @router.get("/projects/{name}")
 def get_project(
     name: str = Path(..., min_length=1, max_length=63, description="The namespace."),
@@ -197,6 +221,55 @@ def set_pod_security(
         request.model_dump(by_alias=True, exclude={"acknowledgeConsequences", "dry_run"}),
         dry_run=request.dry_run,
         acknowledge_consequences=request.acknowledgeConsequences,
+    )
+
+@router.get("/projects/{name}/delete-plan")
+def get_namespace_delete_plan(
+    name: str = Path(..., min_length=1, max_length=63, description="The namespace."),
+) -> dict[str, Any]:
+    """§26 — what deleting this namespace would take with it.
+
+    A read, so it is ungated and unaudited like every other plan here. It is
+    also the most expensive read in this console — one listing per namespaced
+    kind the cluster serves — and that is the point: a curated list of kinds
+    would be a completeness claim, and the namespace whose contents matter is
+    the one holding an operator's custom resources.
+
+    Deliberately not a dry run. A dry run is a write request the caller has not
+    made yet, and §4's projection for a delete is one object's YAML
+    disappearing — which is exactly the view that says nothing about the volume
+    behind it.
+    """
+    return namespace_delete_admin.plan(name)
+
+
+@router.delete("/projects/{name}")
+def delete_namespace(
+    request: NamespaceDeleteRequest | None = None,
+    name: str = Path(..., min_length=1, max_length=63, description="The namespace."),
+) -> dict[str, Any]:
+    """§26 — delete the namespace, having said what goes with it.
+
+    §4 can already delete a namespace and still can; this endpoint adds the
+    plan, the handshake and the audit sentence naming the volumes, not a second
+    path to the cluster. The write itself is
+    :func:`app.admin.apply.delete_resource`, unchanged.
+
+    ``applied: true`` means the namespace has a ``deletionTimestamp`` and the
+    namespace controller has started — not that the namespace is gone. A
+    finalizer whose controller is not running holds it in ``Terminating``
+    indefinitely, and re-deleting it does nothing.
+
+    The body is **optional** so that an intermediary which strips a ``DELETE``
+    body produces a projection rather than a 422 about a field the caller did
+    send. Absent, it is the default body: ``dryRun`` true, nothing
+    acknowledged — which cannot delete anything.
+    """
+    body = request or NamespaceDeleteRequest()
+    return namespace_delete_admin.delete_namespace(
+        name,
+        dry_run=body.dry_run,
+        acknowledge_consequences=body.acknowledgeConsequences,
     )
 
 

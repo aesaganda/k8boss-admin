@@ -4162,3 +4162,183 @@ finished requests on a timer. A console delete would be §4's generic one.
 **It does not auto-approve.** There is no rule engine, no allowlist of subjects
 and no batch approve. Every decision is one request, previewed and confirmed by a
 person — which is the point, given what the preview says.
+
+---
+
+## 26. Deleting a namespace — the blast radius
+
+### 26.1 The failure §0.1 already names
+
+§0.1's motivating story ends *"an operator reading 'this namespace has no pods'
+acts on it — during a cleanup, that means deleting the namespace."* Every read in
+this console is built so that sentence cannot be produced. The delete itself was
+not: §4's delete previews `before=live, after=null`, which is honest and useless
+here — what disappears is not in the namespace object. Four of those things are
+not obvious from it, and one of them is not reversible:
+
+**The volumes.** A PersistentVolumeClaim goes with the namespace. What happens to
+the *volume* behind it is decided by the PersistentVolume's
+`persistentVolumeReclaimPolicy`, on a cluster-scoped object nobody is looking at.
+`Delete` means the storage provider destroys the disk — the data is gone, not
+unbound. `Retain` means the volume survives as `Released` and needs clearing by
+hand. Those are opposite outcomes behind one button.
+
+**The addresses.** A `LoadBalancer` Service takes its cloud load balancer and its
+external IP with it. Recreating the Service later gets a different address, and
+whatever points at the old one — DNS, a firewall rule, a partner's allowlist —
+keeps pointing at nothing.
+
+**The admission webhooks.** A ValidatingWebhookConfiguration whose backing
+Service lives in the namespace is cluster-scoped: it survives the delete and
+stops having anything to talk to. At `failurePolicy: Fail` — the **default** in
+`admissionregistration.k8s.io/v1` — it then refuses every write it intercepts,
+cluster-wide. That is §19's finding arriving one step earlier: before the
+namespace goes rather than after.
+
+**The finalizers.** A namespace that will not finish deleting is the most common
+complaint about this operation, and the cause is always a finalizer whose
+controller is not running. §26 lists them *before* the delete — and, because the
+plan is a read, the same plan run against a namespace already in `Terminating` is
+the diagnosis of why it is stuck.
+
+### 26.2 `GET /api/projects/{name}/delete-plan`
+
+Ungated and unaudited: reads only, like §17's, §18's and §25's plans. It is
+**not** a dry run — a dry run is a write request the caller has not made yet, and
+§4's projection for a delete is the one view that says nothing about any of the
+above.
+
+```json
+{
+  "name": "prod",
+  "phase": "Active",
+  "resourceVersion": "4210",
+  "deletionTimestamp": null,
+  "namespaceFinalizers": [],
+  "inventory": { "kinds": [
+    { "group": "", "version": "v1", "resource": "pods", "kind": "Pod",
+      "count": 14, "truncated": false },
+    { "group": "", "version": "v1", "resource": "secrets", "kind": "Secret",
+      "count": null, "truncated": null }
+  ] },
+  "volumes": [
+    { "claim": "postgres-data", "volume": "pv-9c2f", "phase": "Bound",
+      "capacity": "200Gi", "storage_class": "gp3",
+      "reclaim_policy": "Delete", "reason": null }
+  ],
+  "load_balancers": [ { "name": "edge", "addresses": ["203.0.113.9"] } ],
+  "webhooks": [
+    { "configuration": "prod-policy", "kind": "ValidatingWebhookConfiguration",
+      "webhook": "policy.example.com", "service": "admission",
+      "failure_policy": "Fail" }
+  ],
+  "finalizers": [
+    { "resource": "/persistentvolumeclaims", "name": "postgres-data",
+      "finalizers": ["kubernetes.io/pvc-protection"] }
+  ],
+  "propagationPolicy": "Background",
+  "blocked": null,
+  "consequences": [],
+  "unavailable": [], "partial": false,
+  "gate": { "enabled": true, "detail": "…" }
+}
+```
+
+**The inventory is driven by discovery, never by a curated kind list.** A curated
+list is a *completeness claim* that goes stale the first time somebody installs a
+CRD, and the namespace whose contents matter is the one full of an operator's
+custom resources. Namespaced kinds advertising `list`, at their **preferred**
+version only, deduplicated by `(group, resource)` — a CRD serving `v1beta1` and
+`v2` side by side holds one set of objects, and listing both would count them
+twice and double every finding scanned out of them.
+
+**There is no grand total.** `events` is served by both the core group and
+`events.k8s.io` over the same underlying objects, so any sum across kinds
+double-counts them. A single headline number is the wrong headline anyway: what
+matters is which volumes are destroyed, not that the namespace holds 1,247
+things.
+
+**Three fields are tri-state, and each is a §0.1 corollary with a cluster behind
+it.**
+
+| Field | `null` means | Never |
+|---|---|---|
+| `inventory.kinds[].count` | The listing was refused, or was truncated and the API server sent no `remainingItemCount` | `0`, which reads as "this namespace holds no claims", and `200`, which reads as "there are exactly two hundred" |
+| `volumes[].reclaim_policy` | The volume is unbound (with a `reason` saying so), or could not be read (with a `reason` saying *that*) | Either real answer. `Delete` and `Retain` point in opposite directions, so a guess is a claim about somebody's database made by a console that did not look |
+| `webhooks` | **Neither** configuration listing answered | `[]`, which says "no webhook points here" — the most reassuring possible description of "we could not look" |
+
+A `webhooks` list is returned whenever *one* listing answered: a partial answer
+is still an answer about what it saw, and discarding it would hide a real
+finding.
+
+A namespace already in `Terminating` answers `200` with `blocked` set, as §25's
+plan does for a decided request — the finalizer list below it is the point.
+
+### 26.3 `DELETE /api/projects/{name}`
+
+Body: `dryRun` (defaulting to true) and `acknowledgeConsequences`. **The body is
+optional**: a `DELETE` body is legal and occasionally stripped by an
+intermediary, and losing it must fail in the safe direction — no body means the
+default body, which is a projection with nothing acknowledged and cannot delete
+anything.
+
+The write is §4's `delete_resource` unchanged: the same `apply_fn`, the same
+`mutate()` call, the same preflight of `delete core/namespaces`, the same
+`before=live, after=null` diff and the same audit row. §26 adds the plan, the
+handshake and an audit sentence naming the volumes — not a second path to the
+cluster.
+
+Refusals, in order and all before the cluster is touched: the plan is recomputed
+against the namespace **as it is now**, an already-terminating namespace is `422`,
+and the acknowledgement check runs over those recomputed consequences. Nothing is
+trusted from the plan the caller read: a volume can be provisioned, a
+LoadBalancer can come up and a webhook can be installed between the two calls.
+
+`propagationPolicy` is always `Background`. `Foreground` makes the call block
+until the whole cascade finishes — a request that hangs for as long as the
+slowest finalizer — and `Orphan` sounds like it saves the contents and does not:
+the namespace controller deletes everything *in* the namespace regardless of
+ownerReferences, so orphaning changes which objects outlive their owner, not
+which objects survive.
+
+**`applied: true` means the namespace has a `deletionTimestamp`**, and the
+namespace controller has started. It does **not** mean the namespace is gone: it
+can sit in `Terminating` indefinitely behind an unsatisfied finalizer. The
+response's summary says exactly that rather than reporting a deletion that has
+not finished.
+
+### 26.4 Consequence codes
+
+| Code | When |
+|---|---|
+| `namespace_destroys_volume_data` | A bound claim's volume has `persistentVolumeReclaimPolicy: Delete`. The disk is destroyed and nothing brings it back |
+| `namespace_volume_fate_unknown` | A bound claim's volume could not be read. Whether its data survives is unknown — and this is explicitly *not* a report that it is safe |
+| `namespace_releases_volumes` | A bound claim's volume is `Retain`. The data survives, as a `Released` volume no new claim can bind until its `claimRef` is cleared by hand |
+| `namespace_drops_load_balancer` | A `LoadBalancer` Service is deleted with the namespace, releasing its address |
+| `namespace_breaks_admission_webhook` | A webhook configuration is backed by a Service here — or the configurations could not be read, which is the same code with the "unknown" wording |
+| `namespace_finalizers_may_hang` | An object in the namespace holds a finalizer, which is what leaves a namespace stuck in `Terminating` |
+| `namespace_inventory_incomplete` | A kind's listing was refused, or held more objects than the 200 per kind this console reads. Every finding above is then a floor, not a total |
+
+A namespace holding none of these produces **no consequences at all** and needs
+no checkbox. The friction that is always present is §11.3's typed confirmation —
+the operator types the namespace name — because the act is irreversible whether
+or not it takes anything interesting with it.
+
+### 26.5 What §26 is not
+
+**It is not a general cascade previewer.** Computing what deleting an arbitrary
+object takes with it means walking `ownerReferences` across every kind the
+cluster serves — the same cost as the inventory above, for a far weaker payoff: a
+Deployment taking its ReplicaSets and Pods is understood, and a namespace taking
+a database's volume is not. §4's delete is unchanged and is still the way to
+delete anything else.
+
+**It does not clear finalizers.** Editing `spec.finalizers` to unstick a
+`Terminating` namespace skips the cleanup those finalizers exist to guarantee,
+which is usually an external resource nobody will now delete. §26 names the
+finalizer and its holder; removing one is §4's YAML editor, deliberately.
+
+**It does not snapshot anything first.** The mitigation on the destroyed-volume
+consequence points at §22, which is a separate, acknowledged act. A delete that
+quietly snapshotted would be a second write nobody asked for, and one that
+silently failed to would be worse.
