@@ -448,6 +448,21 @@ version being that there is no undo for a deleted StatefulSet.
   for StatefulSets and DaemonSets. A kind with no revision concept says so rather
   than returning an empty list.
 * Cordon, uncordon and drain.
+* **Approve a certificate request, after reading what it asks for** — the
+  approve button with the least on screen anywhere in Kubernetes.
+  `kubectl get csr` shows who *asked*; it does not show what they asked to
+  **become**, and those are different fields. So the console decodes the PKCS#10
+  in `spec.request` and puts the common name, the organizations and the SANs in
+  front of you: a request from an ordinary user whose organization is
+  `system:masters` is a cluster-admin credential the API server honours ahead of
+  RBAC — no Role bounds it, no binding revokes it, and only rotating the signing
+  CA takes it back — and everywhere else it looks like a kubelet renewal. A
+  request nobody could decode says the subject is *unknown*, never empty.
+  `Approved` and `Issued` are two states, because approving records a condition
+  and a signer still has to act — for a signerName nothing on the cluster signs,
+  a request sits Approved with no certificate forever. And the decision is final:
+  the API server refuses to rewrite one, so a settled request is offered no
+  second decision rather than a button that always fails. See §25.
 * **A node's taints and labels, with the pods a taint deletes** — `NoSchedule`
   and `PreferNoSchedule` steer where new work is placed and move nothing;
   `NoExecute` removes the pods already running that do not tolerate it, and the

@@ -31,10 +31,21 @@ the generated one and not a guess about how the SDK spells ``clusterIP``.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import logging
 import re
 from datetime import datetime, timezone
 from typing import Any, Callable
+
+# §25 decodes the PKCS#10 in a CertificateSigningRequest's `spec.request`, which
+# is the only way to see what an approval would actually grant. `cryptography`
+# is already a runtime dependency (app.crypto encrypts cluster tokens with it),
+# so this adds a use rather than a package.
+from cryptography import x509
+from cryptography.exceptions import UnsupportedAlgorithm
+from cryptography.hazmat.primitives.asymmetric import dsa, ec, ed448, ed25519, rsa
+from cryptography.x509.oid import NameOID
 
 logger = logging.getLogger(__name__)
 
@@ -1729,6 +1740,239 @@ def hpa_row(obj: Any) -> dict[str, Any]:
     }
 
 
+# --------------------------------------------------------------------------- #
+# §25 — certificate signing requests
+# --------------------------------------------------------------------------- #
+
+#: The signers `kube-controller-manager`'s csrsigning controller knows how to
+#: sign — *if* it was started with a signing CA, which no API here reports.
+#: Anything outside this tuple needs a signer somebody installed, and a CSR for
+#: a signerName nothing signs sits Approved and unissued forever, looking exactly
+#: like a success.
+KUBERNETES_SIGNERS = (
+    "kubernetes.io/kube-apiserver-client",
+    "kubernetes.io/kube-apiserver-client-kubelet",
+    "kubernetes.io/kubelet-serving",
+)
+
+#: Deprecated, and *not* handled by the built-in signer. Kept apart from the
+#: three above rather than folded in with them, because "the cluster signs this"
+#: is exactly what it is not.
+LEGACY_SIGNER = "kubernetes.io/legacy-unknown"
+
+#: The group the API server treats as cluster-admin **before RBAC is consulted**.
+#: A certificate carrying it is not bound by any Role, and no RoleBinding can
+#: take it back — the only remedy is rotating the CA it was signed by.
+MASTERS_GROUP = "system:masters"
+
+#: The group the node authorizer keys off, together with a `system:node:<name>`
+#: common name. Not cluster-admin, but it reads every Secret and ConfigMap
+#: mounted by a pod bound to that node.
+NODES_GROUP = "system:nodes"
+NODE_CN_PREFIX = "system:node:"
+
+#: The five states §25 distinguishes. `Approved` and `Issued` are deliberately
+#: not one state: approving a CSR records a decision, and a *signer* has to act
+#: before a certificate exists. On a cluster whose signer is missing or
+#: misconfigured the request stops at `Approved` and nothing ever says so.
+CSR_PENDING = "Pending"
+CSR_APPROVED = "Approved"
+CSR_ISSUED = "Issued"
+CSR_DENIED = "Denied"
+CSR_FAILED = "Failed"
+
+
+def _csr_conditions(obj: Any) -> dict[str, dict[str, Any]]:
+    """Conditions by type. The API makes Approved and Denied mutually exclusive."""
+    out: dict[str, dict[str, Any]] = {}
+    for condition in get_field(obj, "status", "conditions", default=[]) or []:
+        kind = get_field(condition, "type")
+        if not kind:
+            continue
+        out[str(kind)] = {
+            "status": get_field(condition, "status"),
+            "reason": get_field(condition, "reason"),
+            "message": get_field(condition, "message"),
+            "lastUpdateTime": get_field(condition, "lastUpdateTime"),
+        }
+    return out
+
+
+def _csr_state(conditions: dict[str, dict[str, Any]], issued: bool) -> str:
+    """The one word for this request, in order of what settles it.
+
+    `Denied` first because it is terminal and exclusive. `Failed` before
+    `Approved` because a request the signer refused after approval is not an
+    approved request that is still coming — it is over. `Issued` only when a
+    certificate is actually present, which is the distinction this whole
+    section exists to keep.
+    """
+    if "Denied" in conditions:
+        return CSR_DENIED
+    if "Failed" in conditions:
+        return CSR_FAILED
+    if "Approved" in conditions:
+        return CSR_ISSUED if issued else CSR_APPROVED
+    return CSR_PENDING
+
+
+#: The key types a Kubernetes signer accepts, matched against the library's own
+#: abstract classes rather than a class name — the concrete implementation class
+#: is private and has been renamed across `cryptography` releases, and a name
+#: that stopped matching would silently start reporting every key as unknown.
+_KEY_ALGORITHMS: tuple[tuple[Any, str], ...] = (
+    (rsa.RSAPublicKey, "RSA"),
+    (ec.EllipticCurvePublicKey, "ECDSA"),
+    (ed25519.Ed25519PublicKey, "Ed25519"),
+    (ed448.Ed448PublicKey, "Ed448"),
+    (dsa.DSAPublicKey, "DSA"),
+)
+
+
+def _key_description(public_key: Any) -> dict[str, Any]:
+    """`{algorithm, size, curve}` for the key the request carries.
+
+    `algorithm` is `None` — not a guess and not an empty string — for a key type
+    this console does not recognise. A key it cannot name is one whose strength
+    it also cannot judge, and saying so is the honest half of that.
+    """
+    algorithm: str | None = None
+    for kind, name in _KEY_ALGORITHMS:
+        if isinstance(public_key, kind):
+            algorithm = name
+            break
+    curve = getattr(getattr(public_key, "curve", None), "name", None)
+    size = getattr(public_key, "key_size", None)
+    return {
+        "algorithm": algorithm,
+        "size": int(size) if isinstance(size, int) else None,
+        "curve": str(curve) if curve else None,
+    }
+
+
+def decode_certificate_request(raw: Any) -> dict[str, Any]:
+    """Decode `spec.request` — the PKCS#10 nobody reads before approving.
+
+    **This is the reason §25 exists.** `kubectl get csr` shows who *asked*; it
+    does not show what they asked to become, and the two are different fields.
+    A request whose organization is `system:masters` grants cluster-admin ahead
+    of RBAC to whoever holds the private key, and on the approval screen it looks
+    exactly like a kubelet renewing its certificate.
+
+    Pure and **total**: `spec.request` is bytes somebody else submitted, and a
+    shaper that raised on a malformed one would take a whole listing down with
+    it. A request that could not be decoded comes back with every derived field
+    `None` and `error` set — never an empty subject, which renders as a
+    certificate that asks for nothing and is the most reassuring possible way to
+    describe one nobody could read.
+    """
+    blank = {
+        "subject": None, "dns_names": None, "ip_addresses": None,
+        "email_addresses": None, "uris": None, "key": None,
+        "signature_valid": None, "signature_algorithm": None, "error": None,
+    }
+    if not raw:
+        return {**blank, "error": "This request carries no spec.request to decode."}
+
+    try:
+        pem = base64.b64decode(str(raw), validate=True)
+        csr = x509.load_pem_x509_csr(pem)
+    except (ValueError, TypeError, binascii.Error) as exc:
+        return {**blank, "error": f"Not a PEM certificate request this console could parse: {exc}"}
+    except UnsupportedAlgorithm as exc:
+        return {**blank, "error": f"The request uses an algorithm this console cannot read: {exc}"}
+
+    try:
+        common_names = [
+            str(attribute.value)
+            for attribute in csr.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
+        ]
+        organizations = [
+            str(attribute.value)
+            for attribute in csr.subject.get_attributes_for_oid(NameOID.ORGANIZATION_NAME)
+        ]
+        organizational_units = [
+            str(attribute.value)
+            for attribute in csr.subject.get_attributes_for_oid(NameOID.ORGANIZATIONAL_UNIT_NAME)
+        ]
+
+        try:
+            alt = csr.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+            dns_names = [str(name) for name in alt.get_values_for_type(x509.DNSName)]
+            ip_addresses = [str(ip) for ip in alt.get_values_for_type(x509.IPAddress)]
+            email_addresses = [str(mail) for mail in alt.get_values_for_type(x509.RFC822Name)]
+            uris = [str(uri) for uri in alt.get_values_for_type(x509.UniformResourceIdentifier)]
+        except x509.ExtensionNotFound:
+            # A client certificate request carries no SANs at all, which is
+            # ordinary. Empty lists here are a real "none requested" — the
+            # request parsed — and that is why they are not None.
+            dns_names, ip_addresses, email_addresses, uris = [], [], [], []
+
+        signature_hash = getattr(csr.signature_hash_algorithm, "name", None)
+        return {
+            "subject": {
+                # Kubernetes reads the *first* CN as the username. A request
+                # carrying several is legal X.509 and only one of them counts,
+                # so the rest are reported rather than silently dropped.
+                "common_name": common_names[0] if common_names else None,
+                "common_names": common_names,
+                # These become the identity's groups, which is what makes them
+                # the field to read before approving anything.
+                "organizations": organizations,
+                "organizational_units": organizational_units,
+            },
+            "dns_names": dns_names,
+            "ip_addresses": ip_addresses,
+            "email_addresses": email_addresses,
+            "uris": uris,
+            "key": _key_description(csr.public_key()),
+            "signature_valid": bool(csr.is_signature_valid),
+            "signature_algorithm": str(signature_hash) if signature_hash else None,
+            "error": None,
+        }
+    except (ValueError, TypeError, UnsupportedAlgorithm) as exc:
+        return {**blank, "error": f"The request parsed but could not be read: {exc}"}
+
+
+def certificatesigningrequest_row(obj: Any) -> dict[str, Any]:
+    """The §25 row: the request's state, who asked, and what they asked to be."""
+    conditions = _csr_conditions(obj)
+    issued = bool(get_field(obj, "status", "certificate"))
+    decoded = decode_certificate_request(get_field(obj, "spec", "request"))
+    signer = get_field(obj, "spec", "signerName")
+
+    return {
+        "name": get_field(obj, "metadata", "name"),
+        "signer_name": signer,
+        # Set by the API server from the submitter's own credentials, so it is
+        # who *asked* — never who they asked to become. `subject` below is that,
+        # and the two disagreeing is the case worth looking at.
+        "requestor": get_field(obj, "spec", "username"),
+        "requestor_groups": list(get_field(obj, "spec", "groups", default=[]) or []),
+        "usages": list(get_field(obj, "spec", "usages", default=[]) or []),
+        "expiration_seconds": get_field(obj, "spec", "expirationSeconds"),
+        "state": _csr_state(conditions, issued),
+        # A real boolean: the object was read, and status.certificate is either
+        # there or it is not.
+        "issued": issued,
+        "conditions": conditions,
+        "signer_known": (
+            None if not signer
+            else (signer in KUBERNETES_SIGNERS)
+        ),
+        "subject": decoded["subject"],
+        "dns_names": decoded["dns_names"],
+        "ip_addresses": decoded["ip_addresses"],
+        "email_addresses": decoded["email_addresses"],
+        "uris": decoded["uris"],
+        "key": decoded["key"],
+        "signature_valid": decoded["signature_valid"],
+        "signature_algorithm": decoded["signature_algorithm"],
+        "decode_error": decoded["error"],
+        "age_seconds": age_seconds(get_field(obj, "metadata", "creationTimestamp")),
+    }
+
+
 ROW_SHAPERS: dict[tuple[str, str], Callable[[Any], dict[str, Any]]] = {
     ("", "pods"): pod_row,
     ("", "services"): service_row,
@@ -1741,6 +1985,7 @@ ROW_SHAPERS: dict[tuple[str, str], Callable[[Any], dict[str, Any]]] = {
     ("networking.k8s.io", "networkpolicies"): networkpolicy_row,
     ("storage.k8s.io", "storageclasses"): storageclass_row,
     ("autoscaling", "horizontalpodautoscalers"): hpa_row,
+    ("certificates.k8s.io", "certificatesigningrequests"): certificatesigningrequest_row,
     ("snapshot.storage.k8s.io", "volumesnapshots"): volumesnapshot_row,
     ("snapshot.storage.k8s.io", "volumesnapshotclasses"): volumesnapshotclass_row,
     ("rbac.authorization.k8s.io", "roles"): role_row,
@@ -1762,7 +2007,17 @@ def shaper_for(group: str, plural: str) -> Callable[[Any], dict[str, Any]] | Non
 
 
 __all__ = [
+    "CSR_APPROVED",
+    "CSR_DENIED",
+    "CSR_FAILED",
+    "CSR_ISSUED",
+    "CSR_PENDING",
     "EFFECT_NO_EXECUTE",
+    "KUBERNETES_SIGNERS",
+    "LEGACY_SIGNER",
+    "MASTERS_GROUP",
+    "NODES_GROUP",
+    "NODE_CN_PREFIX",
     "LAST_APPLIED_ANNOTATION",
     "ROW_SHAPERS",
     "TAINT_EFFECTS",
@@ -1778,6 +2033,8 @@ __all__ = [
     "get_field",
     "ingress_row",
     "label_selector_matches",
+    "certificatesigningrequest_row",
+    "decode_certificate_request",
     "networkpolicy_row",
     "node_label_dependencies",
     "parse_bytes",

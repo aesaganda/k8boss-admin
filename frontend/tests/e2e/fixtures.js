@@ -1914,6 +1914,222 @@ export const FIXTURES = {
    * content that already existed in the storage system rather than taken from a
    * claim.
    */
+  /**
+   * §25. Seven requests, chosen so one listing shows every state the console
+   * distinguishes and every consequence it can raise.
+   *
+   * The rows are already shaped — the backend decodes the PKCS#10 and this is
+   * what it returns — so nothing here parses a certificate. What matters is the
+   * pair of fields no other screen puts side by side: `requestor` is who asked,
+   * `subject` is who they asked to become.
+   */
+  certificateRequests: {
+    items: [
+      {
+        // The overwhelmingly common case: a kubelet renewing its own
+        // certificate. Requestor and subject match, so it raises nothing.
+        name: 'csr-kubelet-renew',
+        signer_name: 'kubernetes.io/kubelet-serving',
+        requestor: 'system:node:ip-10-0-1-4',
+        requestor_groups: ['system:nodes', 'system:authenticated'],
+        usages: ['digital signature', 'key encipherment', 'server auth'],
+        expiration_seconds: null,
+        state: 'Pending',
+        issued: false,
+        conditions: {},
+        signer_known: true,
+        subject: {
+          common_name: 'system:node:ip-10-0-1-4',
+          common_names: ['system:node:ip-10-0-1-4'],
+          organizations: ['system:nodes'],
+          organizational_units: [],
+        },
+        dns_names: ['ip-10-0-1-4'],
+        ip_addresses: ['10.0.1.4'],
+        email_addresses: [],
+        uris: [],
+        key: { algorithm: 'ECDSA', size: 256, curve: 'secp256r1' },
+        signature_valid: true,
+        signature_algorithm: 'sha256',
+        decode_error: null,
+        age_seconds: 240,
+      },
+      {
+        // The one this whole section exists for. `kubectl get csr` shows
+        // "dev@example.com" in the REQUESTOR column and nothing else.
+        name: 'csr-escalation',
+        signer_name: 'kubernetes.io/kube-apiserver-client',
+        requestor: 'dev@example.com',
+        requestor_groups: ['system:authenticated'],
+        usages: ['digital signature', 'client auth'],
+        expiration_seconds: null,
+        state: 'Pending',
+        issued: false,
+        conditions: {},
+        signer_known: true,
+        subject: {
+          common_name: 'dev@example.com',
+          common_names: ['dev@example.com'],
+          organizations: ['system:masters'],
+          organizational_units: [],
+        },
+        dns_names: [],
+        ip_addresses: [],
+        email_addresses: [],
+        uris: [],
+        key: { algorithm: 'RSA', size: 2048, curve: null },
+        signature_valid: true,
+        signature_algorithm: 'sha256',
+        decode_error: null,
+        age_seconds: 95,
+      },
+      {
+        // A node joining: a bootstrap token asking for a kubelet identity.
+        name: 'csr-bootstrap',
+        signer_name: 'kubernetes.io/kube-apiserver-client-kubelet',
+        requestor: 'system:bootstrap:07401b',
+        requestor_groups: ['system:bootstrappers'],
+        usages: ['digital signature', 'client auth'],
+        expiration_seconds: null,
+        state: 'Pending',
+        issued: false,
+        conditions: {},
+        signer_known: true,
+        subject: {
+          common_name: 'system:node:ip-10-0-1-9',
+          common_names: ['system:node:ip-10-0-1-9'],
+          organizations: ['system:nodes'],
+          organizational_units: [],
+        },
+        dns_names: [],
+        ip_addresses: [],
+        email_addresses: [],
+        uris: [],
+        key: { algorithm: 'ECDSA', size: 256, curve: 'secp256r1' },
+        signature_valid: true,
+        signature_algorithm: 'sha256',
+        decode_error: null,
+        age_seconds: 30,
+      },
+      {
+        // Nothing built in signs this signerName.
+        name: 'csr-custom-signer',
+        signer_name: 'example.com/mesh-ca',
+        requestor: 'system:serviceaccount:mesh:issuer',
+        requestor_groups: ['system:serviceaccounts'],
+        usages: ['digital signature', 'client auth'],
+        expiration_seconds: 86400,
+        state: 'Pending',
+        issued: false,
+        conditions: {},
+        signer_known: false,
+        subject: {
+          common_name: 'sidecar.mesh',
+          common_names: ['sidecar.mesh'],
+          organizations: [],
+          organizational_units: [],
+        },
+        dns_names: ['sidecar.mesh.svc'],
+        ip_addresses: [],
+        email_addresses: [],
+        uris: [],
+        key: { algorithm: 'ECDSA', size: 256, curve: 'secp256r1' },
+        signature_valid: true,
+        signature_algorithm: 'sha256',
+        decode_error: null,
+        age_seconds: 610,
+      },
+      {
+        // Nobody could read this one. `subject: null` — not an empty subject,
+        // which would render as a certificate asking for nothing.
+        name: 'csr-unreadable',
+        signer_name: 'kubernetes.io/kube-apiserver-client',
+        requestor: 'automation@example.com',
+        requestor_groups: ['system:authenticated'],
+        usages: ['client auth'],
+        expiration_seconds: null,
+        state: 'Pending',
+        issued: false,
+        conditions: {},
+        signer_known: true,
+        subject: null,
+        dns_names: null,
+        ip_addresses: null,
+        email_addresses: null,
+        uris: null,
+        key: null,
+        signature_valid: null,
+        signature_algorithm: null,
+        decode_error: 'Not a PEM certificate request this console could parse: MalformedFraming',
+        age_seconds: 1200,
+      },
+      {
+        // Approved, and no certificate. The state the console refuses to draw
+        // as a success.
+        name: 'csr-approved-unissued',
+        signer_name: 'example.com/mesh-ca',
+        requestor: 'system:serviceaccount:mesh:issuer',
+        requestor_groups: ['system:serviceaccounts'],
+        usages: ['client auth'],
+        expiration_seconds: null,
+        state: 'Approved',
+        issued: false,
+        conditions: {
+          Approved: { status: 'True', reason: 'K8BossAdminDecision', message: null,
+                      lastUpdateTime: '2026-09-05T20:04:00Z' },
+        },
+        signer_known: false,
+        subject: {
+          common_name: 'gateway.mesh',
+          common_names: ['gateway.mesh'],
+          organizations: [],
+          organizational_units: [],
+        },
+        dns_names: [],
+        ip_addresses: [],
+        email_addresses: [],
+        uris: [],
+        key: { algorithm: 'ECDSA', size: 256, curve: 'secp256r1' },
+        signature_valid: true,
+        signature_algorithm: 'sha256',
+        decode_error: null,
+        age_seconds: 3600,
+      },
+      {
+        name: 'csr-issued',
+        signer_name: 'kubernetes.io/kubelet-serving',
+        requestor: 'system:node:ip-10-0-1-5',
+        requestor_groups: ['system:nodes'],
+        usages: ['server auth'],
+        expiration_seconds: null,
+        state: 'Issued',
+        issued: true,
+        conditions: {
+          Approved: { status: 'True', reason: 'AutoApproved', message: null,
+                      lastUpdateTime: '2026-09-05T19:30:00Z' },
+        },
+        signer_known: true,
+        subject: {
+          common_name: 'system:node:ip-10-0-1-5',
+          common_names: ['system:node:ip-10-0-1-5'],
+          organizations: ['system:nodes'],
+          organizational_units: [],
+        },
+        dns_names: ['ip-10-0-1-5'],
+        ip_addresses: ['10.0.1.5'],
+        email_addresses: [],
+        uris: [],
+        key: { algorithm: 'ECDSA', size: 256, curve: 'secp256r1' },
+        signature_valid: true,
+        signature_algorithm: 'sha256',
+        decode_error: null,
+        age_seconds: 5400,
+      },
+    ],
+    unavailable: [],
+    partial: false,
+  },
+
   snapshots: {
     items: [
       {
@@ -2617,6 +2833,146 @@ export function taintPlanFor(body, { node = null, pods = null, podsChecked = tru
       : null,
     consequences: unchanged ? [] : consequences,
     gate: { enabled: true, detail: 'This deployment permits editing node taints.' },
+  };
+}
+
+/**
+ * §25's plan, derived from the request and the decision the way the backend is.
+ *
+ * Derived rather than canned for §21's and §24's reason: the consequences here
+ * turn on fields a fixture could get backwards — whether the subject is the
+ * requestor, whether the organizations include `system:masters` — and those are
+ * exactly the ones whose mistake would hide the bug they exist to catch.
+ */
+export function csrPlanFor(name, decision, { requests = null } = {}) {
+  const rows = requests ?? FIXTURES.certificateRequests.items;
+  const row = rows.find((item) => item.name === name);
+  if (!row) throw new Error(`no such certificate request in the fixture: ${name}`);
+
+  const organizations = row.subject?.organizations ?? [];
+  const commonName = row.subject?.common_name ?? null;
+  const consequences = [];
+  const decided = row.state !== 'Pending';
+
+  if (!decided) {
+    if (row.decode_error) {
+      consequences.push({
+        code: 'csr_request_undecodable',
+        label: 'This console could not read what the request asks for',
+        consequence:
+          `${row.decode_error} So the subject, the organizations and the SANs above are ` +
+          'unknown — not empty.',
+        mitigation: 'Decode spec.request yourself before deciding, or deny it.',
+      });
+    }
+    if (row.signature_valid === false) {
+      consequences.push({
+        code: 'csr_signature_invalid',
+        label: 'The request is not signed by the key it carries',
+        consequence: 'Whoever submitted it may not hold the key the certificate would be issued for.',
+        mitigation: 'Deny it and ask for a freshly generated request.',
+      });
+    }
+    if (decision === 'Approved') {
+      if (organizations.includes('system:masters')) {
+        consequences.push({
+          code: 'csr_grants_cluster_admin',
+          label: 'This grants cluster-admin — the certificate asks for system:masters',
+          consequence:
+            "The API server's authorizer treats system:masters as cluster-admin before RBAC is " +
+            'consulted, so no Role limits it and no RoleBinding takes it back. Only rotating the ' +
+            'signing CA revokes it.',
+          mitigation: 'Issue an ordinary client certificate and bind it to a ClusterRole instead.',
+        });
+      }
+      if (organizations.includes('system:nodes') && commonName !== row.requestor) {
+        consequences.push({
+          code: 'csr_grants_node_identity',
+          label: 'This grants a node identity to something that is not that node',
+          consequence:
+            `A certificate in system:nodes with the common name ${commonName} is evaluated by ` +
+            `the node authorizer. ${row.requestor} is asking for it.`,
+          mitigation: 'Check that this really is a node joining before approving.',
+        });
+      }
+      if (commonName && row.requestor && commonName !== row.requestor) {
+        consequences.push({
+          code: 'csr_subject_is_not_requestor',
+          label: 'The identity being requested is not the identity that asked',
+          consequence:
+            `${row.requestor} submitted this request, and the certificate would carry the ` +
+            `common name ${commonName}.`,
+          mitigation: 'Confirm the requestor is entitled to act for that identity.',
+        });
+      }
+      if (row.signer_known === false) {
+        consequences.push({
+          code: 'csr_no_known_signer',
+          label: `Nothing built into this cluster signs ${row.signer_name}`,
+          consequence:
+            'If no controller for this signerName is running, approving this leaves the request ' +
+            'Approved with no certificate — indefinitely, and looking exactly like a success.',
+          mitigation: 'Re-read the request afterwards: Issued, not Approved, is what says a certificate exists.',
+        });
+      }
+    }
+    if (decision === 'Denied' && commonName?.startsWith('system:node:')) {
+      consequences.push({
+        code: 'csr_deny_blocks_node',
+        label: `This is ${commonName.slice('system:node:'.length)}'s own certificate request`,
+        consequence:
+          'A node joining the cluster will not become Ready, and a node rotating an expiring ' +
+          'certificate will stop being able to talk to the API server.',
+        mitigation: 'Deny it if the request is not really from that node.',
+      });
+    }
+  }
+
+  return {
+    name,
+    resourceVersion: '7719',
+    decision,
+    request: row,
+    blocked: decided
+      ? {
+          message: `This request was already ${row.state.toLowerCase()}.`,
+          hint: 'A decision cannot be changed — the requester has to submit a new request.',
+          context: { parameter: 'decision', state: row.state },
+        }
+      : null,
+    consequences: decided ? [] : consequences,
+    gate: { enabled: true, detail: 'This deployment permits deciding certificate signing requests.' },
+  };
+}
+
+/** §25's write: the §1.5 envelope plus the three keys §25 adds. */
+export function csrDecisionFor(name, body, options = {}) {
+  const plan = csrPlanFor(name, body.decision, options);
+  return {
+    dryRun: body.dryRun !== false,
+    // Derived, never echoed: §1.5 makes `applied` the only evidence of a change.
+    applied: body.dryRun === false,
+    verb: 'update',
+    target: {
+      group: 'certificates.k8s.io', version: 'v1',
+      resource: 'certificatesigningrequests', subresource: 'approval', name,
+    },
+    diff: {
+      unified:
+        '--- live\n+++ projected\n@@\n' +
+        '+  conditions:\n' +
+        `+    - type: ${body.decision}\n+      status: "True"\n`,
+      digest: 'sha256:csr',
+      changed: true,
+    },
+    resourceVersion: '7720',
+    warnings: [],
+    auditId: 5170,
+    decision: body.decision,
+    // The request **as it was read**, so `applied: true` and "a certificate
+    // exists" stay two different statements in the same response.
+    request: plan.request,
+    consequences: plan.consequences,
   };
 }
 
@@ -3406,6 +3762,13 @@ export async function mockApi(
     // is how "the whole list is sent, not a delta" and "a removed label goes as
     // an explicit null" are checked from outside the component.
     nodeSchedulingWrites = [],
+    // §25. `certificateRequests` replaces the listing; `csrPlan`/`csrDecide`
+    // replace the derivations for the few specs that need a shape those cannot
+    // produce; `csrDecisions` records every write the page made.
+    certificateRequests = null,
+    csrPlan = null,
+    csrDecide = null,
+    csrDecisions = [],
     nodeDebugCreate = null,
     nodeDebugDeletes = [],
     cli = null,
@@ -3609,6 +3972,22 @@ export async function mockApi(
     if (/^\/autoscaling\/hpas\/[^/]+\/[^/]+\/bounds$/.test(path)) {
       const body = JSON.parse(route.request().postData() || '{}');
       return json(boundsWrite ? boundsWrite(body) : boundsWriteFor(body, autoscalerOptions ?? {}));
+    }
+    if (path === '/resources/certificates.k8s.io/v1/certificatesigningrequests') {
+      return json(certificateRequests ?? FIXTURES.certificateRequests);
+    }
+    // §25. Ordered before the decision route below only for readability — the
+    // two paths do not overlap.
+    if (/^\/certificates\/signing-requests\/[^/]+\/plan$/.test(path)) {
+      const body = JSON.parse(route.request().postData() || '{}');
+      const name = decodeURIComponent(path.split('/')[3]);
+      return json(csrPlan ? csrPlan(name, body) : csrPlanFor(name, body.decision));
+    }
+    if (/^\/certificates\/signing-requests\/[^/]+$/.test(path)) {
+      const body = JSON.parse(route.request().postData() || '{}');
+      const name = decodeURIComponent(path.split('/')[3]);
+      csrDecisions.push({ name, body });
+      return json(csrDecide ? csrDecide(name, body) : csrDecisionFor(name, body));
     }
     if (path === '/resources/snapshot.storage.k8s.io/v1/volumesnapshots') {
       return json(snapshots ?? FIXTURES.snapshots);

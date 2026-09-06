@@ -4008,3 +4008,157 @@ than made configurable.
 
 **It does not report whether a removed label comes back.** The kubelet's
 re-registration behaviour is not visible through any API this console reads.
+
+---
+
+## 25. Certificate signing requests — reading one before deciding it
+
+### 25.1 The field no other screen has
+
+`kubectl get csr` shows a name, a signer, a requestor and an age.
+`kubectl certificate approve` takes a name. Neither shows what the request asks
+to **become**, and that is a different field from who asked:
+
+* `spec.username` is the identity that submitted the request. The API server
+  sets it from the submitter's own credentials.
+* The **common name** and **organizations** inside `spec.request` — a PKCS#10,
+  base64-encoded — are the identity the issued certificate would carry.
+
+A request submitted by an ordinary user whose organization is `system:masters`
+is a cluster-admin credential. The API server's authorizer treats that group as
+cluster-admin **before RBAC is consulted**, so no Role bounds it and no
+RoleBinding takes it back; the only revocation is rotating the CA that signed
+it, which invalidates every other certificate that CA issued. In the listing and
+in the approve command it looks exactly like a kubelet renewing its certificate.
+
+So §25 decodes the request and puts the subject, the organizations and the SANs
+on the screen before the confirming call. The decode is **pure and total**: it
+runs inside the row shaper, so a malformed `spec.request` must not take a whole
+listing down with it, and a request that could not be decoded comes back with
+every derived field `null` and `decode_error` set. **Never an empty subject** —
+that renders as a certificate asking for nothing, which is the most reassuring
+possible description of one nobody could read.
+
+### 25.2 The typed row
+
+`certificates.k8s.io/v1/certificatesigningrequests` is browsed through §4's
+generic path, which returns this row because `certificatesigningrequest_row` is
+registered. There is deliberately no listing endpoint of its own — a second
+listing would be a second shaping of the same object.
+
+| Field | Meaning |
+|---|---|
+| `state` | `Pending`, `Approved`, `Issued`, `Denied`, `Failed` — see below |
+| `issued` | Whether `status.certificate` is present. A real boolean: the object was read |
+| `requestor`, `requestor_groups` | Who asked, from `spec.username`/`spec.groups` |
+| `subject` | `{common_name, common_names, organizations, organizational_units}`, or **`null`** when the request could not be decoded |
+| `dns_names`, `ip_addresses`, `email_addresses`, `uris` | SANs. `[]` is a real "none requested"; `null` means nobody could read it |
+| `key` | `{algorithm, size, curve}`. `algorithm` is `null` for a key type this console does not recognise, because a key it cannot name is one whose strength it cannot judge |
+| `signature_valid` | Whether the request verifies against the key it carries. `null` when undecodable |
+| `signer_known` | Whether `spec.signerName` is one of the three `kubernetes.io/…` signers |
+| `decode_error` | Why the decode failed, or `null` |
+
+**`Approved` and `Issued` are two states, not one.** Approving records a
+condition; a **signer** then has to act. `kube-controller-manager` signs only
+`kubernetes.io/kube-apiserver-client`,
+`kubernetes.io/kube-apiserver-client-kubelet` and `kubernetes.io/kubelet-serving`
+— and only if it was started with a signing CA, which no API here reports.
+`kubernetes.io/legacy-unknown` is deprecated and is **not** signed by it, so
+`signer_known` groups that with the custom signers rather than with the three.
+A request for a signerName nothing signs sits `Approved` with no certificate,
+indefinitely, looking exactly like a success.
+
+`Failed` outranks `Approved` in the derivation, because a request the signer
+refused after approval is over rather than still coming. `Denied` outranks
+everything: the API makes it and `Approved` mutually exclusive.
+
+### 25.3 `POST /api/certificates/signing-requests/{name}/plan`
+
+```json
+{ "decision": "Approved" }
+```
+
+`Approved` or `Denied` — the **condition types** the API uses, not verbs, because
+that is what lands in the object and what `kubectl describe csr` prints. A body
+naming an action and an object naming a state is one translation layer where a
+typo becomes an approval.
+
+Ungated and unaudited: one read and a decode. It does not dry-run the update.
+The response carries `request` (the row above), `resourceVersion`, `decision`,
+`blocked`, `consequences` and `gate`.
+
+A request that has **already been decided** answers `200` with `blocked` set
+rather than `422`, as §20's, §21's and §24's plans do: this is the screen where
+somebody works out what happened, and an error alone would withhold the decoded
+subject at that moment.
+
+### 25.4 `PUT /api/certificates/signing-requests/{name}`
+
+The plan's body plus `dryRun` (defaulting to true), `resourceVersion` and
+`acknowledgeConsequences`.
+
+`PUT` because §0.4 applies **and** because the approval subresource takes the
+whole object: the caller sends the version they were looking at, it is checked
+here — producing a `409 conflict` carrying `context.currentResourceVersion` and
+`context.currentState` — and it rides inside the object, so the API server
+refuses a stale write too. The object PUT back keeps its `managedFields`: an
+update that dropped them hands the API server a different object than the one it
+stored, over a decision that cannot be taken back.
+
+**Two permissions, and the second is the one people miss.** The funnel preflights
+`update certificatesigningrequests/approval`. That is not enough: the API
+server's `CertificateApproval` admission plugin separately requires the
+**`approve` verb on `certificates.k8s.io/signers`, with the request's
+signerName as the resource name**. A console that preflighted only the first
+would enable the button, pass its own check, and be refused by the API server —
+§13's `routes/custom-host` failure exactly. The signer check is made from inside
+the apply step, after the gate, so a read-only console answers
+`mutations_disabled` rather than sending somebody to edit a ClusterRole.
+
+**A decision cannot be changed.** The API server refuses any update that rewrites
+an existing `Approved` or `Denied` condition. There is no un-approve, here or in
+`kubectl`, and §25 refuses one locally with a message naming which decision was
+made and when — the API server's own refusal names a field path.
+
+**`applied: true` means the condition is recorded**, and nothing more. Whether a
+certificate exists is `state: Issued`, in a later read. The response carries
+`request` as it was read so the two statements stay separate in the same payload.
+
+The gate is `ADMIN_ALLOW_MUTATIONS` alone, for §23's reason rather than §5.5's:
+the real control here is already a permission, and a finer one than a flag could
+be. `approve` on `signers` is granted **per signerName**, so a cluster can permit
+this console to approve kubelet-serving certificates and nothing else.
+
+### 25.5 Consequence codes
+
+Deliberately **empty for an ordinary request** — a kubelet renewing a certificate
+it already holds, decoded cleanly, for a signer this cluster runs. That is nearly
+every CSR on a running cluster, and a checkbox that appears on all of them is one
+nobody reads on the day a request is not a renewal.
+
+| Code | When |
+|---|---|
+| `csr_grants_cluster_admin` | Approving, and the organizations include `system:masters`. Cluster-admin ahead of RBAC, revocable only by rotating the CA |
+| `csr_grants_node_identity` | Approving, the organizations include `system:nodes`, **and the subject is not the requestor**. A node identity being handed to something that is not already that node — ordinary for a bootstrap token, and not ordinary otherwise |
+| `csr_subject_is_not_requestor` | Approving, and the common name differs from `spec.username`. Issuing one identity a credential for another |
+| `csr_no_known_signer` | Approving, and `spec.signerName` is not one of the three built-ins (`legacy-unknown` included). Approval may leave it Approved with no certificate forever |
+| `csr_request_undecodable` | Either decision, and the PKCS#10 could not be read. The subject is unknown rather than empty |
+| `csr_signature_invalid` | Either decision, and the request does not verify against the key it carries |
+| `csr_deny_blocks_node` | Denying, and the subject is a `system:node:…` identity. That node will not become Ready, or will lose API access when its current certificate expires |
+
+Two facts are stated as a **permanent banner rather than a checkbox**, because
+they are true of every decision: that it cannot be changed, and that approving is
+not issuing. A tick that always appears is a tick nobody reads.
+
+### 25.6 What §25 is not
+
+**It does not issue certificates.** No signer runs here, and nothing in this
+console signs anything. `Issued` is a state reported from a later read, never a
+claim this console makes about its own write.
+
+**It does not delete requests.** Kubernetes' own cleanup controller removes
+finished requests on a timer. A console delete would be §4's generic one.
+
+**It does not auto-approve.** There is no rule engine, no allowlist of subjects
+and no batch approve. Every decision is one request, previewed and confirmed by a
+person — which is the point, given what the preview says.

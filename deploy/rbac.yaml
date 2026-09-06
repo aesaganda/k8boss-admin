@@ -139,6 +139,16 @@ rules:
     resources: ["nodes"]
     verbs: ["get", "list", "watch"]
 
+  # §25 certificate signing requests. Reading one is how the console decodes
+  # what it asks to *become* — `spec.username` is who asked, and the common name
+  # and organizations inside spec.request are who they asked to be. Withhold this
+  # and the Certificate requests tab reports the listing was refused; it never
+  # reports an empty one, because "no requests pending" is the sentence that
+  # stops somebody looking.
+  - apiGroups: ["certificates.k8s.io"]
+    resources: ["certificatesigningrequests"]
+    verbs: ["get", "list", "watch"]
+
   # §5 namespaces — the list every other page's filter is built from.
   - apiGroups: [""]
     resources: ["namespaces"]
@@ -469,6 +479,31 @@ rules:
   - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["patch", "update"]
+
+  # §25 deciding a certificate request, part one: the decision is written to the
+  # approval SUBRESOURCE, which RBAC names separately from the request itself.
+  - apiGroups: ["certificates.k8s.io"]
+    resources: ["certificatesigningrequests/approval"]
+    verbs: ["update"]
+
+  # §25 part two, and the one people miss. The API server's CertificateApproval
+  # admission plugin ALSO requires the `approve` verb on `signers`, named for the
+  # request's signerName. Holding the rule above without this one produces a
+  # button that passes the console's own preflight and is then refused by the API
+  # server — so §25 preflights this by name, and a denial says which signer.
+  #
+  # `kubernetes.io/kube-apiserver-client` is deliberately NOT in this list. It is
+  # the signer a client certificate comes through, which means it is the signer a
+  # certificate carrying `system:masters` comes through — cluster-admin ahead of
+  # RBAC, revocable only by rotating the CA. Add it deliberately, for a console
+  # whose operators are meant to issue human client certificates, and know that
+  # doing so is the grant that matters most in this file.
+  - apiGroups: ["certificates.k8s.io"]
+    resources: ["signers"]
+    resourceNames:
+      - "kubernetes.io/kube-apiserver-client-kubelet"
+      - "kubernetes.io/kubelet-serving"
+    verbs: ["approve"]
 
   # §5 drain, pod half. `pods/eviction` is the API that respects
   # PodDisruptionBudgets; the console never deletes a pod to drain a node,
