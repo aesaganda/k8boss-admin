@@ -52,7 +52,6 @@ from app.errors import AdminError, Invalid, from_api_exception
 from app.k8s.client import get_api_client, get_core_v1
 from app.resources import catalog, reader, shaping
 from app.resources.envelope import collect
-from app.services.workloads import selector_matches
 
 logger = logging.getLogger(__name__)
 
@@ -264,8 +263,10 @@ def _has_emptydir(pod: Any) -> bool:
     return False
 
 
-def _blocking_pdb(pod: Any, budgets: list[dict[str, Any]]) -> tuple[str | None, str | None]:
-    """``(matching PDB name, blocking reason)`` for one pod.
+def _blocking_pdb(
+    pod: Any, budgets: list[dict[str, Any]]
+) -> tuple[str | None, str | None, list[str]]:
+    """``(matching PDB name, blocking reason, budgets whose match is unknown)``.
 
     A budget blocks only when its ``status.disruptionsAllowed`` is a number we
     read and that number is zero or less. A budget whose status the controller
@@ -273,18 +274,36 @@ def _blocking_pdb(pod: Any, budgets: list[dict[str, Any]]) -> tuple[str | None, 
     eviction API is the actual enforcer, and refusing a whole drain on the
     strength of a field that is momentarily absent would train operators to reach
     straight for ``force``, which is worse than the risk it avoids.
+
+    **The third element is the same rule applied to the selector.**
+    :func:`app.resources.shaping.label_selector_matches` is tri-state, and a
+    budget using a ``matchExpressions`` operator this console does not model
+    returns ``None`` — *we cannot tell whether this budget covers this pod*.
+    Before §28 that arrived here as a plain ``False``, so the plan said no budget
+    covered the pod and the drain reported nothing; the operator then discovered
+    it from an eviction the API server refused, mid-drain.
+
+    It is surfaced and **not** turned into a blocker, for the reason above: the
+    enforcer is the eviction subresource, and blocking a drain over a selector we
+    merely could not parse is how ``force`` becomes reflex. The plan says the
+    coverage is unknown and lets the operator decide.
     """
     labels = shaping.get_field(pod, "metadata", "labels", default={}) or {}
     matched: str | None = None
+    unknown: list[str] = []
     for budget in budgets:
         selector = shaping.get_field(budget, "spec", "selector")
         if selector is None:
             continue
+        name = str(shaping.get_field(budget, "metadata", "name") or "")
         # An empty selector on a PDB selects every pod in the namespace. That is
         # what the API means, so it is what is applied.
-        if not selector_matches(selector, labels):
+        covers = shaping.label_selector_matches(selector, labels)
+        if covers is None:
+            unknown.append(name)
             continue
-        name = str(shaping.get_field(budget, "metadata", "name") or "")
+        if not covers:
+            continue
         matched = matched or name
         allowed = shaping.get_field(budget, "status", "disruptionsAllowed")
         if isinstance(allowed, bool) or not isinstance(allowed, int):
@@ -293,8 +312,8 @@ def _blocking_pdb(pod: Any, budgets: list[dict[str, Any]]) -> tuple[str | None, 
             return name, (
                 f"PodDisruptionBudget {name!r} allows 0 more disruptions; "
                 "evicting this pod would violate it"
-            )
-    return matched, None
+            ), unknown
+    return matched, None, unknown
 
 
 def classify_pod(
@@ -333,6 +352,10 @@ def classify_pod(
             else None
         ),
         "pdb": None,
+        # Budgets whose selector this console could not evaluate, so whether they
+        # cover this pod is unknown. Empty on every ordinary pod; never merged
+        # into `pdb`, which names a budget that definitely covers it.
+        "pdbUnknown": [],
         # Filled in by execution. Present and null on a dry run so the frontend
         # can read `entry.result` unconditionally.
         "result": None,
@@ -386,8 +409,9 @@ def classify_pod(
             "anywhere else"
         )
     if budgets is not None:
-        pdb_name, pdb_reason = _blocking_pdb(pod, budgets)
+        pdb_name, pdb_reason, pdb_unknown = _blocking_pdb(pod, budgets)
         entry["pdb"] = pdb_name
+        entry["pdbUnknown"] = pdb_unknown
         if pdb_reason:
             blockers.append(pdb_reason)
 

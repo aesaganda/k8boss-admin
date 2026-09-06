@@ -86,11 +86,15 @@ def _emptydir_volume():
     return obj(name="cache", empty_dir=obj(medium=""))
 
 
-def _pdb(name, *, namespace="prod", match_labels=None, allowed=1, with_status=True):
+def _pdb(name, *, namespace="prod", match_labels=None, allowed=1, with_status=True,
+         expressions=None):
     """A PodDisruptionBudget in the raw JSON shape the API server returns."""
+    selector = {"matchLabels": match_labels or {"app": "checkout"}}
+    if expressions is not None:
+        selector = {"matchExpressions": expressions}
     budget = {
         "metadata": {"name": name, "namespace": namespace},
-        "spec": {"selector": {"matchLabels": match_labels or {"app": "checkout"}}},
+        "spec": {"selector": selector},
     }
     if with_status:
         budget["status"] = {"disruptionsAllowed": allowed}
@@ -283,6 +287,61 @@ def test_pdb_that_does_not_select_the_pod_is_ignored():
     )
     assert entry["action"] == ACTION_EVICT
     assert entry["pdb"] is None
+    assert entry["pdbUnknown"] == []
+
+
+def test_a_budget_whose_selector_cannot_be_read_is_unknown_not_absent():
+    """The gap this closes. There used to be a second, two-state label-selector
+    matcher, and this call site used it — so a budget with a `matchExpressions`
+    operator the console does not model came back as a plain "does not select",
+    the plan said no budget covered the pod, and the operator found out from an
+    eviction the API server refused, mid-drain.
+
+    `pdb: null` still means "no budget covers this pod". `pdbUnknown` is the new
+    third state and is never folded into it."""
+    entry = _classify(
+        _pod("checkout-7d9-abc", owner=_owner("ReplicaSet"), labels={"app": "checkout"}),
+        budgets=[_pdb("odd-pdb", allowed=0, expressions=[
+            {"key": "app", "operator": "Gt", "values": ["3"]},
+        ])],
+    )
+
+    assert entry["pdb"] is None
+    assert entry["pdbUnknown"] == ["odd-pdb"]
+
+
+def test_an_unreadable_selector_does_not_block_the_drain():
+    """Deliberately *not* a blocker, for the reason an unwritten
+    `disruptionsAllowed` is not one: the eviction subresource is the enforcer,
+    and refusing a whole drain over a selector this console merely could not
+    parse is how `force` becomes reflex — which is worse than the risk it
+    avoids."""
+    entry = _classify(
+        _pod("checkout-7d9-abc", owner=_owner("ReplicaSet"), labels={"app": "checkout"}),
+        budgets=[_pdb("odd-pdb", allowed=0, expressions=[
+            {"key": "app", "operator": "Gt", "values": ["3"]},
+        ])],
+    )
+
+    assert entry["action"] == ACTION_EVICT
+    assert entry["reason"] is None
+
+
+def test_a_readable_blocking_budget_still_blocks_alongside_an_unreadable_one():
+    """One budget the console cannot parse must not suppress another it can."""
+    entry = _classify(
+        _pod("checkout-7d9-abc", owner=_owner("ReplicaSet"), labels={"app": "checkout"}),
+        budgets=[
+            _pdb("odd-pdb", allowed=1, expressions=[
+                {"key": "app", "operator": "Gt", "values": ["3"]},
+            ]),
+            _pdb("checkout-pdb", allowed=0),
+        ],
+    )
+
+    assert entry["action"] == ACTION_BLOCKED
+    assert entry["pdb"] == "checkout-pdb"
+    assert entry["pdbUnknown"] == ["odd-pdb"]
 
 
 def test_pdb_without_a_computed_status_is_named_but_does_not_block():

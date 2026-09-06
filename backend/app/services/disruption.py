@@ -39,12 +39,13 @@ per pod at the moment of the drain.
 
 **A pod whose selection could not be decided is `None`, never `False`.**
 :func:`app.resources.shaping.label_selector_matches` is tri-state and its `None`
-propagates all the way to the response. This module deliberately does **not**
-use :func:`app.services.workloads.selector_matches`, which resolves an
-unmodelled operator to `False`. That is the right direction there — attributing
-other workloads' pods to a row is worse than attributing none — and the wrong
-direction here, because `False` manufactures the exact "this budget protects
-nothing" sentence §28 exists to make trustworthy.
+propagates all the way to the response, rather than being flattened on the way.
+There used to be a second matcher in `app.services.workloads` that resolved an
+unmodelled operator to `False`, and this module was written to avoid it: `False`
+manufactures the exact "this budget protects nothing" sentence §28 exists to
+make trustworthy. That duplicate is gone — one matcher, three callers, each
+handling the third state where it knows what it costs — so this is now a
+property of the only matcher there is rather than a choice between two.
 
 **A count we could not derive is `None`, never `0`.** `selected_pods: 0` is the
 finding. `selected_pods: null` is a pod listing that did not answer, and the two

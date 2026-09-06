@@ -329,10 +329,9 @@ def test_a_budget_does_not_cover_pods_in_another_namespace(cluster):
 
 
 def test_an_undecidable_selector_is_unknown_rather_than_no_match(cluster):
-    """This module deliberately does not use `workloads.selector_matches`, which
-    resolves an unmodelled operator to False — the right direction for workload
-    attribution and the wrong one here, because False manufactures the
-    "protects nothing" sentence."""
+    """`False` here would manufacture the "protects nothing" sentence §28 exists
+    to make trustworthy, so an operator this console does not model has to reach
+    the response as its own state. The matcher is tri-state for exactly this."""
     cluster["budgets"] = [budget("api", min_available=1, selector={
         "matchExpressions": [{"key": "app", "operator": "Wibble", "values": ["api"]}],
     })]
