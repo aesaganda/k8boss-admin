@@ -42,6 +42,7 @@ import {
   StatusBadge,
 } from '../components/ui';
 import { projects as projectsApi } from '../api/client';
+import DeleteNamespaceDialog from '../components/DeleteNamespaceDialog';
 import PodSecurityDialog from '../components/PodSecurityDialog';
 import { useCluster } from '../contexts/ClusterContext';
 import { useNamespace } from '../contexts/NamespaceContext';
@@ -51,8 +52,13 @@ import { ChipList, LabelsCell, Muted, NoClusterState } from './_parts';
 const MODES = ['enforce', 'audit', 'warn'];
 
 //: §18's write is a patch on the namespace itself, so the button is gated on
-//: the verb the write will actually use rather than on anything in it.
-const CHECKS = [{ id: 'patch', verb: 'patch', group: 'core', resource: 'namespaces' }];
+//: the verb the write will actually use rather than on anything in it. §26's is
+//: `delete` on the same resource — gated separately, because an operator who may
+//: set a Pod Security level is very often not one who may delete the namespace.
+const CHECKS = [
+  { id: 'patch', verb: 'patch', group: 'core', resource: 'namespaces' },
+  { id: 'delete', verb: 'delete', group: 'core', resource: 'namespaces' },
+];
 
 /** `cpu=500m, memory=512Mi` for a LimitRange map, or a muted "unset". */
 function quantities(map) {
@@ -235,6 +241,7 @@ export default function NamespaceDetail() {
   const navigate = useNavigate();
 
   const [settingLevel, setSettingLevel] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   const { data, loading, error, reload } = useAsync(() => projectsApi.get(name), {
     key: `project:${activeClusterId}:${name}`,
@@ -284,6 +291,18 @@ export default function NamespaceDetail() {
           >
             Scope the console to this namespace
           </Button>,
+          // §26. Danger-styled and last, and it opens a plan rather than a
+          // confirmation: what deleting a namespace takes with it is not in the
+          // namespace object, so there is nothing useful to confirm until the
+          // plan has been read.
+          <ActionButton
+            key="delete"
+            isDanger
+            gate={gate('delete')}
+            onClick={() => setDeleting(true)}
+          >
+            Delete namespace
+          </ActionButton>,
         ]}
       />
 
@@ -294,6 +313,18 @@ export default function NamespaceDetail() {
           namespace={name}
           current={project.podSecurity}
           onClose={() => setSettingLevel(false)}
+          onApplied={reload}
+        />
+      )}
+
+      {deleting && (
+        <DeleteNamespaceDialog
+          name={name}
+          onClose={() => setDeleting(false)}
+          // Reload rather than navigate away: `applied` means a
+          // deletionTimestamp, and the namespace is usually still there — in
+          // Terminating — for as long as its finalizers take. Leaving the page
+          // on success would report the deletion as finished.
           onApplied={reload}
         />
       )}

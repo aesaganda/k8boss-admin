@@ -637,6 +637,32 @@ rules:
     resources: ["namespaces"]
     verbs: ["patch"]
 
+  # §26 deleting a namespace — the single most destructive verb this console
+  # holds, and the reason it is stated here rather than left to the §14 router
+  # block below (which grants it among much else): a deployment that wants §26
+  # and not the router should be able to grant this one verb, and a deployment
+  # that wants neither should be able to see that removing it is enough.
+  #
+  # WHAT IT PERMITS. Everything in the namespace. The API server's namespace
+  # controller deletes every object inside regardless of ownerReferences, and
+  # for a PersistentVolumeClaim bound to a `Delete`-policy volume that means the
+  # storage provider destroys the disk — data this console cannot restore and
+  # neither can Kubernetes. §26 exists to put that on screen before the button:
+  # the plan lists every namespaced kind the cluster serves, reads each bound
+  # volume's reclaim policy, names the LoadBalancer addresses that are released
+  # and the admission webhooks left without a backend, and refuses the write
+  # until every one of those is acknowledged by code. None of that is a
+  # substitute for withholding the verb where nobody should hold it.
+  #
+  # The reads §26's plan needs are already granted to the reader role above —
+  # `get persistentvolumes` for the reclaim policy, and the two
+  # `admissionregistration.k8s.io` listings. Withhold either and the plan says
+  # so: an unreadable volume is reported as **unknown**, never as safe, and
+  # unreadable webhook configurations are `null` rather than "none point here".
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["delete"]
+
   # §21 setting an autoscaler's replica bounds — one merge patch on
   # `spec.minReplicas` and `spec.maxReplicas`. Stated on its own rather than
   # folded into a broader autoscaling grant because of what it permits: a

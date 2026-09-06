@@ -3618,6 +3618,185 @@ export function podSecuritySetFor(body, { warnings = PSA_ADMISSION_WARNINGS, cur
   };
 }
 
+/* ── §26 the deletion blast radius ──────────────────────────────────────── */
+
+/**
+ * The namespace §26 exists for: a database on a `Delete`-policy volume, a
+ * public address, and an admission webhook backed from inside it.
+ *
+ * Every tri-state this feature has is represented here rather than in a spec,
+ * so a spec that overrides one is overriding a shape the default already
+ * exercises:
+ *
+ *   `count: null` on `secrets`   the listing was refused, which is not zero.
+ *   `reclaim_policy: null`       on `analytics-scratch`, whose volume could not
+ *                                be read — unknown, not safe.
+ *   `webhooks: []` vs `null`     `[]` here; `namespaceDeleteWebhooksUnknown`
+ *                                turns it into the `null` case.
+ */
+export const NAMESPACE_DELETE_PLAN = {
+  name: 'prod',
+  phase: 'Active',
+  resourceVersion: '4210',
+  deletionTimestamp: null,
+  namespaceFinalizers: [],
+  inventory: {
+    kinds: [
+      { group: '', version: 'v1', resource: 'pods', kind: 'Pod', count: 14, truncated: false },
+      {
+        group: 'apps', version: 'v1', resource: 'deployments', kind: 'Deployment',
+        count: 6, truncated: false,
+      },
+      {
+        group: '', version: 'v1', resource: 'persistentvolumeclaims',
+        kind: 'PersistentVolumeClaim', count: 2, truncated: false,
+      },
+      { group: '', version: 'v1', resource: 'services', kind: 'Service', count: 3, truncated: false },
+      {
+        group: '', version: 'v1', resource: 'configmaps', kind: 'ConfigMap',
+        count: 0, truncated: false,
+      },
+      // The refused listing. Rendered as an em dash and never as 0.
+      { group: '', version: 'v1', resource: 'secrets', kind: 'Secret', count: null, truncated: null },
+    ],
+  },
+  volumes: [
+    {
+      claim: 'postgres-data', volume: 'pv-9c2f', phase: 'Bound', capacity: '200Gi',
+      storage_class: 'gp3', reclaim_policy: 'Delete', reason: null,
+    },
+    {
+      claim: 'analytics-scratch', volume: 'pv-77aa', phase: 'Bound', capacity: '1Ti',
+      storage_class: 'gp3', reclaim_policy: null,
+      reason:
+        'The volume behind this claim could not be read, so whether its data is destroyed or kept is unknown.',
+    },
+  ],
+  load_balancers: [{ name: 'edge', addresses: ['203.0.113.9'] }],
+  webhooks: [
+    {
+      configuration: 'prod-policy', kind: 'ValidatingWebhookConfiguration',
+      webhook: 'policy.example.com', service: 'admission', failure_policy: 'Fail',
+    },
+  ],
+  finalizers: [
+    { resource: '/persistentvolumeclaims', name: 'postgres-data', finalizers: ['kubernetes.io/pvc-protection'] },
+  ],
+  propagationPolicy: 'Background',
+  blocked: null,
+  consequences: [
+    {
+      code: 'namespace_destroys_volume_data',
+      label: '1 volume will be destroyed, not released',
+      consequence:
+        'postgres-data binds a volume whose reclaim policy is Delete, so the storage provider deletes the underlying disk when the claim goes. The data is gone.',
+      mitigation: 'Take a snapshot first, or set the PersistentVolume’s reclaim policy to Retain.',
+    },
+    {
+      code: 'namespace_volume_fate_unknown',
+      label: 'Whether 1 volume survives this is unknown',
+      consequence:
+        'analytics-scratch is bound to a volume this console could not read, so it cannot tell you whether its data is destroyed or kept. It is not reporting that they are safe.',
+      mitigation: 'Read the PersistentVolumes yourself — the reclaim policy is on the volume, not the claim.',
+    },
+    {
+      code: 'namespace_drops_load_balancer',
+      label: '1 load balancer and their addresses go with it',
+      consequence:
+        'edge currently answers on 203.0.113.9. Recreating the Service later gets a different one, and whatever points at the old address keeps pointing at nothing.',
+      mitigation: 'Check what resolves to these addresses before deleting.',
+    },
+    {
+      code: 'namespace_breaks_admission_webhook',
+      label: '1 admission webhook is served from this namespace, 1 of them failing closed',
+      consequence:
+        'prod-policy points at a Service in this namespace. The configurations are cluster-scoped and survive the delete; the Service does not. With failurePolicy: Fail the API server then refuses every write those webhooks intercept, across the whole cluster.',
+      mitigation: 'Delete the webhook configuration before the namespace, not after.',
+    },
+    {
+      code: 'namespace_inventory_incomplete',
+      label: 'This inventory is not complete',
+      consequence:
+        '1 kind(s) were refused or held more objects than the 200 this console reads per kind: secrets. Everything above is what was found in what was read, not what is in the namespace.',
+      mitigation: 'Treat the findings as a floor rather than a total.',
+    },
+  ],
+  unavailable: [
+    {
+      group: '', resource: 'secrets', namespace: 'prod', error: 'rbac_denied',
+      reason: 'forbidden', message: 'secrets is forbidden in prod.',
+      hint: 'Grant `list secrets` in prod.',
+    },
+  ],
+  partial: true,
+  gate: { enabled: true, detail: 'This deployment permits deleting a namespace.' },
+};
+
+/**
+ * §26 `GET /projects/{name}/delete-plan`.
+ *
+ * `overrides` is shallow-merged, so a spec asking for the unknown-webhook case
+ * writes `{ webhooks: null }` and inherits everything else.
+ */
+export function namespaceDeletePlanFor(name, overrides = {}) {
+  return { ...NAMESPACE_DELETE_PLAN, name, ...overrides };
+}
+
+/**
+ * §26 `DELETE /projects/{name}`.
+ *
+ * `applied` is derived from `dryRun`, never echoed: §1.5 makes it the only
+ * evidence a cluster changed, and a mock that returned what it was handed would
+ * let a dialog reporting a dry run as a deletion pass.
+ *
+ * A body naming fewer codes than the plan carries comes back as the backend's
+ * 422, because the acknowledgement is recomputed server-side and the dialog's
+ * whole job is to have collected them.
+ */
+export function namespaceDeleteFor(name, body, overrides = {}) {
+  const plan = namespaceDeletePlanFor(name, overrides);
+  const acknowledged = body.acknowledgeConsequences ?? [];
+  const missing = plan.consequences.filter((entry) => !acknowledged.includes(entry.code));
+  if (missing.length) {
+    return {
+      status: 422,
+      payload: {
+        error: 'invalid',
+        message: 'This deletion has consequences that have not been acknowledged.',
+        detail: missing.map((entry) => `${entry.code}: ${entry.label}`).join('; '),
+        hint: `Re-send with acknowledgeConsequences naming each of ${missing
+          .map((entry) => entry.code)
+          .join(', ')}.`,
+        context: {
+          parameter: 'acknowledgeConsequences',
+          unacknowledged: missing.map((entry) => entry.code),
+        },
+      },
+    };
+  }
+  return {
+    status: 200,
+    payload: {
+      dryRun: body.dryRun !== false,
+      applied: body.dryRun === false,
+      verb: 'delete',
+      target: { group: '', version: 'v1', resource: 'namespaces', name },
+      diff: {
+        before: `apiVersion: v1\nkind: Namespace\nmetadata:\n  name: ${name}\n`,
+        after: '',
+        unified: `--- live\n+++ projected\n@@\n-apiVersion: v1\n-kind: Namespace\n-metadata:\n-  name: ${name}\n`,
+        digest: 'sha256:namespace-delete',
+        changed: true,
+      },
+      resourceVersion: plan.resourceVersion,
+      warnings: [],
+      auditId: body.dryRun === false ? 9600 : null,
+      consequences: plan.consequences,
+      plan,
+    },
+  };
+}
+
 /** §17 `POST /projects/plan`. `exists` is true for the one namespace the list fixture already has. */
 export function projectPlanFor(body) {
   const exists = FIXTURES.namespaces.items.some((row) => row.name === body.name);
@@ -3790,6 +3969,9 @@ export async function mockApi(
     projectCreate = null,
     podSecurityPlan = null,
     podSecuritySet = null,
+    namespaceDeletePlan = null,
+    namespaceDeleteOverrides = undefined,
+    namespaceDeletes = [],
     clusterStatus = null,
     claims = null,
     expandPlan = null,
@@ -4372,6 +4554,25 @@ export async function mockApi(
       const body = JSON.parse(route.request().postData() || '{}');
       const current = (project ?? FIXTURES.project).podSecurity;
       return json(podSecuritySet ? podSecuritySet(body) : podSecuritySetFor(body, { current }));
+    }
+    // §26. Ordered with the other subpaths, before the `/projects/{name}` read
+    // that matches anything under the prefix.
+    if (path.endsWith('/delete-plan') && route.request().method() === 'GET') {
+      const name = decodeURIComponent(path.split('/')[2]);
+      return json(
+        namespaceDeletePlan
+          ? namespaceDeletePlan(name)
+          : namespaceDeletePlanFor(name, namespaceDeleteOverrides ?? {}),
+      );
+    }
+    if (path.startsWith('/projects/') && route.request().method() === 'DELETE') {
+      const name = decodeURIComponent(path.split('/')[2]);
+      const body = JSON.parse(route.request().postData() || '{}');
+      namespaceDeletes.push({ name, body });
+      const { status, payload } = namespaceDeleteFor(
+        name, body, namespaceDeleteOverrides ?? {},
+      );
+      return json(payload, status);
     }
     if (path.startsWith('/projects/')) {
       return json(project ?? FIXTURES.project);

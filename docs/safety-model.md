@@ -1461,3 +1461,118 @@ raises nothing, and the operator previews and confirms.
 That is a deliberate decision rather than an omission. A checkbox on every
 request is a checkbox nobody reads on the one asking for `system:masters` — which
 is the request this whole section exists for.
+
+---
+
+## 17. Deleting a namespace (§26) — the diff that shows the wrong thing
+
+Every other section here is about making a preview *honest*. This one is about a
+preview that is perfectly honest and shows the wrong object.
+
+§4's delete previews `before=live, after=null`. For a namespace that is a
+metadata block disappearing: a name, a couple of labels, a `spec.finalizers` list
+with `kubernetes` in it. Nothing on that screen is the database, the address, or
+the admission webhook that goes with it. An operator who reads it carefully and
+approves it has done everything this model asks of them and is still about to
+lose a disk.
+
+`kubectl` is no better. `kubectl delete namespace prod` prints
+`namespace "prod" deleted` — a sentence that is also not true at the moment it is
+printed, since what has happened is a `deletionTimestamp`.
+
+### 17.1 The four things, and why they are on screen rather than in a warning
+
+A generic "this deletes everything in the namespace" banner is true and does not
+help: an operator already knows that, and the question they cannot answer from
+their own memory is *which* everything. So §26 reads it.
+
+**What is in it.** One listing per namespaced kind the cluster serves, from
+discovery. Not a curated list of the fifteen kinds that usually matter: a curated
+list is a completeness claim, and it goes stale the first time somebody installs
+an operator. The namespace whose contents an operator cannot recite is exactly
+the one full of custom resources.
+
+**What happens to the data.** For each PersistentVolumeClaim, the bound volume's
+`persistentVolumeReclaimPolicy`. This is the finding the section exists for,
+because the policy lives on a cluster-scoped object the operator is not looking
+at, `Delete` and `Retain` are opposite outcomes, and only one of them is
+recoverable.
+
+**What stops answering.** LoadBalancer Services, with their current addresses —
+because the address is what other people's systems point at, and it does not come
+back. And webhook configurations backed from inside, which is §19's finding moved
+one step earlier: §19 tells you a webhook has no backend *after* somebody deleted
+its namespace, and at `failurePolicy: Fail` that is a cluster refusing writes.
+
+**Why it might not finish.** Every object holding a finalizer. This is the one
+finding that is equally useful after the fact, which is why the plan is a read
+and is offered on a namespace already `Terminating`: the same screen that would
+have warned you is the screen that tells you what is holding it.
+
+### 17.2 The three nulls, and what each one prevents
+
+§0.1's corollary — *a number we could not derive is `null`, never `0`* — is
+stated once in the invariants and lands hardest here.
+
+`count: null` on a kind whose listing was refused. The alternative renders as
+"this namespace holds no PersistentVolumeClaims", which is §0.1's motivating
+sentence appearing at the exact moment it costs the most. It also covers the
+truncation case: a listing with a `continue` token and no `remainingItemCount`
+is `null`, not the page size, because "200" reads as a total.
+
+`reclaim_policy: null` on a claim whose volume could not be read. The two real
+answers point in opposite directions, so there is no safe default — `Retain`
+would say the data is fine and `Delete` would say it is doomed, and both are
+claims about somebody's database made by a console that did not look. The UI
+draws it as an em dash with the reason, and it is a consequence the operator
+acknowledges by name.
+
+`webhooks: null` when neither configuration listing answered. `[]` there says "no
+webhook points at this namespace", which is the most reassuring possible
+description of "we could not look" — and the gap between them is a cluster that
+stops accepting writes. One listing answering is enough to report what it saw:
+losing the mutating listing must not turn a real validating finding into silence.
+
+### 17.3 Recomputed at the write, never trusted from the plan
+
+The plan can be minutes old — this is the most expensive read in the console, and
+it is the screen people stare at. In between, a volume can be provisioned, a
+LoadBalancer can come up, an operator can install a webhook. So the write
+recomputes the whole plan and checks the acknowledgement against **that**, which
+is the same rule §18, §20, §21, §22, §24 and §25 follow and matters more here:
+the tick the operator gave was for a namespace that no longer exists in that
+shape.
+
+### 17.4 The typed confirmation is not the handshake
+
+§26 has both, and they answer different questions. The checklist covers the
+consequences the plan *found* — this volume, that address, that webhook — and an
+empty namespace produces none of them. Typing the namespace name covers the act
+itself, which is irreversible whether or not it takes anything interesting with
+it, and is there on every deletion including the empty one.
+
+Neither is theatre and neither substitutes for the other. A checklist without the
+typed field would let an empty namespace be deleted by one misplaced click; a
+typed field without the checklist would make an operator spell out `prod` while
+telling them nothing about the disk.
+
+### 17.5 `applied: true` is a deletionTimestamp
+
+This is the defect standard applied to the one write in the console whose
+completion is genuinely not observable at the moment it returns. The namespace
+controller starts; how long it takes is a function of finalizers this console
+does not run. So the summary says the deletion *started*, names `Terminating` as
+the state it may sit in, and points back at the finalizer table rather than
+reporting a namespace that is gone.
+
+"Deleted" over a namespace stuck behind an uninstalled operator's finalizer is
+the same sentence as §6's "drained" over three pods the API server refused.
+
+### 17.6 What withholding the permission does
+
+`delete namespaces` is the single most destructive verb this console holds, and
+the shipped writer role states it as its own rule with its own paragraph so that
+removing it is a one-line decision. Withheld, the plan still reads — an operator
+deciding whether to grant it can see exactly what granting it would allow — and
+the button is disabled with the reason, per rule 11.4. Nothing about §26 is a
+substitute for not holding the verb where nobody should.
