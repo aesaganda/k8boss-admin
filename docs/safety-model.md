@@ -1766,3 +1766,77 @@ is one nobody reads on the day it matters.
 And it writes nothing. Editing a budget is §4's YAML editor, through the funnel —
 because a budget changed without a diff shown first is exactly the change that
 turns a routine drain into a stalled upgrade.
+
+---
+
+## 20. Quota advice (§29) — the refusal that is not about headroom
+
+§29 is the only section in this document about a refusal the console cannot
+prevent, cannot preflight and does not audit. A ResourceQuota is enforced by the
+API server's admission chain, which is exactly where it should be. What §29 adds
+is that the answer arrives *before* the write instead of as a 403 afterwards —
+and that the two refusals a 403 makes look alike are kept apart.
+
+### 20.1 Why "must specify" is the one that costs an afternoon
+
+A quota bounding a compute resource makes that resource compulsory on every
+container in the namespace. Omit it and the pod is refused with *"must specify
+requests.cpu"* **at any level of quota usage** — one percent used, refused. The
+fix is a LimitRange with a `defaultRequest`, and the message names a field
+rather than the missing object.
+
+That is a different problem from "the quota is full", and the two send an
+operator to two different places: one to trim the request or raise the limit,
+the other to create an object the refusal never mentions. A console that listed
+them together would send somebody to raise a limit that is fine, which wastes
+the afternoon the message already cost them. So they are separate findings, on
+separate rows, with the headroom check for the same resource visibly reading
+`admitted` beside the "must specify" refusal.
+
+### 20.2 `unknown` is a verdict, not a failure
+
+Three situations make the arithmetic unfinishable, and all three answer
+`unknown` rather than resolving toward the reassuring side:
+
+**An unwritten `status.used`.** The quota controller writes usage
+asynchronously, so a fresh quota has none. Reading absence as zero would report
+the roomiest possible headroom at the moment this console knows least — to the
+person about to deploy. That is the defect standard aimed squarely at the
+question being asked.
+
+**A scoped quota.** `scopes` and `scopeSelector` decide which pods a quota
+counts, and for a workload that does not exist yet the answer depends on its
+priority class, its terminating state or whether it requests anything at all.
+Including it invents a refusal from a quota that may not govern the workload;
+excluding it hides a real one. So the quota's numbers are shown, its verdict is
+withheld, and the namespace verdict is `unknown`.
+
+**A LimitRange listing that did not answer.** This one additionally suppresses
+the "must specify" check rather than computing it from an empty default map.
+Computing it there would be wrong in the *dangerous* direction: a workload
+reported as refused for a missing value that a default this console could not
+read would have supplied. Under uncertainty the rule is not "assume the worst" —
+it is "say you do not know", because a false refusal trains people to ignore the
+true ones.
+
+### 20.3 The boundary with §4's dry run
+
+§4 can already ask the API server, and the API server is the authority. §29 does
+not compete with that and says so: no field is named `will_be_admitted`.
+
+The two answer different questions at different times. §4's dry-run create needs
+a manifest and `create` permission, and returns *refused* — one bit. §29 answers
+from a form before a manifest exists, and returns the two things the 403 does
+not carry: how much room is left, and which of a quota's eight bounds is the
+tight one. During an incident that difference is the difference between "it will
+not deploy" and "trim 200 millicores off the sidecar".
+
+### 20.4 What it deliberately does not model
+
+LimitRange `max`, `min` and `maxLimitRequestRatio`, Pod-scoped LimitRange items,
+and priority-class scope selectors are read and reported but not evaluated into
+the verdict. Where any of them could change the answer the verdict is `unknown`.
+
+And fitting inside a quota is not fitting on a node. A workload §29 admits can
+still sit `Pending` because nothing has room for it, which is the scheduler's
+answer and a different question — §5's, not this one's.

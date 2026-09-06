@@ -3622,6 +3622,121 @@ export function podSecuritySetFor(body, { warnings = PSA_ADMISSION_WARNINGS, cur
   };
 }
 
+/* ── §29 quota advice ───────────────────────────────────────────────────── */
+
+/**
+ * A namespace whose quota bounds `requests.cpu` and whose LimitRange defaults
+ * nothing — the trap §29 exists for. `requests.memory` is bounded *and*
+ * defaulted, so the two cases sit side by side and a page that conflated them
+ * would show it.
+ */
+export const QUOTA_ADVICE = {
+  namespace: 'prod',
+  quotas: [
+    {
+      name: 'team', namespace: 'prod', scopes: [], scoped: false, applies: true,
+      resources: [
+        { resource: 'pods', hard: '50', used: '12', hard_value: '50', used_value: '12',
+          exhausted: false },
+        { resource: 'requests.cpu', hard: '10', used: '9', hard_value: '10',
+          used_value: '9', exhausted: false },
+        { resource: 'requests.memory', hard: '20Gi', used: '4Gi',
+          hard_value: '21474836480', used_value: '4294967296', exhausted: false },
+      ],
+      headroom: { pods: '38', 'requests.cpu': '1', 'requests.memory': '17179869184' },
+      findings: [],
+      age_seconds: 864000,
+    },
+  ],
+  limitRanges: [
+    { name: 'defaults', namespace: 'prod', age_seconds: 864000, limits: [
+      { type: 'Container', max: {}, min: {}, default: {},
+        defaultRequest: { memory: '256Mi' }, maxLimitRequestRatio: {} },
+    ] },
+  ],
+  containerDefaults: { 'requests.memory': '256Mi' },
+  mandatory: ['requests.cpu', 'requests.memory'],
+  findings: [{
+    code: 'quota_requires_unset_resource',
+    label: '1 resource(s) every pod must state, with no default to supply them',
+    detail:
+      'A quota that bounds a compute resource makes it mandatory: requests.cpu must be set on every container, or the pod is refused with "must specify …" — even when the quota is barely used. No LimitRange in this namespace supplies a default for them.',
+    resources: ['requests.cpu'],
+    quotas: ['team'],
+  }],
+  unavailable: [],
+  partial: false,
+};
+
+/**
+ * §29 `POST /quota/{ns}/preview`, derived from the body the way the backend is.
+ *
+ * `verdict` is computed, never echoed: it is the one field a mock that returned
+ * what it was handed would let a page ignore entirely.
+ */
+export function quotaPreviewFor(body, advice = QUOTA_ADVICE) {
+  const replicas = Number(body.replicas ?? 1);
+  const containers = body.containers ?? [];
+  const defaults = advice.containerDefaults ?? {};
+  const mandatory = advice.mandatory ?? [];
+
+  const unset = [];
+  const perPod = {};
+  for (const [index, c] of containers.entries()) {
+    for (const key of mandatory) {
+      const [kind, resource] = [key.split('.')[0], key.split('.').slice(1).join('.')];
+      const declared = (c[kind] ?? {})[resource];
+      const value = declared ?? defaults[key];
+      if (value === undefined || value === '') {
+        unset.push({ container: c.name ?? `container[${index}]`, resource: key });
+        continue;
+      }
+      const n = String(value).endsWith('m')
+        ? Number(String(value).slice(0, -1)) / 1000
+        : String(value).endsWith('Mi')
+          ? Number(String(value).slice(0, -2)) * 1024 * 1024
+          : String(value).endsWith('Gi')
+            ? Number(String(value).slice(0, -2)) * 1024 * 1024 * 1024
+            : Number(value);
+      perPod[key] = (perPod[key] ?? 0) + n;
+    }
+  }
+
+  const checks = [];
+  for (const quota of advice.quotas ?? []) {
+    for (const entry of quota.resources) {
+      const key = entry.resource;
+      const want = key === 'pods' ? replicas : (perPod[key] ?? 0) * replicas;
+      const room = quota.headroom?.[key];
+      const verdict =
+        quota.applies === null || room === null || room === undefined
+          ? 'unknown'
+          : want <= Number(room) ? 'admitted' : 'refused';
+      checks.push({ quota: quota.name, resource: key, needed: String(want),
+                    headroom: room ?? null, verdict });
+    }
+  }
+
+  const verdicts = checks.map((c) => c.verdict);
+  if (unset.length) verdicts.push('refused');
+  const verdict = verdicts.includes('refused')
+    ? 'refused'
+    : verdicts.includes('unknown') ? 'unknown' : 'admitted';
+
+  return {
+    ...advice,
+    preview: {
+      replicas,
+      needed: Object.fromEntries(
+        Object.entries(perPod).map(([k, v]) => [k, String(v * replicas)]),
+      ),
+      unsetMandatory: unset,
+      checks,
+      verdict,
+    },
+  };
+}
+
 /* ── §28 disruption budgets ─────────────────────────────────────────────── */
 
 /**
@@ -4080,6 +4195,8 @@ export async function mockApi(
     clusters = null,
     clusterWrites = [],
     disruptionBudgets = null,
+    quotaAdvice = null,
+    quotaPreviews = [],
     clusterStatus = null,
     claims = null,
     expandPlan = null,
@@ -4164,6 +4281,15 @@ export async function mockApi(
       const body = JSON.parse(route.request().postData() || '{}');
       clusterWrites.push(body);
       return json({ ...FIXTURES.clusters.items[0], ...body });
+    }
+    // §29. Ordered before the plain advice route: the preview lives under it.
+    if (/^\/quota\/[^/]+\/preview$/.test(path) && route.request().method() === 'POST') {
+      const body = JSON.parse(route.request().postData() || '{}');
+      quotaPreviews.push(body);
+      return json(quotaPreviewFor(body, quotaAdvice ?? QUOTA_ADVICE));
+    }
+    if (/^\/quota\/[^/]+$/.test(path)) {
+      return json(quotaAdvice ?? QUOTA_ADVICE);
     }
     if (path === '/disruption/budgets') {
       return json(disruptionBudgets ?? DISRUPTION_BUDGETS);
