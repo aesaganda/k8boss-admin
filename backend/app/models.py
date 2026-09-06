@@ -99,6 +99,33 @@ class Cluster(Base):
     ca_certificate = Column(Text, nullable=True)
     skip_tls_verify = Column(Boolean, nullable=False, default=False)
 
+    # ADR-0007. When true, every cluster call this console makes on behalf of a
+    # signed-in operator carries `Impersonate-User` and `Impersonate-Group`, so
+    # the API server evaluates authorization, admission and its own audit record
+    # as that person rather than as this console's ServiceAccount.
+    #
+    # Per-cluster and off by default, because the grant it needs — `impersonate`
+    # on `users` — is cluster-admin by proxy when it carries no `resourceNames`,
+    # and because it is only defensible where the cluster and the console
+    # believe the *same* issuer. A deployment with one cluster whose
+    # `--oidc-issuer-url` matches the console's and a second with no OIDC at all
+    # must be able to have this on for the first and off for the second, which a
+    # console-wide flag could not express.
+    #
+    # Surfaced in every ClusterPublic response beside `skip_tls_verify`, and for
+    # the same reason: a setting that changes who the cluster thinks is asking
+    # can never be silently in effect.
+    #
+    # Nullable, unlike `skip_tls_verify`, because it was added to a schema that
+    # already had rows and `schema_upgrade` only adds nullable columns — a NOT
+    # NULL with a default is a table rewrite, which is the migration that module
+    # says out loud it does not perform. NULL means "registered before this
+    # setting existed", which is off; every read goes through `bool()` so the
+    # third state never reaches a decision. This is the one place in the schema
+    # where a null boolean is not a tri-state, and it is safe only because the
+    # absent answer and the false answer call for the same behaviour.
+    impersonation_enabled = Column(Boolean, nullable=True, default=False)
+
     # §13. The cluster's wildcard DNS domain — the "apps.<cluster>.example.com"
     # that a generated exposure hostname is built under. A property of the
     # cluster's DNS, never of the console, which is why it lives here and not in
@@ -150,6 +177,7 @@ class Cluster(Base):
             "authentication_type": self.authentication_type,
             "has_ca_certificate": bool(self.ca_certificate),
             "skip_tls_verify": bool(self.skip_tls_verify),
+            "impersonation_enabled": bool(self.impersonation_enabled),
             "app_domain": self.app_domain,
             "status": self.status,
             "server_version": self.server_version,
@@ -221,6 +249,29 @@ class AuthSession(Base):
     csrf_token = Column(String(64), nullable=False)
     expires_at = Column(DateTime, nullable=False, index=True)
     created_at = Column(DateTime, nullable=False, default=utcnow)
+
+    # ADR-0007. What the identity provider said about this person, kept verbatim
+    # for the life of this session and nowhere else.
+    #
+    # On the *session* rather than on `users` because it is a property of one
+    # sign-in: an operator's groups change, and the row that outlives the
+    # assertion must not go on asserting what the assertion said last month.
+    #
+    # `idp_username` is the claim as the issuer sent it, before
+    # `normalize_username` casefolds it for the console's own account table. The
+    # console's username is this application's key; `Impersonate-User` has to be
+    # the string the *cluster* would derive from the same token, and a cluster
+    # whose `--oidc-username-claim` yields `Alice@example.com` does not know
+    # anybody called `alice@example.com`.
+    idp_username = Column(String(255), nullable=True)
+
+    # A JSON array, and NULL is load-bearing: it means the issuer did not send a
+    # groups claim, which is not the same as sending an empty one. Impersonating
+    # with no groups when the claim was merely absent strips every group-derived
+    # permission the operator holds and reports the result as permissions they
+    # lack — so an absent claim refuses instead. `[]` is a real answer and
+    # impersonates fine.
+    idp_groups = Column(Text, nullable=True)
 
 
 #: ``category`` values. Two kinds of record live in one table because they answer
@@ -313,6 +364,23 @@ class AuditRecord(Base):
     actor = Column(String(255), nullable=False, default="anonymous")
     source_ip = Column(String(64), nullable=True)
 
+    # ADR-0007. The cluster identity this write was actually made as, when the
+    # cluster impersonates; NULL when it was made as the console's
+    # ServiceAccount, which is every row this table held before ADR-0007 and
+    # every row on every cluster that has not opted in.
+    #
+    # Both are recorded because they answer different questions. `actor` is who
+    # used this console and is a name only this application can vouch for.
+    # `impersonated_user` is the name the *API server* saw, evaluated
+    # authorization against, and wrote into its own audit log — so an incident
+    # review can join this trail to the cluster's by a value neither side
+    # invented, which is a materially stronger claim than ADR-0003 can make
+    # about a table this application owns.
+    #
+    # NULL is never rendered as "unknown". It means the console acted as itself,
+    # which is a fact, and the §10 row says so in those words.
+    impersonated_user = Column(String(255), nullable=True)
+
     cluster_id = Column(Integer, nullable=True)
     # Denormalised on purpose. A cluster can be de-registered, and an audit row
     # that then renders as "cluster 7" is unreadable exactly when it is needed.
@@ -396,6 +464,11 @@ class AuditRecord(Base):
             "diff_digest": self.diff_digest,
             "error": self.error,
             "source_ip": self.source_ip,
+            # ADR-0007. NULL on the wire too, and it means "this console acted
+            # as itself" rather than "we do not know". Not defaulted to `actor`:
+            # that would claim the API server saw a name it never saw, which is
+            # the attribution ADR-0003 refuses to manufacture.
+            "impersonated_user": self.impersonated_user,
             # The chain link, echoed so an exported trail can be verified by
             # something that is not this console. Both null means the row is
             # outside the chain, which GET /api/audit/verify reports as

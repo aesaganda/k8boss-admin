@@ -474,12 +474,16 @@ export function useGates(checks, { enabled = true } = {}) {
         };
       }
       if (!result.allowed) {
+        // ADR-0007 condition 5: whose permission, not just which. The fallback
+        // sentence used to assert the console's ServiceAccount unconditionally,
+        // which is wrong on an impersonating cluster and was only ever right by
+        // accident — §9 now says which subject the review answered for, and
+        // "the console's ServiceAccount" is one of the values it can carry.
+        const subject = result.subject || 'the console ServiceAccount';
         return {
           allowed: false,
-          reason:
-            result.hint ||
-            result.reason ||
-            'The cluster refused this permission for the console ServiceAccount.',
+          reason: result.hint || result.reason || `The cluster refused this permission for ${subject}.`,
+          subject,
         };
       }
       return { allowed: true, reason: null };

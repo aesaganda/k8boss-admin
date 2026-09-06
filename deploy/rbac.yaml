@@ -24,6 +24,12 @@
 #             reach its port. Chosen explicitly for this deployment; revert by
 #             deleting the wildcard rule if that stops being true.
 #   APPLIED   ClusterRoleBinding k8boss-admin-writer  — the last document below.
+#   NOT APPLIED  the ADR-0007 `impersonate` rule. It is written out, commented
+#             out, and `resourceNames`-shaped, at the end of the writer
+#             ClusterRole. Uncommenting it is what lets a cluster registered
+#             with "act as the signed-in operator" work at all; leaving it
+#             commented is what keeps this ServiceAccount from being able to
+#             become anybody on the cluster.
 #
 # So `kubectl apply -f rbac.yaml` produces a console that can read every
 # cluster it is registered against and write to all of them, unrestricted.
@@ -789,6 +795,61 @@ rules:
   - apiGroups: ["operators.coreos.com"]
     resources: ["subscriptions"]
     verbs: ["create"]
+
+  # ADR-0007 — acting as the signed-in operator. NOT APPLIED: the rule is
+  # written out and commented out, and uncommenting it is the whole opt-in on
+  # the cluster's side. Read all of this before you do.
+  #
+  # WHAT IT IS FOR. A cluster registered with "act as the signed-in operator"
+  # makes every call carrying `Impersonate-User` and `Impersonate-Group`, so the
+  # API server evaluates authorization, admission and ITS OWN AUDIT LOG as the
+  # person using the console. That last part is the point: the cluster's log
+  # then names both parties, so "who scaled the payments service to zero" is
+  # answerable by somebody who does not trust this console at all — a materially
+  # stronger claim than the console's own hash-chained trail can make about a
+  # table this application owns.
+  #
+  # WHY resourceNames IS NOT OPTIONAL HERE. `impersonate` on `users` with no
+  # `resourceNames` is cluster-admin by proxy: an account that can impersonate
+  # any user can impersonate the most powerful user on the cluster, and the
+  # console's blast radius stops being "whatever this file grants" and becomes
+  # "everything anybody on this cluster can do". On a deployment that has kept
+  # the wildcard rule below, that adds attribution rather than power — but this
+  # rule is written for the deployment that DELETED the wildcard and has a
+  # genuinely bounded ServiceAccount, because that is the one an unrestricted
+  # grant would unbound in a single line.
+  #
+  # The cost of the narrow form, stated: it is a list somebody maintains, and an
+  # operator missing from it cannot use that cluster at all. The console reports
+  # that as `impersonation_unavailable` naming the reason rather than as a
+  # permission denial, so it looks like the missing grant it is and not like a
+  # broken console — but somebody still has to add the name.
+  #
+  # The group rule is `system:authenticated` plus whatever groups your issuer
+  # actually states. `system:authenticated` is there because the API server adds
+  # it to every request it authenticates itself and does NOT add it to an
+  # impersonated one; without it, operators are refused permissions they hold.
+  #
+  # THIS RULE ALONE IS NOT ENOUGH, and the other half is not RBAC: the console
+  # sends the username YOUR IDENTITY PROVIDER states, so this cluster's
+  # `--oidc-username-claim` has to resolve to the same string the console's
+  # `OIDC_USERNAME_CLAIM` does. Where the two issuers differ, the console is
+  # asserting an identity this cluster has never heard of, and every request is
+  # refused as that person. There is no check for that here or anywhere else —
+  # this console cannot read a cluster's apiserver flags and will not pretend to.
+  #
+  # - apiGroups: [""]
+  #   resources: ["users"]
+  #   verbs: ["impersonate"]
+  #   resourceNames:
+  #     - "alice@example.com"
+  #     - "bob@example.com"
+  # - apiGroups: [""]
+  #   resources: ["groups"]
+  #   verbs: ["impersonate"]
+  #   resourceNames:
+  #     - "system:authenticated"
+  #     - "platform-admins"
 
   # §4 generic write over ANYTHING the cluster serves — CRDs included.
   #

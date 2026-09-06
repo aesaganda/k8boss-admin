@@ -291,6 +291,12 @@ def test_successful_ldap_bind_synchronizes_profile_and_admin_group(
         "email": "directory.admin@example.test",
         "role": "admin",
         "auth_source": "ldap",
+        # ADR-0007: an LDAP session carries no issuer-stated identity and can
+        # never impersonate. Asserted here rather than only in the impersonation
+        # tests because this is the exact-shape assertion a future field would
+        # have to be added to deliberately.
+        "idp_username": None,
+        "can_impersonate": False,
     }
     db_session.expire_all()
     row = db_session.scalar(select(User).where(User.username == "directory.admin"))

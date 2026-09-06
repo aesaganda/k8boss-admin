@@ -46,6 +46,7 @@ from app.errors import (
     UpstreamError,
 )
 from app.k8s.client import get_api_client, get_clients
+from app.k8s.impersonation import as_service_account
 from app.resources.envelope import ALL_RESOURCES, collect
 
 logger = logging.getLogger(__name__)
@@ -210,6 +211,40 @@ def _resource_item(
     }
 
 
+#: Why discovery is not impersonated, in one sentence the exemption test quotes.
+_DISCOVERY_IS_SHARED = (
+    "ADR-0007 names discovery as a ServiceAccount call: the catalog is cached "
+    "per cluster and shared between every signed-in operator, so a listing made "
+    "as one of them would be served to the rest."
+)
+
+
+def _discovery_get(path: str) -> dict[str, Any]:
+    """``raw_get`` for the three discovery reads, made as the console (ADR-0007).
+
+    **This is an exemption the ADR requires be named, and it is the one worth
+    reading twice**, because the obvious objection is right and the answer is
+    that the cache is the problem rather than the call.
+
+    ``discover()`` memoises its result per ``(cluster_id, cache_key)`` and hands
+    the same catalog to everybody. Impersonating it would mean whichever
+    operator warmed the cache decided what every other operator sees the cluster
+    as serving — and on a cache miss, an unlucky one would be told a resource
+    does not exist on a cluster that serves it. Keying the cache per identity
+    instead would multiply a cluster-wide round trip by the number of signed-in
+    people, to answer a question whose answer does not vary by person.
+
+    It does not vary because discovery reports what the **API** serves, not what
+    the caller may do with it: ``/api`` and ``/apis`` are readable by
+    ``system:authenticated`` on a default cluster, the ``verbs`` in a discovery
+    document are the resource's own capabilities, and nothing here is filtered
+    by RBAC. Every question that *is* about the caller — may I list this, may I
+    patch that — goes through §9's preflight, which is impersonated.
+    """
+    with as_service_account(_DISCOVERY_IS_SHARED):
+        return raw_get(path)
+
+
 def _discover_group_versions(unavailable: list[dict[str, Any]]) -> list[tuple[str, str, bool]]:
     """Enumerate every served ``(group, version, is_preferred)``.
 
@@ -221,7 +256,7 @@ def _discover_group_versions(unavailable: list[dict[str, Any]]) -> list[tuple[st
     group_versions: list[tuple[str, str, bool]] = []
 
     with collect(unavailable, "", ALL_RESOURCES):
-        payload = raw_get("/api")
+        payload = _discovery_get("/api")
         versions = [v for v in (payload.get("versions") or []) if v]
         for version in versions:
             group_versions.append(("", version, version == versions[0]))
@@ -230,7 +265,7 @@ def _discover_group_versions(unavailable: list[dict[str, Any]]) -> list[tuple[st
     # which groups we failed to see, and naming one would be an invention. The
     # detail says so in words for the operator.
     with collect(unavailable, ALL_RESOURCES, ALL_RESOURCES):
-        payload = raw_get("/apis")
+        payload = _discovery_get("/apis")
         for group_payload in payload.get("groups") or []:
             name = group_payload.get("name") or ""
             preferred_gv = (group_payload.get("preferredVersion") or {}).get("groupVersion")
@@ -275,7 +310,7 @@ def discover() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
             f"/apis/{quote_segment(group)}/{quote_segment(version)}"
         )
         with collect(unavailable, group, ALL_RESOURCES):
-            payload = raw_get(path)
+            payload = _discovery_get(path)
             for resource_payload in payload.get("resources") or []:
                 item = _resource_item(
                     resource_payload, group=group, version=version, preferred=preferred

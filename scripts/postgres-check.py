@@ -71,6 +71,7 @@ database.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=eng
 
 from app import schema_upgrade
 from app.audit import integrity, recorder
+from app.k8s import impersonation
 from app.database import Base
 from app.models import AuditRecord, install_audit_append_only_guard
 
@@ -135,10 +136,30 @@ Base.metadata.create_all(bind=engine)
 # --- 1. ADD COLUMN on a populated Postgres table ---
 schema_upgrade.upgrade(engine)
 cols = {c["name"] for c in inspect(engine).get_columns("audit_records")}
-assert {"category", "prev_hash", "event_hash"} <= cols, cols
+assert {"category", "prev_hash", "event_hash", "impersonated_user"} <= cols, cols
 assert "external_id" in {c["name"] for c in inspect(engine).get_columns("users")}
-assert "app_domain" in {c["name"] for c in inspect(engine).get_columns("clusters")}
+cluster_cols = {c["name"] for c in inspect(engine).get_columns("clusters")}
+assert {"app_domain", "impersonation_enabled"} <= cluster_cols, cluster_cols
 print("PASS  ALTER TABLE ADD COLUMN on a populated PostgreSQL table")
+
+# ADR-0007's flag is the one nullable BOOLEAN this schema adds, and PostgreSQL
+# has a real boolean type where SQLite has NUMERIC affinity — so this is exactly
+# the divergence CI cannot see. NULL on an already-registered cluster means
+# "registered before the setting existed", which every read turns into False
+# through `bool()`. A migration that defaulted it to true would have every
+# existing cluster start asserting operator identities nobody opted in to.
+with engine.begin() as c:
+    flag = c.execute(text(
+        "SELECT impersonation_enabled FROM clusters WHERE name = 'legacy-prod'"
+    )).scalar()
+assert flag is None, flag
+assert bool(flag) is False
+with engine.begin() as c:
+    c.execute(text("UPDATE clusters SET impersonation_enabled = true"))
+    assert c.execute(text("SELECT impersonation_enabled FROM clusters")).scalar() is True
+    c.execute(text("UPDATE clusters SET impersonation_enabled = false"))
+    assert c.execute(text("SELECT impersonation_enabled FROM clusters")).scalar() is False
+print("PASS  impersonation_enabled is a real nullable BOOLEAN on PostgreSQL, NULL = off")
 
 # The registered cluster is still there and its new column is NULL — "we do not
 # know of a wildcard domain", which §13.3.1 renders as "generate no hostname".
@@ -192,6 +213,55 @@ assert report["first_break"] is None, report
 print("PASS  hash canonicalisation round-trips through PostgreSQL TIMESTAMP/BOOLEAN/JSON")
 print("PASS  pre-chain rows reported as unchained, verdict withheld as `partial`")
 
+# --- 3b. ADR-0007's optional hashed field, on PostgreSQL ---
+#
+# The riskiest thing in that change and the one CI cannot see. `impersonated_user`
+# is hashed ONLY when it is set, so that rows written before the column existed —
+# like the pre-chain row above, and every row on every cluster that never opted
+# in — hash to what they always hashed to. Get that wrong and the whole table
+# verifies as `broken`: a false "this row was modified" alarm delivered by a
+# schema change, which is the alarm everyone learns to ignore.
+#
+# Checked here rather than only on SQLite because the omission interacts with how
+# an engine round-trips NULL in a VARCHAR column, and PostgreSQL is the engine
+# production runs.
+impersonation.set_current(impersonation.Decision(
+    impersonation=impersonation.Impersonation(
+        username="alice@example.com", groups=("system:authenticated",),
+    ),
+    subject="alice@example.com",
+))
+mixed_id = recorder.record(verb="delete", target=dict(TARGET), dry_run=False,
+                           outcome="applied", detail="impersonated change")
+impersonation.set_current(None)
+assert mixed_id is not None
+
+with engine.begin() as c:
+    stored = c.execute(text(
+        "SELECT impersonated_user FROM audit_records WHERE id = :i"
+    ), {"i": mixed_id}).scalar()
+assert stored == "alice@example.com", stored
+
+report = recorder.verify_chain()
+assert report["status"] == integrity.STATUS_PARTIAL, report
+assert report["first_break"] is None, report
+assert report["verified"] == 6, report
+print("PASS  a chain mixing impersonated and console rows verifies intact on PostgreSQL")
+
+# And the omission is not a hole: erasing the attribution breaks the chain,
+# because the stored digest covered a key the recomputation no longer produces.
+with engine.begin() as c:
+    c.execute(text("UPDATE audit_records SET impersonated_user = NULL WHERE id = :i"),
+              {"i": mixed_id})
+report = recorder.verify_chain()
+assert report["status"] == integrity.STATUS_BROKEN, report
+assert report["first_break"]["id"] == mixed_id, report
+with engine.begin() as c:
+    c.execute(text("UPDATE audit_records SET impersonated_user = 'alice@example.com' "
+                   "WHERE id = :i"), {"i": mixed_id})
+assert recorder.verify_chain()["status"] == integrity.STATUS_PARTIAL
+print("PASS  erasing an impersonated subject is detected on PostgreSQL")
+
 # --- 4. Tampering is detected on PostgreSQL ---
 Session = database.SessionLocal
 db = Session()
@@ -219,19 +289,32 @@ except Exception as e:
 
 # --- 6. The export streams from PostgreSQL (yield_per) ---
 from app.audit import export as export_service
+# Ten, not nine: §3b above writes one impersonated row on top of the nine the
+# earlier sections build. Counted explicitly rather than loosened to `>= 9`,
+# because the point of the count is that streaming does not silently drop rows.
 rows = list(recorder.stream())
-assert len(rows) == 9, len(rows)
+assert len(rows) == 10, len(rows)
 csv_text = "".join(export_service.render("csv", recorder.stream()))
 assert "pre-chain row" in csv_text and "change 4" in csv_text
+# ADR-0007's column reaches the export, and the console's own rows leave it
+# empty rather than repeating the actor into it.
+assert "impersonated_user" in csv_text.splitlines()[0]
+assert "alice@example.com" in csv_text
 nd = [l for l in "".join(export_service.render("ndjson", recorder.stream())).splitlines() if l.strip()]
-assert len(nd) == 9, len(nd)
+assert len(nd) == 10, len(nd)
+assert sum(1 for line in nd if '"impersonated_user": null' in line
+           or '"impersonated_user":null' in line) == 9, nd
 print("PASS  streaming export (yield_per) works on PostgreSQL, both formats")
+print("PASS  the impersonated subject reaches the export, null for the console's own rows")
 
 # --- 7. The new query filters run on PostgreSQL ---
-assert len(recorder.query(category="cluster")["items"]) == 9
+# Ten rows now, and §3b's is a `delete` — so the `verb` filter still finds nine,
+# which is what makes it a filter rather than a row count.
+assert len(recorder.query(category="cluster")["items"]) == 10
 assert recorder.query(category="console")["items"] == []
 assert len(recorder.query(verb="patch", dry_run=False)["items"]) == 9
-assert len(recorder.query(cluster_id=recorder.NO_CLUSTER)["items"]) == 9
+assert len(recorder.query(verb="delete", dry_run=False)["items"]) == 1
+assert len(recorder.query(cluster_id=recorder.NO_CLUSTER)["items"]) == 10
 print("PASS  category / verb / dry_run / NO_CLUSTER filters run on PostgreSQL")
 
 print("\nALL POSTGRESQL CHECKS PASSED")

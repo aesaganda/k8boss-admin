@@ -137,6 +137,50 @@ ADDITIVE_COLUMNS: tuple[AdditiveColumn, ...] = (
             "created"
         ),
     ),
+    AdditiveColumn(
+        table="clusters",
+        column="impersonation_enabled",
+        ddl_type="BOOLEAN",
+        purpose=(
+            "ADR-0007's per-cluster opt-in: whether this console's cluster calls "
+            "carry Impersonate-User for the signed-in operator instead of acting "
+            "as its own ServiceAccount. NULL means a cluster registered before "
+            "the setting existed, which is off — the only safe direction, since "
+            "the grant it needs is cluster-admin by proxy when unrestricted"
+        ),
+    ),
+    AdditiveColumn(
+        table="auth_sessions",
+        column="idp_username",
+        ddl_type="VARCHAR(255)",
+        purpose=(
+            "ADR-0007: the username the identity provider stated, kept verbatim "
+            "rather than casefolded, because Impersonate-User has to be the "
+            "string the cluster would derive from the same token and not this "
+            "console's normalised key for the same person"
+        ),
+    ),
+    AdditiveColumn(
+        table="auth_sessions",
+        column="idp_groups",
+        ddl_type="TEXT",
+        purpose=(
+            "ADR-0007: the groups claim as a JSON array, where NULL means the "
+            "issuer sent no claim at all. That is not an empty list and refuses "
+            "impersonation rather than stripping every group-derived permission "
+            "the operator holds and reporting the result as permissions they lack"
+        ),
+    ),
+    AdditiveColumn(
+        table="audit_records",
+        column="impersonated_user",
+        ddl_type="VARCHAR(255)",
+        purpose=(
+            "ADR-0007: the cluster identity a write was actually made as, so an "
+            "incident review can join this trail to the API server's own by a "
+            "value neither side invented. NULL means the console acted as itself"
+        ),
+    ),
 )
 
 #: Indexes that belong to columns which already existed. Issued unconditionally

@@ -47,6 +47,7 @@ from app.audit import integrity
 from app.errors import Invalid
 from app.k8s.client import manager
 from app.k8s.context import get_current_cluster_id, get_current_source_ip, get_current_user
+from app.k8s.impersonation import impersonated_user
 from app.models import (
     CATEGORIES,
     CATEGORY_CLUSTER,
@@ -274,6 +275,12 @@ def _row_fields(
         "ts": utcnow(),
         "category": category,
         "actor": (actor if actor is not None else get_current_user())[:255],
+        # ADR-0007. Read from the request context, never taken as an argument,
+        # for the same reason `actor` is: a caller that can pass the identity a
+        # write was made as can pass the wrong one, and this is the field an
+        # incident review joins to the API server's own audit log. None means
+        # the console acted as itself, which is a fact and not a gap.
+        "impersonated_user": (impersonated_user() or None),
         "source_ip": source_ip if source_ip is not None else get_current_source_ip(),
         "cluster_id": cluster_id,
         "cluster_name": cluster_name,
@@ -334,12 +341,14 @@ def _insert_with_chain_retry(fields: dict[str, Any]) -> int | None:
                 )
             try:
                 logger.info(
-                    "audit id=%s %s %s %s/%s %s outcome=%s dry_run=%s actor=%s",
+                    "audit id=%s %s %s %s/%s %s outcome=%s dry_run=%s actor=%s%s",
                     written_id, fields["category"], fields["verb"],
                     fields["target"].get("resource"), fields["target"].get("name"),
                     f"in {fields['target'].get('namespace')}"
                     if fields["target"].get("namespace") else "cluster-wide",
                     fields["outcome"], fields["dry_run"], fields["actor"],
+                    f" as={fields['impersonated_user']}"
+                    if fields.get("impersonated_user") else "",
                 )
             except Exception:  # noqa: BLE001 - a log line must not lose a record
                 logger.debug("Could not log the audit record summary", exc_info=True)

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import contextvars
 import logging
+from typing import Any
 from urllib.parse import parse_qs
 
 from app.config import settings
@@ -41,6 +42,18 @@ _current_user: contextvars.ContextVar[str] = contextvars.ContextVar(
 # Peer address, recorded on audit rows alongside the actor.
 _current_source_ip: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "current_source_ip", default=None
+)
+
+# ADR-0007. The whole verified principal, not just its username, because
+# impersonation needs the identity provider's own username and groups and those
+# cannot be recovered from a string. Typed `Any` rather than `Principal`:
+# `app.identity.service` imports `app.database`, and importing it here would put
+# the ORM in the import path of every Kubernetes helper.
+#
+# None in legacy proxy mode and for anonymous requests, which is exactly the
+# state `decide` refuses on an impersonating cluster.
+_current_principal: contextvars.ContextVar[Any] = contextvars.ContextVar(
+    "current_principal", default=None
 )
 
 
@@ -82,6 +95,25 @@ def reset_current_source_ip(token) -> None:
 def get_current_source_ip() -> str | None:
     """Peer address of the caller, or None when the transport did not report one."""
     return _current_source_ip.get()
+
+
+def set_current_principal(principal: Any):
+    return _current_principal.set(principal)
+
+
+def reset_current_principal(token) -> None:
+    _current_principal.reset(token)
+
+
+def get_current_principal() -> Any:
+    """The verified session identity, or ``None``.
+
+    ``None`` covers three different situations that all mean the same thing to
+    ADR-0007 — application auth is off, nobody is signed in, or the endpoint is
+    a public one — and all three refuse impersonation rather than falling back
+    to the console's own credential.
+    """
+    return _current_principal.get()
 
 
 class ClusterContextMiddleware:
@@ -134,6 +166,11 @@ class ClusterContextMiddleware:
             set_current_cluster_id(cluster_id),
             set_current_user(user),
             set_current_source_ip(source_ip),
+            # Only ever the *verified* principal. In legacy proxy mode `user`
+            # above comes from a caller-controlled header, and pinning that as
+            # an identity would let anyone who can reach the port pick a cluster
+            # identity under ADR-0007.
+            set_current_principal(principal if settings.auth_enabled else None),
         )
         try:
             await self.app(scope, receive, send)
@@ -141,3 +178,4 @@ class ClusterContextMiddleware:
             reset_current_cluster_id(tokens[0])
             reset_current_user(tokens[1])
             reset_current_source_ip(tokens[2])
+            reset_current_principal(tokens[3])

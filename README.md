@@ -499,6 +499,23 @@ version being that there is no undo for a deleted StatefulSet.
   against one already stuck is the diagnosis. You acknowledge each finding by
   name and type the namespace's name, and `applied: true` means a
   `deletionTimestamp` — not that the namespace is gone. See §26.
+* **Act as the signed-in operator, per cluster** — the one thing this console
+  could not do, documented as a gap in `docs/adr-0007-impersonation.md` before it
+  was closed. Every other call is made as one ServiceAccount per cluster, which
+  means the permission check answers about the *console* and the audit trail's
+  actor is a name only this application can vouch for. A cluster registered with
+  **act as the signed-in operator** sends `Impersonate-User` instead, so the API
+  server checks permissions, runs admission and writes **its own audit log** as
+  the person using the console — and "who scaled the payments service to zero"
+  becomes answerable by someone who does not trust this console at all. Disabled
+  buttons finally say *whose* permission is missing. Off by default and
+  per-cluster, because the grant it needs is cluster-admin by proxy unless it
+  carries `resourceNames` — so `deploy/rbac.yaml` ships that rule written out and
+  commented out. Single sign-on sessions only: if this console's own password
+  table could make a request arrive as `alice`, that table has become an identity
+  provider your cluster trusts. And it **refuses rather than falling back** — a
+  read served as the console would show an operator data their own RBAC forbids,
+  which is a wrong answer with a security consequence attached. See §27.
 * Create, edit and delete NetworkPolicies, from a default-deny starter manifest —
   through the same dry-run-then-confirm funnel as every other write, so the diff
   is shown before a segmentation change reaches a cluster.
@@ -801,7 +818,7 @@ means read-only.
 | `LDAP_CONNECT_TIMEOUT_SECONDS` | `5` | LDAP connect and response deadline |
 | `AUTH_THROTTLE_MAX_ATTEMPTS` | `10` | Sign-in attempts allowed per username per window before `429 too_many_attempts`. Each attempt reserves a row before the password is checked, so the limit holds across replicas, survives a restart, and cannot be walked through by a simultaneous burst. Cleared by a successful sign-in. `0` disables it, leaving `POST /api/auth/login` an unmetered password oracle |
 | `AUTH_THROTTLE_WINDOW_SECONDS` | `300` | Length of that window |
-| `OIDC_ENABLED` | `false` | Offers OpenID Connect single sign-on. Needs `AUTH_ENABLED`, plus an issuer and a client id — without all three the login page shows no SSO button, because a button that cannot work reads as a broken console |
+| `OIDC_ENABLED` | `false` | Offers OpenID Connect single sign-on. Needs `AUTH_ENABLED`, plus an issuer and a client id — without all three the login page shows no SSO button, because a button that cannot work reads as a broken console. Also the precondition for ADR-0007's per-cluster impersonation, refused at the registration form without it: a local or LDAP password cannot become a cluster identity |
 | `OIDC_ISSUER` | *(empty)* | Issuer URL. Its `/.well-known/openid-configuration` supplies every endpoint, so the flow cannot be half-configured across two deployments of the same provider |
 | `OIDC_CLIENT_ID` | *(empty)* | Client id registered at the issuer. Also the expected `aud` — a token minted for a *different* client of the same issuer is valid and correctly signed, and without this check anyone holding one could sign in here |
 | `OIDC_CLIENT_SECRET` | *(empty)* | Optional. Omit for a public client, where PKCE alone protects the code exchange |

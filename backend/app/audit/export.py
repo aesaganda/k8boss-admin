@@ -48,6 +48,12 @@ CSV_COLUMNS: tuple[str, ...] = (
     "ts",
     "category",
     "actor",
+    # ADR-0007. Beside `actor` rather than instead of it: `actor` is who used
+    # this console, and this is the name the API server itself evaluated and
+    # wrote into its own audit log. An export that carried only the first cannot
+    # be joined to the cluster's own trail, which is the reason the second is
+    # worth anything.
+    "impersonated_user",
     "source_ip",
     "cluster_id",
     "cluster_name",
@@ -122,6 +128,7 @@ def _flat_row(row: AuditRecord) -> dict[str, Any]:
         "ts": data["ts"],
         "category": data["category"],
         "actor": data["actor"],
+        "impersonated_user": data["impersonated_user"],
         "source_ip": data["source_ip"],
         "cluster_id": data["cluster_id"],
         "cluster_name": data["cluster_name"],

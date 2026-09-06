@@ -546,7 +546,14 @@ def oidc_callback(
         )
         return _clear(_sso_failure(next_path, failure.code, "account_refused"))
 
-    raw_token, session = create_session(db, user)
+    # ADR-0007: the issuer's own username and groups ride onto the session here
+    # and nowhere else. This is the only place in the tree holding a verified
+    # assertion, and a session that did not capture it at this moment can never
+    # reconstruct it — which is why `decide` refuses an older session by name
+    # rather than guessing a username from the console's account row.
+    raw_token, session = create_session(
+        db, user, idp_username=identity.username, idp_groups=identity.groups,
+    )
     _audit_signin(
         outcome="applied", username=user.username, method="oidc",
         detail=f"Signed in via single sign-on with the {user.role} role.",

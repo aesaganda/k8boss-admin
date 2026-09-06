@@ -30,7 +30,8 @@ from urllib3.exceptions import MaxRetryError, ReadTimeoutError
 from app.config import settings
 from app.errors import ClusterUnreachable, NoClusterSelected, NotFound
 from app.k8s.auth import AuthError, get_auth_provider
-from app.k8s.context import get_current_cluster_id
+from app.k8s.context import get_current_cluster_id, get_current_principal
+from app.k8s.impersonation import decide, headers_for_current_request, set_current
 
 logger = logging.getLogger(__name__)
 
@@ -69,10 +70,14 @@ def _is_streaming(args, kwargs) -> bool:
     return "watch=true" in url or "follow=true" in url
 
 
-def _cluster_api_client(configuration: client.Configuration | None = None) -> client.ApiClient:
-    """Build an ``ApiClient`` with deadlines and typed transport failures.
+def _cluster_api_client(
+    configuration: client.Configuration | None = None,
+    *,
+    impersonatable: bool = False,
+) -> client.ApiClient:
+    """Build an ``ApiClient`` with deadlines, typed failures and ADR-0007 headers.
 
-    Two things happen here, both in exactly one place on purpose.
+    Three things happen here, all in exactly one place on purpose.
 
     **Deadlines.** The kubernetes client is constructed with no request timeout,
     so a black-holed connection — an API server behind a firewall that drops
@@ -96,6 +101,22 @@ def _cluster_api_client(configuration: client.Configuration | None = None) -> cl
     this is the only place a *cluster* API client is built, and reporting some
     other component's connection failure as an unreachable cluster would be a
     confidently wrong answer of its own.
+
+    **Impersonation (ADR-0007).** ``impersonatable`` decides whether this
+    transport may ever carry ``Impersonate-User``, and it is a property of the
+    transport rather than of the request for one reason: it makes the wrong
+    answer unreachable instead of merely unlikely. A transport built from
+    credentials that are not a registered cluster's — the connection test's
+    unsaved form values, the local kubeconfig a developer runs against — cannot
+    impersonate no matter what any contextvar says, so no future endpoint can
+    arrange for an operator's identity to be asserted through a credential
+    nobody registered.
+
+    On a transport that *is* eligible, the headers come from the per-request
+    decision made in :meth:`ClusterClientManager.get_clients`, which either
+    produced them or raised. Merging them here rather than at the call sites is
+    what stops a new endpoint from forgetting: there is no route to the API
+    server that does not pass through this function.
     """
     api_client = (
         client.ApiClient(configuration=configuration)
@@ -106,6 +127,17 @@ def _cluster_api_client(configuration: client.Configuration | None = None) -> cl
 
     @functools.wraps(inner)
     def request(*args, **kwargs):
+        if impersonatable:
+            # `headers` is the fourth positional parameter of
+            # `RESTClientObject.request` and is passed as a keyword by every
+            # route the generated client takes. Both are handled anyway: a
+            # positional call that silently skipped impersonation would make
+            # one code path act as the console on a cluster the operator
+            # believes is acting as them.
+            if "headers" in kwargs or len(args) <= 3:
+                kwargs["headers"] = headers_for_current_request(kwargs.get("headers"))
+            else:
+                args = (*args[:3], headers_for_current_request(args[3]), *args[4:])
         # setdefault semantics: a caller that already passed a deadline wins.
         if "_request_timeout" not in kwargs:
             read = (
@@ -330,8 +362,13 @@ class ClusterClientManager:
         stamp = cluster.updated_at.isoformat() if cluster.updated_at else ""
         return f"{cluster.id}:{stamp}"
 
-    def create_client(self, cluster) -> ClusterClients:
-        """Build a fresh bundle for a Cluster row. The token is not retained."""
+    def create_client(self, cluster, *, impersonatable: bool = True) -> ClusterClients:
+        """Build a fresh bundle for a Cluster row. The token is not retained.
+
+        ``impersonatable`` defaults to True because a bundle built from a
+        registered row is the one kind that may carry ADR-0007 headers. The
+        connection test passes False; see :meth:`get_clients_for_cluster`.
+        """
         from app.crypto import decrypt
 
         token = ""
@@ -352,7 +389,7 @@ class ClusterClientManager:
             # local variable.
             token = ""
 
-        api_client = _cluster_api_client(configuration)
+        api_client = _cluster_api_client(configuration, impersonatable=impersonatable)
         bundle = _bundle(
             api_client,
             cluster_id=cluster.id,
@@ -388,7 +425,11 @@ class ClusterClientManager:
             skip_tls_verify=skip_tls_verify,
         )
         return _bundle(
-            _cluster_api_client(configuration),
+            # Never impersonatable: these credentials are an unsaved form's, and
+            # asserting somebody's cluster identity through a credential nobody
+            # has registered is not a thing this console should be able to do
+            # even by accident.
+            _cluster_api_client(configuration, impersonatable=False),
             cluster_id=None,
             platform=platform,
             cache_key="transient",
@@ -419,6 +460,16 @@ class ClusterClientManager:
                 context={"resource": "clusters", "name": str(resolved)},
             )
 
+        # ADR-0007, before anything is cached or returned. `decide` either
+        # produces headers or raises, so a session that cannot supply a cluster
+        # identity never receives a transport it could have used as the console.
+        #
+        # Pinned on a contextvar rather than on the bundle because the bundle is
+        # shared between operators and the decision is not. The bundle's own
+        # `impersonatable` flag is what keeps the two from being confused: a
+        # transport that must never impersonate ignores this value entirely.
+        set_current(decide(cluster, get_current_principal()))
+
         key = self._cache_key(cluster)
         cached = self._cache.get(cluster.id)
         if cached is not None and cached.cache_key == key:
@@ -436,8 +487,17 @@ class ClusterClientManager:
         Used by the connection test, which must exercise the row as it stands
         rather than whatever transport happens to be cached — otherwise "test"
         would report on the configuration the operator just replaced.
+
+        **Never impersonated (ADR-0007), and this is one of the exemptions the
+        ADR requires be named.** The connection test answers "can this console
+        reach and authenticate to this cluster, and what may it do there", which
+        is a question about the stored credential. Running it as the operator
+        would report on the operator's permissions instead and leave the thing
+        actually being tested unexercised — and a cluster whose ServiceAccount
+        token had expired would still report a clean test for every operator
+        whose own RBAC happened to be fine.
         """
-        return self.create_client(cluster)
+        return self.create_client(cluster, impersonatable=False)
 
     # -- local kubeconfig fallback (development only) ----------------------
 
@@ -448,6 +508,13 @@ class ClusterClientManager:
         setup. It is never reached once a cluster is registered, so it cannot
         mask a misconfigured registration by quietly answering from a developer's
         kubeconfig instead.
+
+        **Never impersonated (ADR-0007), and named as an exemption.** There is
+        no `Cluster` row here, so there is nothing carrying the per-cluster
+        opt-in and nothing that could have been opted in — impersonation is a
+        setting on a registered cluster, and this path exists precisely because
+        none is registered. Both `_cluster_api_client` calls below therefore
+        take the default `impersonatable=False`.
         """
         if self._local is not None:
             return self._local
