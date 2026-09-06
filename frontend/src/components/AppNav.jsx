@@ -89,7 +89,7 @@ export default function AppNav() {
         <NavSection
           id="cluster"
           title="Cluster"
-          routes={['/cluster-status', '/nodes', '/namespaces', '/events']}
+          routes={['/cluster-status', '/nodes', '/disruption', '/namespaces', '/events']}
         >
           {/* §19. First in the section and above Nodes: it is the page that
               answers "is the control plane itself all right", and the honest
@@ -97,6 +97,10 @@ export default function AppNav() {
               plane told us about the nodes. */}
           <RouterNavItem to="/cluster-status">Status</RouterNavItem>
           <RouterNavItem to="/nodes">Nodes</RouterNavItem>
+          {/* §28. Directly after Nodes, because the question it answers —
+              can these pods actually be evicted — is the one asked between
+              picking a node and draining it. */}
+          <RouterNavItem to="/disruption">Disruption</RouterNavItem>
           <RouterNavItem to="/namespaces">Namespaces</RouterNavItem>
           <RouterNavItem to="/events">Events</RouterNavItem>
         </NavSection>

@@ -1691,3 +1691,78 @@ anything; adding `impersonate` there buys attribution, not containment. The
 narrow grant is written for the deployment that deleted the wildcard and has a
 genuinely bounded ServiceAccount — the one an unrestricted grant would unbound in
 a single line.
+
+---
+
+## 19. Disruption budgets (§28) — the object that fails silently
+
+Every other section here is about a control this console operates. This one is
+about a control the *cluster* operates, which this console can only read — and
+which is uniquely able to be completely broken while reading as correct.
+
+That matters to a safety model because §5's drain is built on it. The drain plan
+tells an operator which pods an eviction would be refused for, and it is right.
+What it cannot tell them is that the budget doing the refusing was never going to
+allow anything, or that it covers a workload nobody has run since a rename, or
+that a second budget makes the pod un-evictable regardless. Those are questions
+about the budget, asked before the drain rather than during it.
+
+### 19.1 Three silent failures, and why each is a defect standard case
+
+**A budget that covers nothing** is the §0.1 corollary pointed at availability.
+`selected_pods: 0` is the finding — this object constrains no eviction. The
+danger is the *other* zero: a pod listing that did not answer, rendered as `0`,
+tells an operator their budget is dead and gets a working one deleted. So the
+count is `null` when it could not be derived, drawn as an em dash, and the
+distinction survives all the way to the table cell.
+
+**A budget that can never allow an eviction** is a config bug that presents as a
+stalled upgrade. It is separated from `disruptionsAllowed: 0` — which is the
+controller's last written count and usually clears on its own — because
+collapsing the two either panics somebody about a healthy budget or buries a
+permanent one among transient ones. The permanent finding also says whether it is
+*unconditional* (`maxUnavailable: 0`, true at any replica count) or *conditional*
+on the current pod count, because scaling up fixes the second and never the
+first.
+
+**A pod covered by two budgets** is the one worth reading twice. Kubernetes does
+not support overlapping budgets, and the way it does not is that the eviction API
+refuses that pod **outright** — not by the numbers, by rule. Both objects report
+themselves healthy. Nothing on either mentions the other. A drain fails on one
+pod with a message about a condition nobody set. This is the finding no single
+row can carry, so it is an index beside the rows, and `null` there means the pod
+listing failed rather than that nothing was found.
+
+### 19.2 The third answer to the selector question
+
+There are now three selector matchers in this tree answering three questions, and
+the divergence is deliberate rather than drift:
+
+* `workloads.selector_matches` resolves an operator it does not model to
+  **False**. Over-matching would attribute other workloads' pods to a row.
+* §5's drain plan uses that one. Under-reporting a block sends the operator to
+  the eviction API, which enforces the budget properly — a safe direction.
+* §28 uses `shaping.label_selector_matches`, which is **tri-state**. Here `False`
+  would manufacture the "this budget protects nothing" sentence, and the operator
+  deletes a budget that works. So an undecidable selector is `null` coverage and
+  its own finding, which says in words that it is *not* a report of zero.
+
+Same objects, three questions, three defensible answers. What would be a defect
+is one matcher used for all three because it was already imported.
+
+### 19.3 What it does not claim
+
+It never says a budget is **enforced**. The eviction subresource is the enforcer,
+and `disruptionsAllowed` is a number a controller wrote at some past moment. So
+there is no field called `safe`, `protected` or `will_block` — the same rule §11
+applies to NetworkPolicy and the CNI plugin.
+
+It does not say which workloads *should* have a budget. A multi-replica
+Deployment with none is evicted freely, and that is very often correct. Putting
+the console's opinion about somebody's availability requirements on a page would
+produce a finding that fires on most rows, and a finding that fires on most rows
+is one nobody reads on the day it matters.
+
+And it writes nothing. Editing a budget is §4's YAML editor, through the funnel —
+because a budget changed without a diff shown first is exactly the change that
+turns a routine drain into a stalled upgrade.
