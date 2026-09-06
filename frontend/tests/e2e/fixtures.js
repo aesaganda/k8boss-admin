@@ -3622,6 +3622,107 @@ export function podSecuritySetFor(body, { warnings = PSA_ADMISSION_WARNINGS, cur
   };
 }
 
+/* ── §28 disruption budgets ─────────────────────────────────────────────── */
+
+/**
+ * Four budgets, one per failure this page exists to surface, plus one that is
+ * simply fine — because a page that flags everything is one nobody reads.
+ *
+ *   api / api-extra  both healthy-looking, both covering `api-0`. Kubernetes
+ *                    refuses that pod's eviction outright. This is the pair the
+ *                    overlap banner is about.
+ *   ghost            covers nothing. `selected_pods: 0` is the finding.
+ *   frozen           `maxUnavailable: 0` — can never allow an eviction, ever.
+ *   unread           the pod listing could not be evaluated for it, so
+ *                    `selected_pods` is null and must render as an em dash.
+ *   web              ordinary and quiet.
+ */
+export const DISRUPTION_BUDGETS = {
+  items: [
+    {
+      name: 'api', namespace: 'prod', min_available: 1, max_unavailable: null,
+      selector: { matchLabels: { app: 'api' } },
+      unhealthy_pod_eviction_policy: 'IfHealthyBudget',
+      disruptions_allowed: 1, current_healthy: 2, desired_healthy: 1,
+      expected_pods: 2, disrupted_pods: [], status_stale: false,
+      selected_pods: 2, undecidable_pods: null, age_seconds: 86400,
+      findings: [{
+        code: 'pdb_overlaps',
+        label: 'A pod here is covered by more than one budget',
+        detail: 'These pods are also covered by prod/api-extra. Kubernetes does not support overlapping budgets.',
+      }],
+    },
+    {
+      name: 'api-extra', namespace: 'prod', min_available: null, max_unavailable: 1,
+      selector: { matchLabels: { app: 'api' } },
+      unhealthy_pod_eviction_policy: 'IfHealthyBudget',
+      disruptions_allowed: 1, current_healthy: 2, desired_healthy: 1,
+      expected_pods: 2, disrupted_pods: [], status_stale: false,
+      selected_pods: 2, undecidable_pods: null, age_seconds: 3600,
+      findings: [{
+        code: 'pdb_overlaps',
+        label: 'A pod here is covered by more than one budget',
+        detail: 'These pods are also covered by prod/api. Kubernetes does not support overlapping budgets.',
+      }],
+    },
+    {
+      name: 'frozen', namespace: 'prod', min_available: null, max_unavailable: 0,
+      selector: { matchLabels: { app: 'payments' } },
+      unhealthy_pod_eviction_policy: 'IfHealthyBudget',
+      disruptions_allowed: 0, current_healthy: 3, desired_healthy: 3,
+      expected_pods: 3, disrupted_pods: [], status_stale: false,
+      selected_pods: 3, undecidable_pods: null, age_seconds: 604800,
+      findings: [{
+        code: 'pdb_never_allows_disruption',
+        label: 'No eviction can ever be permitted',
+        detail: 'maxUnavailable is 0, so no pod covered by this budget may ever be voluntarily evicted — at any replica count.',
+      }],
+    },
+    {
+      name: 'ghost', namespace: 'prod', min_available: 2, max_unavailable: null,
+      selector: { matchLabels: { app: 'renamed' } },
+      unhealthy_pod_eviction_policy: 'IfHealthyBudget',
+      disruptions_allowed: null, current_healthy: null, desired_healthy: null,
+      expected_pods: 0, disrupted_pods: [], status_stale: null,
+      selected_pods: 0, undecidable_pods: null, age_seconds: 259200,
+      findings: [{
+        code: 'pdb_selects_nothing',
+        label: 'This budget covers no pods',
+        detail: 'Its selector matches nothing in this namespace, so it constrains no eviction.',
+      }],
+    },
+    {
+      name: 'unread', namespace: 'prod', min_available: 1, max_unavailable: null,
+      selector: { matchExpressions: [{ key: 'app', operator: 'Wibble', values: ['x'] }] },
+      unhealthy_pod_eviction_policy: 'AlwaysAllow',
+      disruptions_allowed: 1, current_healthy: 2, desired_healthy: 1,
+      expected_pods: 2, disrupted_pods: [], status_stale: false,
+      selected_pods: null, undecidable_pods: 3, age_seconds: 7200,
+      findings: [{
+        code: 'pdb_selection_unknown',
+        label: 'Which pods this covers could not be decided',
+        detail: '3 pod(s) could not be evaluated against this selector.',
+      }],
+    },
+    {
+      name: 'web', namespace: 'prod', min_available: 1, max_unavailable: null,
+      selector: { matchLabels: { app: 'web' } },
+      unhealthy_pod_eviction_policy: 'IfHealthyBudget',
+      disruptions_allowed: 2, current_healthy: 3, desired_healthy: 1,
+      expected_pods: 3, disrupted_pods: [], status_stale: false,
+      selected_pods: 3, undecidable_pods: null, age_seconds: 1209600,
+      findings: [],
+    },
+  ],
+  continue: null,
+  remaining: null,
+  partial: false,
+  unavailable: [],
+  overlappingPods: [
+    { pod: 'prod/api-0', budgets: ['prod/api', 'prod/api-extra'] },
+  ],
+};
+
 /* ── §26 the deletion blast radius ──────────────────────────────────────── */
 
 /**
@@ -3978,6 +4079,7 @@ export async function mockApi(
     namespaceDeletes = [],
     clusters = null,
     clusterWrites = [],
+    disruptionBudgets = null,
     clusterStatus = null,
     claims = null,
     expandPlan = null,
@@ -4062,6 +4164,9 @@ export async function mockApi(
       const body = JSON.parse(route.request().postData() || '{}');
       clusterWrites.push(body);
       return json({ ...FIXTURES.clusters.items[0], ...body });
+    }
+    if (path === '/disruption/budgets') {
+      return json(disruptionBudgets ?? DISRUPTION_BUDGETS);
     }
     if (path === '/clusters') return json(clusters ?? FIXTURES.clusters);
     if (/^\/clusters\/\d+\/overview$/.test(path)) return json(FIXTURES.overview);

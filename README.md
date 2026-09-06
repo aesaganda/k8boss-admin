@@ -516,6 +516,22 @@ version being that there is no undo for a deleted StatefulSet.
   provider your cluster trusts. And it **refuses rather than falling back** — a
   read served as the console would show an operator data their own RBAC forbids,
   which is a wrong answer with a security consequence attached. See §27.
+* **What a PodDisruptionBudget actually covers** — the object whose failure
+  mode is silence. A budget one label key away from the workload it was written
+  for covers nothing: the YAML is indistinguishable from one guarding a
+  production database, `kubectl describe` prints the same fields, and a team
+  believes it has availability protection it does not have. So the page counts
+  coverage from a live pod listing — `0 pods` is the finding, and a listing that
+  did not answer is an em dash, never a zero, because that zero gets a *working*
+  budget deleted as dead. It separates **can never allow an eviction**
+  (`maxUnavailable: 0`, or `minAvailable` at the pod count — arithmetic, which no
+  amount of waiting fixes) from **is not allowing one right now**, which usually
+  clears on its own. And it names the failure no single budget can: Kubernetes
+  refuses the eviction **outright** for a pod covered by two budgets, whatever
+  either budget's `disruptionsAllowed` says — so both objects look perfectly
+  healthy while a drain over them cannot finish, and this is the only screen
+  where either mentions the other. Nothing here claims a budget is *enforced*:
+  the eviction API is the enforcer. See §28.
 * Create, edit and delete NetworkPolicies, from a default-deny starter manifest —
   through the same dry-run-then-confirm funnel as every other write, so the diff
   is shown before a segmentation change reaches a cluster.

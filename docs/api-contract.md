@@ -4527,3 +4527,140 @@ is signed in; impersonation narrows the RBAC gate, not that one.
 asserts an identity the cluster has never heard of and every request is refused
 as that person. That alignment is the operator's to get right, and the
 registration form says so at the checkbox.
+
+---
+
+## 28. Disruption budgets — what they cover, and what they block
+
+### 28.1 The object whose failure mode is silence
+
+A PodDisruptionBudget is the only object in this contract that can be completely
+broken while reading as correct. Three ways, and none of them appears in
+`kubectl describe`:
+
+**It may cover nothing.** A selector one label key away from the workload it was
+written for matches no pod. The YAML is indistinguishable from a budget guarding
+a production database. A team reads `minAvailable: 2`, believes it has
+availability protection, and does not have it. This is §8.4's "a NetworkPolicy
+that selects nothing is inert", pointed at availability.
+
+**It may never allow an eviction.** `maxUnavailable: 0`, or `minAvailable` at or
+above the pod count, means no voluntary eviction can ever succeed. That is
+arithmetic — knowable the moment the budget is written — and today it is
+discovered partway through a node drain that will not finish.
+
+**Two budgets may cover one pod.** Kubernetes does not support this, and *how*
+it does not is the point: the eviction API **refuses that pod outright**,
+whatever either budget's `disruptionsAllowed` says. Both objects can read
+`disruptionsAllowed: 5` and the pod is un-evictable by anyone. Nothing on either
+budget says so, and the symptom is a drain that fails on one pod with a message
+about a condition nobody set.
+
+### 28.2 The typed row
+
+`policy/v1/poddisruptionbudgets` is browsed through §4's generic path, which
+returns this row because `poddisruptionbudget_row` is registered in the shaper
+registry. The shaper is **pure**, so it carries only the findings derivable from
+the object in front of it; everything that needs a pod listing is §28.3.
+
+```json
+{
+  "name": "api", "namespace": "prod",
+  "min_available": 1, "max_unavailable": null,
+  "selector": { "matchLabels": { "app": "api" } },
+  "unhealthy_pod_eviction_policy": "IfHealthyBudget",
+  "disruptions_allowed": 1, "current_healthy": 2,
+  "desired_healthy": 1, "expected_pods": 2,
+  "disrupted_pods": [], "status_stale": false,
+  "findings": [], "age_seconds": 86400
+}
+```
+
+**Every status number is nullable and none may be rendered as `0`.** The
+disruption controller writes them asynchronously, so a freshly created budget has
+none. `disruptions_allowed: 0` means "no eviction is permitted right now" and is
+the most consequential value on the row; `null` means the controller has not
+spoken, and drawing that as `0` reports a budget as blocking a drain it may be
+about to permit.
+
+`unhealthy_pod_eviction_policy` reports `IfHealthyBudget` when the field is
+absent, rather than `null`. That is the API's default and it is the **stricter**
+behaviour — the reverse of what the word "policy" suggests — and `null` would
+read as unknown for a field whose absence has one defined meaning.
+
+`status_stale` is tri-state. `true` means `observedGeneration` is behind
+`metadata.generation`, so every count describes the *previous* spec. `null` means
+the controller has written no `observedGeneration` at all, and reporting that as
+up-to-date would vouch for numbers that do not exist.
+
+### 28.3 `GET /api/disruption/budgets`
+
+Query: `namespace`, optional. Omitted means the whole cluster, which is the view
+that finds the budget nobody has looked at since its workload was renamed.
+
+The **budget listing is primary and raises**: an empty table for a cluster whose
+budgets could not be read would say "nothing constrains eviction here", which is
+the finding rather than the failure. The **pod listing is collected**: losing it
+costs every pod-derived field and leaves each budget's own declared numbers on
+screen, because those came from an object that answered.
+
+Rows are §28.2's, plus:
+
+| Field | Meaning |
+|---|---|
+| `selected_pods` | Pods this budget covers, counted from a live listing. **`0` is the finding**; `null` is a listing that did not answer, or a selector that could not be evaluated |
+| `undecidable_pods` | How many pods could not be evaluated against this selector, or `null` |
+| `findings[]` | `{code, label, detail}`, the object-derived ones plus the pod-derived ones below |
+
+And one top-level key beside `items`:
+
+`overlappingPods` — `[{pod, budgets[]}]`, the inverse index. This is the answer
+no single row can carry. `null` means the pod listing failed; **never `[]`**,
+which would say the console checked and found none.
+
+### 28.4 Finding codes
+
+| Code | Derived from | When |
+|---|---|---|
+| `pdb_never_allows_disruption` | the object | `maxUnavailable: 0` or `0%`, or `minAvailable` at/above `expectedPods`, or `minAvailable: 100%`. No voluntary eviction can succeed. The `minAvailable` cases say "at this pod count", because scaling up changes them; `maxUnavailable: 0` says "at any replica count", because it does not |
+| `pdb_blocking_now` | the object | `disruptionsAllowed` is 0 and the arithmetic does not make it permanent. Usually clears on its own. **Never emitted alongside the previous code** — both are true, one is actionable, and two rows would make the operator choose |
+| `pdb_no_constraint` | the object | Neither `minAvailable` nor `maxUnavailable` is set. The API server accepts it and the controller permits every eviction |
+| `pdb_status_stale` | the object | `observedGeneration` behind `generation` |
+| `pdb_selects_nothing` | the pod listing | `selected_pods` is exactly 0 |
+| `pdb_selection_unknown` | the pod listing | A `matchExpressions` operator this console does not model. The count is unknown, and this is explicitly **not** a report that the budget covers nothing |
+| `pdb_overlaps` | the pod listing | A covered pod is also covered by another budget, named in the detail |
+
+### 28.5 Which selector matcher, and why it matters
+
+§28 uses `shaping.label_selector_matches`, which is **tri-state**, and
+deliberately not `services.workloads.selector_matches`, which resolves an
+unmodelled operator to `False`.
+
+That is the right direction there: attributing other workloads' pods to a row is
+worse than attributing none. It is the wrong direction here, because `False`
+manufactures the exact `pdb_selects_nothing` sentence §28 exists to make
+trustworthy — and the operator deletes a working budget as dead.
+
+§5's drain plan uses the two-state matcher against these same objects, and that
+is a third defensible answer to a different question: *will this specific
+eviction be refused right now*. Under-reporting a block there sends the operator
+to the eviction API, which enforces it properly. Under-reporting coverage here
+sends them to delete the budget.
+
+### 28.6 What §28 is not
+
+**It does not report what is enforced.** The eviction subresource is the
+enforcer, and `disruptionsAllowed` is a number a controller wrote at some past
+moment. So no field is called `safe`, `protected` or `will_block`.
+
+**It does not write.** Creating, editing and deleting a budget is §4's
+`POST`/`PUT`/`DELETE` through the single mutation funnel. A write here would skip
+the gate, the preflight, the dry-run diff and the audit row — and a budget edited
+without a diff shown first is exactly the change that turns a routine drain into
+a stalled upgrade.
+
+**It does not say which workloads *should* have a budget.** A multi-replica
+Deployment with none is evicted freely, which is very often correct. Flagging it
+would put the console's opinion about somebody's availability requirements on a
+page, and a finding that fires on most rows is one nobody reads on the day it
+matters.

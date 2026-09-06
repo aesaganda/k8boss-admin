@@ -710,6 +710,33 @@ export const network = {
   isolation: (params) => api.get('/network/isolation', params),
 };
 
+/* ── §28 Disruption budgets ─────────────────────────────────────────────── */
+
+export const disruption = {
+  /**
+   * Every PodDisruptionBudget, with what it actually covers.
+   *
+   * Three fields are tri-state and each is the difference between a working
+   * budget and one deleted as dead:
+   *
+   *   `selected_pods: 0`     the finding — this budget's selector matches
+   *                          nothing, so it constrains no eviction while
+   *                          reading as protection.
+   *   `selected_pods: null`  the pod listing did not answer, or a selector
+   *                          could not be evaluated. Never rendered as zero.
+   *   `overlappingPods`      `null` means the pod listing failed; `[]` means
+   *                          the console checked and found none.
+   *
+   * `findings` separates *can never allow an eviction* — arithmetic, which no
+   * amount of waiting fixes — from *is not allowing one now*, which usually
+   * clears on its own.
+   *
+   * params: { namespace } — omit for the whole cluster, which is the view that
+   * finds the budget nobody has looked at since its workload was renamed.
+   */
+  budgets: (params) => api.get('/disruption/budgets', params),
+};
+
 /* ── §13 Routes — exposing a Service to the outside world ───────────────── */
 
 const routePath = (backend, namespace, name) =>

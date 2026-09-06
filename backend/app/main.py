@@ -52,6 +52,7 @@ from app.api.exec_ws import router as exec_ws_router
 from app.api.health import router as health_router
 from app.api.logs import router as logs_router
 from app.api.namespaces import router as namespaces_router
+from app.api.disruption import router as disruption_router
 from app.api.network import router as network_router
 from app.api.nodes import router as nodes_router
 from app.api.pods import router as pods_router
@@ -169,6 +170,7 @@ app.include_router(autoscaling_router)
 app.include_router(certificates_router)
 app.include_router(nodes_router)
 app.include_router(network_router)
+app.include_router(disruption_router)
 app.include_router(access_router)
 app.include_router(audit_router)
 app.include_router(pods_router)

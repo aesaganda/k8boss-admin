@@ -77,6 +77,7 @@ const Explorer = lazyPage('Explorer', () => import('./pages/Explorer'));
 const CustomResources = lazyPage('CustomResources', () => import('./pages/CustomResources'));
 const Portal = lazyPage('Operator portal', () => import('./pages/Portal'));
 const ClusterStatus = lazyPage('Cluster status', () => import('./pages/ClusterStatus'));
+const Disruption = lazyPage('Disruption budgets', () => import('./pages/Disruption'));
 const Clusters = lazyPage('Clusters', () => import('./pages/Clusters'));
 const Audit = lazyPage('Audit', () => import('./pages/Audit'));
 const Users = lazyPage('Users', () => import('./pages/Users'));
@@ -152,6 +153,11 @@ function ConsoleRoutes() {
                   which is the registry of clusters this console can reach —
                   this page is about the one it is pointed at right now. */}
               <Route path="cluster-status" element={<ClusterStatus />} />
+
+              {/* §28. In the Cluster section rather than under
+                  Configuration: the question it answers is asked before a
+                  node drain or an upgrade, which is a cluster operation. */}
+              <Route path="disruption" element={<Disruption />} />
 
               <Route path="clusters" element={<Clusters />} />
               <Route path="audit" element={<Audit />} />

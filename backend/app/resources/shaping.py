@@ -1741,6 +1741,215 @@ def hpa_row(obj: Any) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- #
+# §28 — pod disruption budgets
+# --------------------------------------------------------------------------- #
+
+#: `spec.unhealthyPodEvictionPolicy` values (1.27+). `IfHealthyBudget` is the
+#: default when the field is absent, and it is the stricter one: a pod that is
+#: not Ready can only be evicted when the budget is otherwise satisfied. The
+#: field being absent therefore means the strict behaviour, which is the reverse
+#: of the direction people assume from the word "policy".
+EVICTION_POLICY_DEFAULT = "IfHealthyBudget"
+EVICTION_POLICY_ALWAYS_ALLOW = "AlwaysAllow"
+
+#: Codes for the findings that can be derived from the budget object alone. The
+#: ones that need a pod listing live in :mod:`app.services.disruption`, because a
+#: shaper that could read from a cluster could also fail to.
+PDB_NEVER_ALLOWS = "pdb_never_allows_disruption"
+PDB_BLOCKING_NOW = "pdb_blocking_now"
+PDB_STATUS_STALE = "pdb_status_stale"
+PDB_NO_CONSTRAINT = "pdb_no_constraint"
+
+
+def _percentage(value: Any) -> int | None:
+    """``"75%"`` as ``75``, or ``None`` for anything that is not a percentage."""
+    if not isinstance(value, str) or not value.endswith("%"):
+        return None
+    try:
+        return int(value[:-1])
+    except ValueError:
+        return None
+
+
+def _pdb_never_allows(obj: Any, expected: int | None) -> str | None:
+    """Why this budget can never permit a voluntary eviction, or ``None``.
+
+    Arithmetic, not a status read — which is the point. Every field it needs is
+    knowable the moment the budget is written, and the alternative to computing
+    it here is discovering it partway through a node drain that will not finish.
+
+    Three shapes say "never", and the reasons differ enough to be worth naming
+    separately on screen:
+
+    * ``maxUnavailable: 0`` — unconditional. No pod may ever be voluntarily
+      evicted, at any replica count, ever.
+    * ``maxUnavailable: 0%`` — the same thing, spelled the way a template
+      renders it, and the spelling people do not notice.
+    * ``minAvailable`` at or above the pod count — conditional on the count. It
+      stops being true if the workload scales up, so the sentence says "at this
+      pod count" rather than claiming a permanent property.
+
+    ``minAvailable: "100%"`` is the same as the third and is stated as its own
+    sentence, because a percentage does not look like a comparison against a
+    replica count until somebody does the arithmetic.
+    """
+    max_unavailable = get_field(obj, "spec", "maxUnavailable")
+    if max_unavailable is not None:
+        if isinstance(max_unavailable, int) and not isinstance(max_unavailable, bool):
+            if max_unavailable <= 0:
+                return (
+                    "maxUnavailable is 0, so no pod covered by this budget may "
+                    "ever be voluntarily evicted — at any replica count."
+                )
+            return None
+        percent = _percentage(max_unavailable)
+        if percent is not None and percent <= 0:
+            return (
+                "maxUnavailable is 0%, which is the same as 0: no pod covered by "
+                "this budget may ever be voluntarily evicted."
+            )
+        return None
+
+    min_available = get_field(obj, "spec", "minAvailable")
+    if min_available is None:
+        return None
+    percent = _percentage(min_available)
+    if percent is not None:
+        if percent >= 100:
+            return (
+                "minAvailable is 100%, so every covered pod must stay available "
+                "and none may be voluntarily evicted."
+            )
+        return None
+    if not isinstance(min_available, int) or isinstance(min_available, bool):
+        return None
+    # Compared against the controller's own count of covered pods. `None` there
+    # means the controller has not written a status yet, and a comparison
+    # against a number we do not have is not a finding — it is a guess.
+    if expected is None:
+        return None
+    if min_available >= expected:
+        return (
+            f"minAvailable is {min_available} and this budget currently covers "
+            f"{expected} pod(s), so no eviction can be permitted at this pod "
+            "count. Scaling the workload up would change that."
+        )
+    return None
+
+
+def poddisruptionbudget_row(obj: Any) -> dict[str, Any]:
+    """§28 PodDisruptionBudget row — what it declares, and whether it can ever allow.
+
+    The findings here are the ones derivable from the object in front of it.
+    Whether the selector actually matches any pod, and whether two budgets cover
+    the same pod, both need a pod listing and live in
+    :mod:`app.services.disruption` — a shaper that performed I/O could also fail
+    to, and then nothing would own the difference between "selects nothing" and
+    "we could not look".
+
+    **Every status number is nullable and none of them may be rendered as 0.**
+    The disruption controller writes them asynchronously, so a freshly created
+    budget has none at all. `disruptions_allowed: 0` means "no eviction is
+    permitted right now" and is the single most consequential value on this row;
+    `null` means the controller has not spoken, and drawing that as 0 reports a
+    budget as blocking a drain it may be about to permit.
+
+    **`status_stale` is why the numbers might be describing something else.**
+    ``observedGeneration`` behind ``metadata.generation`` means the spec was
+    edited and the controller has not caught up — so `disruptions_allowed` is
+    the answer to the *previous* budget. It is not an error and it usually
+    resolves in a second, but during the second it is a number that looks
+    authoritative and is not.
+    """
+    generation = get_field(obj, "metadata", "generation")
+    observed = get_field(obj, "status", "observedGeneration")
+    stale: bool | None
+    if generation is None or observed is None:
+        # Not "fresh": we cannot tell. A budget whose controller has written no
+        # status at all has no observedGeneration, and reporting that as
+        # up-to-date would vouch for numbers that do not exist.
+        stale = None
+    else:
+        stale = observed < generation
+
+    expected = get_field(obj, "status", "expectedPods")
+    allowed = get_field(obj, "status", "disruptionsAllowed")
+    never = _pdb_never_allows(obj, expected)
+
+    findings: list[dict[str, Any]] = []
+    if get_field(obj, "spec", "minAvailable") is None and get_field(
+        obj, "spec", "maxUnavailable"
+    ) is None:
+        findings.append({
+            "code": PDB_NO_CONSTRAINT,
+            "label": "This budget constrains nothing",
+            "detail": (
+                "Neither minAvailable nor maxUnavailable is set. The API server "
+                "accepts that and the disruption controller permits every "
+                "eviction, so this object protects nothing while looking like "
+                "protection."
+            ),
+        })
+    if never is not None:
+        findings.append({
+            "code": PDB_NEVER_ALLOWS,
+            "label": "No eviction can ever be permitted",
+            "detail": never + (
+                " A node drain covering these pods will not finish, and the "
+                "eviction API refuses each one rather than waiting."
+            ),
+        })
+    elif isinstance(allowed, int) and not isinstance(allowed, bool) and allowed <= 0:
+        findings.append({
+            "code": PDB_BLOCKING_NOW,
+            "label": "No eviction is permitted right now",
+            "detail": (
+                "disruptionsAllowed is 0. Unlike the arithmetic case this is "
+                "usually temporary — it clears when the covered pods are healthy "
+                "again — but until then a drain over them is refused."
+            ),
+        })
+    if stale:
+        findings.append({
+            "code": PDB_STATUS_STALE,
+            "label": "These numbers describe the previous spec",
+            "detail": (
+                "The disruption controller has not observed the latest edit "
+                f"(generation {generation}, observed {observed}), so the counts "
+                "below answer for the budget as it was."
+            ),
+        })
+
+    return {
+        "name": get_field(obj, "metadata", "name"),
+        "namespace": get_field(obj, "metadata", "namespace"),
+        # Exactly one of these is set on a valid budget; both null is the
+        # `pdb_no_constraint` finding above rather than a shaping failure.
+        "min_available": get_field(obj, "spec", "minAvailable"),
+        "max_unavailable": get_field(obj, "spec", "maxUnavailable"),
+        "selector": get_field(obj, "spec", "selector"),
+        # Absent means `IfHealthyBudget`, the stricter behaviour. Reported as the
+        # value it means rather than as null, because null here would read as
+        # "unknown" for a field whose absence has one defined meaning.
+        "unhealthy_pod_eviction_policy": (
+            get_field(obj, "spec", "unhealthyPodEvictionPolicy")
+            or EVICTION_POLICY_DEFAULT
+        ),
+        "disruptions_allowed": allowed,
+        "current_healthy": get_field(obj, "status", "currentHealthy"),
+        "desired_healthy": get_field(obj, "status", "desiredHealthy"),
+        "expected_pods": expected,
+        # Pods the controller has already permitted a disruption for and is
+        # waiting on. A non-empty map is why disruptionsAllowed is lower than
+        # the arithmetic suggests.
+        "disrupted_pods": sorted((get_field(obj, "status", "disruptedPods") or {}).keys()),
+        "status_stale": stale,
+        "findings": findings,
+        "age_seconds": age_seconds(get_field(obj, "metadata", "creationTimestamp")),
+    }
+
+
+# --------------------------------------------------------------------------- #
 # §25 — certificate signing requests
 # --------------------------------------------------------------------------- #
 
@@ -1985,6 +2194,7 @@ ROW_SHAPERS: dict[tuple[str, str], Callable[[Any], dict[str, Any]]] = {
     ("networking.k8s.io", "networkpolicies"): networkpolicy_row,
     ("storage.k8s.io", "storageclasses"): storageclass_row,
     ("autoscaling", "horizontalpodautoscalers"): hpa_row,
+    ("policy", "poddisruptionbudgets"): poddisruptionbudget_row,
     ("certificates.k8s.io", "certificatesigningrequests"): certificatesigningrequest_row,
     ("snapshot.storage.k8s.io", "volumesnapshots"): volumesnapshot_row,
     ("snapshot.storage.k8s.io", "volumesnapshotclasses"): volumesnapshotclass_row,
@@ -2036,6 +2246,7 @@ __all__ = [
     "certificatesigningrequest_row",
     "decode_certificate_request",
     "networkpolicy_row",
+    "poddisruptionbudget_row",
     "node_label_dependencies",
     "parse_bytes",
     "parse_cpu_cores",
