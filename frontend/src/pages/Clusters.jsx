@@ -93,6 +93,7 @@ const EMPTY_FORM = {
   token: '',
   ca_certificate: '',
   skip_tls_verify: false,
+  impersonation_enabled: false,
   app_domain: '',
 };
 
@@ -160,6 +161,11 @@ function ClusterFormModal({ isOpen, editing, onClose, onSaved }) {
             // boolean, not the certificate, so there is nothing to prefill.
             ca_certificate: '',
             skip_tls_verify: Boolean(editing.skip_tls_verify),
+            // ADR-0007, and it prefills for real like `app_domain`: it is not a
+            // credential, so ClusterPublic carries it. A setting that decides
+            // who the cluster thinks is asking must be visible in the form that
+            // edits it, not merely in effect.
+            impersonation_enabled: Boolean(editing.impersonation_enabled),
             // Unlike the token and the CA, this one is not a credential, so
             // ClusterPublic carries it and it prefills for real. Blanking the
             // box and saving clears it — the backend reads "" as "generate no
@@ -185,6 +191,7 @@ function ClusterFormModal({ isOpen, editing, onClose, onSaved }) {
           api_server: form.api_server,
           authentication_type: form.authentication_type,
           skip_tls_verify: form.skip_tls_verify,
+          impersonation_enabled: form.impersonation_enabled,
           // Always sent, including empty: "" is how the operator clears a
           // domain they got wrong, and omitting it would make a wrong domain
           // unremovable through this form.
@@ -332,6 +339,48 @@ function ClusterFormModal({ isOpen, editing, onClose, onSaved }) {
             <Alert isInline variant="warning" title="TLS verification off">
               The console will accept any certificate this endpoint presents, including one substituted by
               something in the network path — which then holds a token with the permissions below.
+            </Alert>
+          )}
+
+          <FormGroup fieldId="cluster-impersonation">
+            <Checkbox
+              id="cluster-impersonation"
+              label="Act as the signed-in operator"
+              description="Every call to this cluster carries Impersonate-User, so the API server checks permissions, runs admission and writes its own audit log as the person using the console rather than as the console."
+              isChecked={form.impersonation_enabled}
+              onChange={(_e, checked) => set('impersonation_enabled')(checked)}
+              data-testid="cluster-impersonation"
+            />
+          </FormGroup>
+
+          {/* Not a warning: this is the *safer* setting, and drawing it in the
+              same colour as "skip TLS verification" would teach operators that
+              both are risks to be avoided. What it needs is a grant and a
+              matching issuer, and getting either wrong locks people out of a
+              cluster that was working — so the two conditions are stated here,
+              at the checkbox, rather than in a document nobody opens while
+              filling in a form. */}
+          {form.impersonation_enabled && (
+            <Alert
+              isInline
+              variant="info"
+              title="This needs a grant and a shared issuer"
+              data-testid="cluster-impersonation-note"
+            >
+              <p>
+                The console&apos;s ServiceAccount needs <code>impersonate</code> on{' '}
+                <code>users</code> and <code>groups</code>.{' '}
+                <strong>Grant it with <code>resourceNames</code></strong>: an
+                unrestricted <code>impersonate users</code> can impersonate the most
+                powerful user on the cluster, which is cluster-admin by proxy.
+              </p>
+              <p>
+                Only single sign-on sessions can act as an operator, and the name sent
+                is the one <em>your identity provider</em> states. If this cluster
+                authenticates against a different issuer — or none — it will not know
+                that name, and every request will be refused as that person rather
+                than served as the console.
+              </p>
             </Alert>
           )}
         </Form>

@@ -1,19 +1,35 @@
 # ADR 0007 — The console acts as one ServiceAccount, and impersonation is the conditional exception
 
-**Status:** proposed
-**Date:** 2026-09-03
+**Status:** accepted
+**Proposed:** 2026-09-03 · **Accepted:** 2026-09-06 by the repository owner
 **Supersedes nothing. Constrained by:** `docs/safety-model.md` §8's two gates and
 §7's audit trail, both of which this decision changes the meaning of.
 
-**This ADR does not authorise an implementation.** It records a decision that has
-been implicit since the first cluster was registered, states what it costs, and
-sets the conditions under which the exception may be built. Nothing in the tree
-implements impersonation today and nothing here says to start. Status stays
-`proposed` until somebody with the deployment context in front of them accepts
-or rejects it; an ADR that said `accepted` would be this document commissioning
-its own feature.
+**This ADR did not authorise its own implementation, and did not have to.** It
+was written to record a decision that had been implicit since the first cluster
+was registered, to state what the exception would cost, and to set the conditions
+under which it could be built — then to wait. It waited three days. The
+implementation landed on 2026-09-06 against the six conditions below, each of
+which is now a named test in `backend/tests/test_impersonation.py`.
 
-## The decision, as it stands today
+**What changed, in one paragraph.** `Cluster.impersonation_enabled` is a
+per-cluster, off-by-default flag. When it is set, every call this console makes
+to that cluster carries `Impersonate-User` and `Impersonate-Group` for the
+signed-in operator, so the API server evaluates authorization, admission and its
+own audit log as that person. Sessions that cannot supply a cluster identity are
+**refused** with a new error code — `impersonation_unavailable`, 403,
+deliberately not `rbac_denied` — rather than served as the console. The grant it
+needs ships commented out and `resourceNames`-shaped in `deploy/rbac.yaml`.
+
+**Two questions the implementation forced, recorded here because neither was
+settled by the text below.** See *What the implementation decided* at the end.
+
+## The decision this ADR records
+
+*Written before the implementation and kept in its original tense, because the
+argument is the record. It describes the **default**, which acceptance did not
+change: a cluster that has not opted in behaves exactly as described below, and
+that is every cluster until somebody sets the flag.*
 
 **Every call k8boss-admin makes to a cluster is made as that cluster's single
 registered credential.** `Cluster.token_encrypted` holds one bearer token,
@@ -29,7 +45,8 @@ about the cluster. Two operators signed in with different console roles have
 *identical* power over every registered cluster, because the cluster only ever
 sees the ServiceAccount.
 
-Three consequences follow, and all three are already true and already documented:
+Three consequences follow, and all three are true of every cluster that has not
+opted in — which is the default, and was every cluster when this was written:
 
 * **Preflight answers about the console, not about you.** §0.2's
   `SelfSubjectAccessReview` asks "may *this credential* do this", which is the
@@ -46,7 +63,7 @@ Three consequences follow, and all three are already true and already documented
   requester because OpenShift knows who the requester is. §17 asks, because this
   console does not.
 
-## What impersonation would actually change
+## What impersonation actually changes
 
 Kubernetes has a first-class answer: `Impersonate-User`, `Impersonate-Group`,
 `Impersonate-Uid` and `Impersonate-Extra-*` request headers. The API server
@@ -172,10 +189,10 @@ subject the cluster never saw reads as attribution and is a claim this
 application cannot support, which is precisely the pattern ADR-0003 refuses when
 it declines to back-fill pre-chain records.
 
-## The conditions, if this is ever accepted
+## The conditions, now met
 
-For whoever picks this up. Each of these is a thing that would have to be true,
-not a suggestion:
+Each of these was a thing that would have to be true. Each is now a test named
+for it; the parenthetical says where it lives.
 
 > 1. **Per-cluster, opt-in, off by default**, stored on the `Cluster` row beside
 >    `authentication_type` and surfaced in every `ClusterPublic` response the way
@@ -196,18 +213,77 @@ not a suggestion:
 >    other opt-in there is, with a comment saying plainly that an unrestricted
 >    `impersonate users` is cluster-admin by proxy.
 
+| # | Where it is enforced | The test that would fail |
+|---|---|---|
+| 1 | `Cluster.impersonation_enabled`, nullable and read through `bool()`; echoed by `to_public_dict`; refused at the form by `_validate_impersonation` when the console has no OIDC | `test_a_cluster_that_did_not_ask_is_not_impersonated`, `test_a_null_flag_is_off_rather_than_a_third_state`, `test_the_flag_is_surfaced_like_skip_tls_verify`, `test_turning_it_on_without_oidc_is_refused_at_the_form` |
+| 2 | `impersonation.decide` on `auth_source`, and again on `settings.auth_enabled` for legacy proxy mode | `test_a_password_session_cannot_become_a_cluster_identity`, `test_legacy_proxy_mode_cannot_impersonate`, `test_the_refusal_is_not_rbac_denied` |
+| 3 | `decide` on `idp_groups is None`; `_decode_groups` degrades an unparseable blob to absent rather than empty | `test_an_absent_groups_claim_refuses`, `test_an_empty_groups_claim_impersonates` |
+| 4 | `decide` raises inside `get_clients` before a bundle exists; `impersonatable` is a property of the transport; `as_service_account` is the only suppression and its call sites are enumerated | `test_a_refused_session_never_receives_a_transport`, `test_a_transport_that_may_never_impersonate_ignores_the_decision`, `test_the_service_account_exemptions_are_exactly_these` |
+| 5 | `AuditRecord.impersonated_user` read from request context; `subject` on every `PreflightResult` and in `RBACDenied.message` | `test_the_audit_row_records_the_console_user_and_the_cluster_identity`, `test_a_denial_names_the_subject_it_was_refused_for` |
+| 6 | `deploy/rbac.yaml`, commented out, with `resourceNames` on both rules | asserted by reading the file: no live rule carries the `impersonate` verb |
+
+## What the implementation decided
+
+Two questions the text above did not settle. Both are recorded here rather than
+only in a docstring, because both are places where an implementer could
+reasonably have gone the other way.
+
+### `system:authenticated` is sent, and the issuer did not state it
+
+The API server attaches `system:authenticated` to every request it authenticates
+itself, and **does not** attach it to an impersonated one. Sending only the
+issuer's groups therefore strips every grant bound to that group — including the
+discovery rules on a default cluster — so the operator is shown accurate denials
+for permissions they demonstrably hold. The reliable end of that is a ClusterRole
+widened to fix a problem that was never RBAC.
+
+This sits close to *"Impersonating groups the console derived rather than
+received"*, which is rejected above, and the distinction is worth stating.
+That rejection is about `roles.py` — the console's **opinion**, its mapping of a
+group to its own `admin` role, which must never reach an authorization decision.
+`system:authenticated` is nobody's opinion: it is what the API server itself
+would have attached had the operator presented the same token directly, and the
+whole claim this feature makes is that the console asserts an identity the
+cluster would have derived itself. It is the one group sent that the issuer did
+not state, it is a named constant, and `deploy/rbac.yaml`'s commented grant lists
+it first so the `resourceNames` set matches what is actually sent.
+
+### The audit column is hashed only when it is set
+
+`AuditRecord.impersonated_user` is **not** appended to `HASHED_FIELDS`. The
+verifier recomputes a stored row's hash from that row's own columns, so appending
+a name there changes the computation for every row ever written — including every
+row written before the column existed, whose stored digests were computed without
+it — and the whole table verifies as `broken`. That is a false "this row was
+modified" alarm delivered by a schema change, which is precisely what ADR-0003
+refuses to manufacture and what `_canonical` exists to prevent.
+
+So it lives in `OPTIONAL_HASHED_FIELDS`: a key in the payload when the value is
+not None, and no key at all when it is. That is not a hole. Every mutation of the
+field crosses the boundary — `NULL` → a name adds a key the stored digest did not
+cover, a name → `NULL` removes one, one name → another changes its value — and
+all three recompute to something other than what is stored. What the omission
+costs is the ability to distinguish "written before the column existed" from
+"written by a console acting as itself", and those are the same fact about
+attribution: the API server saw the ServiceAccount.
+
 ## The boundary
 
 > The console has **one credential per cluster** and its own users are console
-> users, not cluster identities. Impersonation, if it is ever added, is a
-> per-cluster opt-in that requires a shared issuer, refuses rather than falls
-> back, and never sends this application's opinion about somebody's groups to an
-> API server.
+> users, not cluster identities. Impersonation is a per-cluster opt-in that
+> requires a shared issuer, refuses rather than falls back, and never sends this
+> application's opinion about somebody's groups to an API server.
 
-Until then, the honest position is the one §17 already takes: the dialog asks
-for the subject rather than pretending to know it, and `docs/safety-model.md` §14
-says the console's user is not a cluster identity. **The gap is documented, not
-papered over** — which is the only defensible state for a gap this size.
+That is unchanged by acceptance: it is now the description of a feature rather
+than of a hypothetical one. The default is still one credential per cluster, and
+§17 still asks for the subject — because the cluster it is creating a project on
+may well be one that does not impersonate.
+
+**What acceptance does not do.** It does not make impersonation the recommended
+posture, and it does not make the wildcard writer role safe. A deployment that
+has kept that rule gains attribution from this feature and no containment; a
+deployment that deleted it gains both, and is the one the narrow grant was
+written for.
 
 ## See also
 
@@ -222,3 +298,9 @@ papered over** — which is the only defensible state for a gap this size.
 - `docs/api-contract.md` §12 — what the console's own identity is and is not.
 - `docs/rbac.md` — every permission by feature, and the ServiceAccount they all
   belong to.
+- `docs/api-contract.md` §27 — the normative shape: the flag, the error code, the
+  `subject` on a preflight result and the second name on an audit row.
+- `docs/safety-model.md` §18 — what changes about the preflight, the audit trail
+  and the refusal once a cluster acts as the operator.
+- `backend/app/k8s/impersonation.py` — the decision, the headers, and the one
+  suppression.

@@ -31,6 +31,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.crypto import encrypt
 from app.database import get_db
 from app.errors import AdminError, Conflict, Invalid, NotFound, UpstreamError, from_api_exception
@@ -98,6 +99,18 @@ class ClusterCreate(BaseModel):
     token: str = Field(..., min_length=1)
     ca_certificate: str | None = None
     skip_tls_verify: bool = False
+    #: ADR-0007. When true, this console's calls to this cluster carry
+    #: `Impersonate-User` for the signed-in operator, so the API server
+    #: evaluates authorization, admission and its own audit log as that person
+    #: rather than as this console's ServiceAccount.
+    #:
+    #: Off unless asked for, per-cluster rather than console-wide, and rejected
+    #: outright unless this deployment authenticates with OpenID Connect — see
+    #: `_validate_impersonation`. It also needs `impersonate` on `users` and
+    #: `groups` in the cluster's own RBAC, which `deploy/rbac.yaml` ships
+    #: commented out because an unrestricted form of that grant is cluster-admin
+    #: by proxy.
+    impersonation_enabled: bool = False
     #: §13. The cluster's wildcard DNS domain, used to generate exposure
     #: hostnames. Optional, and blank is meaningful: it means the console
     #: generates none rather than guessing one.
@@ -120,6 +133,7 @@ class ClusterUpdate(BaseModel):
     token: str | None = None
     ca_certificate: str | None = None
     skip_tls_verify: bool | None = None
+    impersonation_enabled: bool | None = None
     #: Sending "" clears it. That is the only way to clear it, because the
     #: generic assignment loop below skips None so that an omitted field cannot
     #: blank a stored one — and an operator who typed the wrong domain has to be
@@ -139,6 +153,38 @@ def _load(db: Session, cluster_id: int) -> Cluster:
             context={"resource": "clusters", "name": str(cluster_id)},
         )
     return cluster
+
+
+def _validate_impersonation(enabled: bool | None) -> None:
+    """Refuse ADR-0007's opt-in on a deployment that could never satisfy it.
+
+    Turning it on where the console has no OpenID Connect provider produces a
+    cluster that refuses **every** operator with ``impersonation_unavailable``,
+    at the request rather than at the setting. That failure is accurate and
+    arrives in the worst possible place: on a page, to somebody who did not
+    change the setting and cannot see it.
+
+    Refusing at the form is the same choice ``_validate`` makes about an API
+    server URL that could never build a client. It is deliberately *not* a check
+    that the cluster and the console share an issuer — this console cannot read
+    a cluster's ``--oidc-issuer-url`` and will not pretend to; that alignment is
+    stated in `docs/adr-0007-impersonation.md` and is the operator's to get
+    right.
+    """
+    if not enabled:
+        return
+    if not settings.auth_enabled or not settings.oidc_enabled:
+        raise Invalid(
+            "Impersonation needs this console to authenticate operators with "
+            "OpenID Connect.",
+            hint=(
+                "Enable AUTH_ENABLED and OIDC_ENABLED, or leave impersonation "
+                "off. A local or LDAP password cannot become a cluster "
+                "identity: the cluster trusts its own issuer, not this "
+                "console's user table."
+            ),
+            context={"field": "impersonation_enabled"},
+        )
 
 
 def _validate(*, api_server: str | None, authentication_type: str | None) -> None:
@@ -226,6 +272,7 @@ def list_clusters(db: Session = Depends(get_db)) -> dict:
 def create_cluster(payload: ClusterCreate, db: Session = Depends(get_db)) -> dict:
     """Register a cluster. The token is encrypted before it reaches the database."""
     _validate(api_server=payload.api_server, authentication_type=payload.authentication_type)
+    _validate_impersonation(payload.impersonation_enabled)
 
     cluster = Cluster(
         name=payload.name.strip(),
@@ -235,6 +282,7 @@ def create_cluster(payload: ClusterCreate, db: Session = Depends(get_db)) -> dic
         token_encrypted=encrypt(payload.token),
         ca_certificate=payload.ca_certificate,
         skip_tls_verify=payload.skip_tls_verify,
+        impersonation_enabled=payload.impersonation_enabled,
         app_domain=route_domain.normalize_domain(payload.app_domain),
         # Never tested yet, and that is a distinct state from "failed". See
         # Cluster.status.
@@ -267,6 +315,8 @@ def update_cluster(
         api_server=fields.get("api_server"),
         authentication_type=fields.get("authentication_type"),
     )
+    if "impersonation_enabled" in fields:
+        _validate_impersonation(fields["impersonation_enabled"])
 
     if "token" in fields:
         token = fields.pop("token")

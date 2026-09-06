@@ -6,6 +6,7 @@ import base64
 import datetime
 import hashlib
 import hmac
+import json
 import logging
 import secrets
 from dataclasses import dataclass
@@ -48,6 +49,36 @@ class Principal:
     role: str
     auth_source: str
 
+    # ADR-0007. The identity provider's own words, carried for the life of the
+    # session and used for nothing but building `Impersonate-*` headers.
+    #
+    # `username` above is this console's key for the person — normalised and
+    # casefolded — and is the wrong string to send an API server: a cluster
+    # whose `--oidc-username-claim` yields `Alice@example.com` does not know
+    # anybody called `alice@example.com`. So the claim is kept unmodified beside
+    # it rather than derived back out of it, which cannot be done.
+    #
+    # `idp_groups` is `None` when the issuer sent no groups claim, and that is
+    # not `()`. See `app.k8s.impersonation.decide`, which refuses on the first
+    # and impersonates happily on the second.
+    idp_username: str | None = None
+    idp_groups: tuple[str, ...] | None = None
+
+    @property
+    def can_impersonate(self) -> bool:
+        """Whether this session could act as a cluster identity at all.
+
+        Reported to the UI so a cluster that impersonates can say *before* the
+        first request why it will refuse — rule 11.4 applied to a refusal that
+        is not about permissions. It does not consult any cluster: whether a
+        given cluster asks for impersonation is that cluster's own flag.
+        """
+        return (
+            self.auth_source == "oidc"
+            and bool(self.idp_username)
+            and self.idp_groups is not None
+        )
+
     def to_public_dict(self) -> dict:
         return {
             "id": self.id,
@@ -56,6 +87,13 @@ class Principal:
             "email": self.email,
             "role": self.role,
             "auth_source": self.auth_source,
+            # ADR-0007. The name a cluster would see, and whether one can be
+            # produced at all. The *groups* are deliberately not echoed: the UI
+            # has no use for them, and a list this console received in a token
+            # is not something to hand back out because it happened to be in
+            # memory.
+            "idp_username": self.idp_username,
+            "can_impersonate": self.can_impersonate,
         }
 
 
@@ -126,7 +164,12 @@ def verify_password(password: str, encoded: str | None) -> bool:
 _DUMMY_PASSWORD_HASH = hash_password("not-a-real-password", validate=False)
 
 
-def _principal(user: User) -> Principal:
+def _principal(
+    user: User,
+    *,
+    idp_username: str | None = None,
+    idp_groups: tuple[str, ...] | None = None,
+) -> Principal:
     return Principal(
         id=user.id,
         username=user.username,
@@ -134,7 +177,37 @@ def _principal(user: User) -> Principal:
         email=user.email,
         role=user.role,
         auth_source=user.auth_source,
+        idp_username=idp_username,
+        idp_groups=idp_groups,
     )
+
+
+def _encode_groups(groups: tuple[str, ...] | None) -> str | None:
+    """Groups for the session row. ``None`` stays NULL — the absent claim."""
+    if groups is None:
+        return None
+    return json.dumps([str(group) for group in groups])
+
+
+def _decode_groups(raw: str | None) -> tuple[str, ...] | None:
+    """Groups back off the session row, preserving absent-versus-empty.
+
+    A stored value this function cannot parse is treated as **absent**, not as
+    empty. Both are wrong answers, and only one of them is dangerous: absent
+    refuses impersonation and says why, while empty impersonates with no groups
+    and reports the operator's real permissions as denied.
+    """
+    if raw is None:
+        return None
+    try:
+        decoded = json.loads(raw)
+    except (TypeError, ValueError):
+        logger.warning("Ignoring unparseable idp_groups on a session row.")
+        return None
+    if not isinstance(decoded, list):
+        logger.warning("Ignoring non-list idp_groups on a session row.")
+        return None
+    return tuple(str(group) for group in decoded)
 
 
 def find_user(db: Session, username: str) -> User | None:
@@ -348,8 +421,23 @@ def provision_federated_user(
     return row
 
 
-def create_session(db: Session, user: User) -> tuple[str, SessionIdentity]:
-    """Create a session and return the one-time raw bearer token to set as a cookie."""
+def create_session(
+    db: Session,
+    user: User,
+    *,
+    idp_username: str | None = None,
+    idp_groups: tuple[str, ...] | None = None,
+) -> tuple[str, SessionIdentity]:
+    """Create a session and return the one-time raw bearer token to set as a cookie.
+
+    ``idp_username`` and ``idp_groups`` are ADR-0007's material and are supplied
+    only by the single sign-on callback, which is the only caller that has an
+    issuer's assertion in front of it. A local or LDAP sign-in passes neither,
+    and the resulting session cannot impersonate — enforced again in
+    ``app.k8s.impersonation.decide`` by ``auth_source``, because a session that
+    somehow carried both would still be the console's password table asserting a
+    cluster identity.
+    """
     raw_token = secrets.token_urlsafe(32)
     csrf_token = secrets.token_urlsafe(32)
     expires_at = utcnow() + datetime.timedelta(hours=settings.auth_session_ttl_hours)
@@ -359,10 +447,16 @@ def create_session(db: Session, user: User) -> tuple[str, SessionIdentity]:
             user_id=user.id,
             csrf_token=csrf_token,
             expires_at=expires_at,
+            idp_username=idp_username,
+            idp_groups=_encode_groups(idp_groups),
         )
     )
     db.commit()
-    return raw_token, SessionIdentity(_principal(user), csrf_token, expires_at)
+    return raw_token, SessionIdentity(
+        _principal(user, idp_username=idp_username, idp_groups=idp_groups),
+        csrf_token,
+        expires_at,
+    )
 
 
 def load_session(raw_token: str | None) -> SessionIdentity | None:
@@ -384,7 +478,15 @@ def load_session(raw_token: str | None) -> SessionIdentity | None:
             db.delete(row)
             db.commit()
             return None
-        return SessionIdentity(_principal(user), row.csrf_token, row.expires_at)
+        return SessionIdentity(
+            _principal(
+                user,
+                idp_username=row.idp_username,
+                idp_groups=_decode_groups(row.idp_groups),
+            ),
+            row.csrf_token,
+            row.expires_at,
+        )
     finally:
         db.close()
 

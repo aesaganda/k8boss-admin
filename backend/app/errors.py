@@ -246,6 +246,28 @@ class MutationsDisabled(AdminError):
     )
 
 
+class ImpersonationUnavailable(AdminError):
+    """This cluster acts as the operator, and this session cannot supply one.
+
+    ADR-0007. 403 with its own code rather than ``rbac_denied`` for
+    ``MutationsDisabled``'s reason inverted: there the deployment is read-only
+    and the operator's permissions are irrelevant, and here the operator's
+    permissions are exactly what could not be *established*. Reporting either as
+    a denial sends somebody to widen a ClusterRole that was already correct.
+
+    The frontend branches on the code to say what to do instead — sign in
+    through single sign-on, or turn impersonation off for this cluster — because
+    neither is a permission problem and neither is fixed on the cluster.
+    """
+
+    code = "impersonation_unavailable"
+    http_status = 403
+    default_message = (
+        "This cluster acts as the signed-in operator, and this session cannot "
+        "provide a cluster identity."
+    )
+
+
 class Unsupported(AdminError):
     """This cluster does not serve that API resource.
 

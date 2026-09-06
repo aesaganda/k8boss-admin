@@ -108,6 +108,38 @@ HASHED_FIELDS: tuple[str, ...] = (
     "error",
 )
 
+#: Fields the hash covers **only when they are set**, added after rows already
+#: existed. Same tamper evidence, no false alarms.
+#:
+#: The problem this solves, stated plainly: the verifier recomputes a stored
+#: row's hash from that row's own columns. Appending a name to
+#: :data:`HASHED_FIELDS` therefore changes the computation for *every* row ever
+#: written — including the millions written before the column existed, whose
+#: stored digests were computed without it — and the whole table verifies as
+#: `broken`. That is the false "this row was modified" alarm ``_canonical``
+#: exists to prevent, arriving instead by way of a schema change, and it is the
+#: alarm everyone learns to ignore.
+#:
+#: So a field listed here contributes a key to the payload when its value is not
+#: None, and no key at all when it is. A row written before ADR-0007 has
+#: ``impersonated_user`` NULL, produces the payload it always produced, and
+#: verifies exactly as it did.
+#:
+#: **This is not a hole.** Every mutation of the field crosses the boundary and
+#: is caught: NULL → a name adds a key the stored digest did not cover, a name →
+#: NULL removes one it did, and one name → another changes its value. All three
+#: recompute to something other than what is stored. The only thing the omission
+#: costs is the ability to distinguish "written before the column existed" from
+#: "written by a console that acted as itself" — and those are the same fact
+#: about attribution, which is that the API server saw the ServiceAccount.
+#:
+#: A field belongs here only if it was added to a table that already had rows.
+#: Anything present from the start belongs in :data:`HASHED_FIELDS`, where NULL
+#: is hashed as NULL and cannot be introduced undetectably.
+OPTIONAL_HASHED_FIELDS: tuple[str, ...] = (
+    "impersonated_user",
+)
+
 
 def _canonical(value: Any) -> Any:
     """One value in a form that survives a round trip through either engine.
@@ -151,6 +183,12 @@ def compute_event_hash(row: AuditRecord, prev_hash: str) -> str:
     verifier disagree with the writer about an untouched row.
     """
     payload = {field: _canonical(getattr(row, field, None)) for field in HASHED_FIELDS}
+    # Omitted entirely when None, so a row written before the column existed
+    # hashes to what it hashed to then. See OPTIONAL_HASHED_FIELDS.
+    for field in OPTIONAL_HASHED_FIELDS:
+        value = getattr(row, field, None)
+        if value is not None:
+            payload[field] = _canonical(value)
     payload["prev_hash"] = prev_hash
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
@@ -536,6 +574,7 @@ def _verify_window(session: OrmSession, limit: int) -> dict[str, Any]:
 __all__ = [
     "GENESIS",
     "HASHED_FIELDS",
+    "OPTIONAL_HASHED_FIELDS",
     "STATUS_BROKEN",
     "STATUS_INTACT",
     "STATUS_PARTIAL",

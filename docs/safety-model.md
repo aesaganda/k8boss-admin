@@ -1576,3 +1576,118 @@ removing it is a one-line decision. Withheld, the plan still reads — an operat
 deciding whether to grant it can see exactly what granting it would allow — and
 the button is disabled with the reason, per rule 11.4. Nothing about §26 is a
 substitute for not holding the verb where nobody should.
+
+---
+
+## 18. Acting as the operator (ADR-0007) — what the preflight is finally about
+
+Every section above this one describes a control that answers a question about
+**the console**. §2's preflight asks whether the console may act; §7's trail
+records who used the console; §8's gates decide whether the console will try.
+That was accurate and it was a gap, documented as one in ADR-0007 for three days
+before it was closed.
+
+A cluster registered with "act as the signed-in operator" changes what those
+controls are about, and only for that cluster.
+
+### 18.1 The preflight becomes a statement about a person
+
+`SelfSubjectAccessReview` asks "may **this credential** do this". That is the
+question that decides whether a write succeeds, so the answer was never wrong —
+it was correct about the wrong subject. An operator with no `patch deployments`
+of their own saw an enabled Scale button, clicked it, and it worked, because the
+console's ServiceAccount could.
+
+Under impersonation the review is issued as the operator, so §11.4's disabled
+button is a statement about the person reading it. And because there are now two
+possible subjects, every result says which one it answered for — a denial that
+cannot name its subject sends somebody to edit a ClusterRole that was never
+consulted.
+
+### 18.2 The audit trail gains a name this application did not invent
+
+ADR-0003's honest limit is that a hash chain makes tampering *detectable* in a
+table this application owns. The strongest claim it can make is "these records
+have not been altered since we wrote them", and the actor in them is a name only
+this console can vouch for.
+
+The API server's own audit log records both parties on an impersonated request.
+So `impersonated_user` on our row is the join key to a log written by something
+that does not trust this console at all — and "who scaled the payments service to
+zero" becomes answerable without taking this application's word for anything.
+
+`null` there means the console acted as itself. It is never defaulted to `actor`:
+a trail naming a subject the cluster never saw reads as attribution and is a
+claim this application cannot support, which is exactly what ADR-0003 refuses
+when it declines to back-fill pre-chain records.
+
+### 18.3 It refuses rather than falls back, and that is the whole design
+
+There is no path that returns "no headers" for a cluster that asked for
+impersonation. A session that cannot supply a cluster identity gets
+`impersonation_unavailable` and the request never reaches the API server.
+
+The alternative — fall back to the ServiceAccount — is worse than not having the
+feature. A read served that way shows an operator data their own RBAC forbids,
+and nothing on the page says so. That is this document's defect standard with a
+security consequence attached: a wrong answer delivered confidently, where the
+wrongness is an authorization boundary.
+
+Three things make the refusal structural rather than disciplined:
+
+* `decide()` raises **inside** `get_clients`, before a bundle is returned, so
+  there is no transport a caller could have used as the console.
+* Whether a transport may impersonate at all is a property of the transport,
+  fixed when it is built. The connection test's unsaved credentials and the local
+  kubeconfig cannot assert somebody's cluster identity no matter what any
+  contextvar says.
+* The headers are merged in the **one** wrapper every cluster call passes
+  through, so a new endpoint cannot forget and a new typed client cannot bypass.
+
+### 18.4 The exemptions are a list, not a habit
+
+Three calls stay as the ServiceAccount, and ADR-0007 requires they be enumerable
+rather than emergent. Discovery (a per-cluster cache shared between operators),
+the connection test (a question about the stored credential), and the local
+kubeconfig (no cluster row to opt in). A test greps the tree and fails on a
+fourth, so adding one is a reviewed act with a written reason.
+
+### 18.5 The two refusals that keep it honest
+
+**A password session cannot become a cluster identity.** If a local account in
+this console's own table could cause a request to arrive at the API server as
+`alice`, then the sign-in throttle and the password policy stop protecting a
+console and start protecting the cluster's authorization model — and this
+application's user table has quietly become an identity provider the cluster
+trusts. Nothing in the API server checks that the name in `Impersonate-User`
+belongs to anyone real; it checks only that the impersonator may say it. This is
+the condition most likely to be argued away by somebody who wants the feature on
+a cluster with no OIDC, and the answer there is to give the cluster an issuer,
+not to give the console one.
+
+**An absent groups claim refuses.** Empty is a real answer. Absent means the
+issuer did not tell us, and impersonating on that reading strips every
+group-derived permission the operator holds — then reports the result as
+permissions they lack. The console would be manufacturing accurate-looking
+denials for a person who is correctly configured, and the reliable end of that is
+a ClusterRole widened to fix a problem that was never RBAC.
+
+### 18.6 What withholding the grant does, and why it ships withheld
+
+`impersonate` on `users` with no `resourceNames` is cluster-admin by proxy: an
+account that can impersonate any user can impersonate the most powerful user on
+the cluster. So `deploy/rbac.yaml` ships the rule **written out and commented
+out**, with `resourceNames` on both halves.
+
+The narrow form costs something and the file says so: it is a list somebody
+maintains, and an operator missing from it cannot use that cluster at all. The
+console reports that as `impersonation_unavailable` naming the reason rather than
+as a permission denial, so it looks like the missing grant it is — but somebody
+still has to add the name.
+
+Note what this does *not* fix. On a deployment that kept the wildcard writer rule,
+the console's ServiceAccount can already write RBAC and therefore grant itself
+anything; adding `impersonate` there buys attribution, not containment. The
+narrow grant is written for the deployment that deleted the wildcard and has a
+genuinely bounded ServiceAccount — the one an unrestricted grant would unbound in
+a single line.

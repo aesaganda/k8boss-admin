@@ -4342,3 +4342,188 @@ finalizer and its holder; removing one is §4's YAML editor, deliberately.
 consequence points at §22, which is a separate, acknowledged act. A delete that
 quietly snapshotted would be a second write nobody asked for, and one that
 silently failed to would be worse.
+
+---
+
+## 27. Acting as the operator (ADR-0007)
+
+### 27.1 What changes, and what does not
+
+By default every call this console makes to a cluster is made as that cluster's
+one registered credential, and three consequences follow that §0.2, §10 and §17
+already document: the preflight answers about the console, the audit trail's
+actor is a name only this application can vouch for, and §17 asks who to bind
+because it does not know who is asking.
+
+A cluster registered with `impersonation_enabled: true` sends `Impersonate-User`
+and `Impersonate-Group` on every call instead. The API server authenticates the
+ServiceAccount, checks it holds `impersonate` on the requested subject, and then
+evaluates **the whole request** — authorization, admission, and its own audit
+record — as the operator.
+
+**Off by default, per-cluster, and never a global switch.** A deployment with one
+cluster whose `--oidc-issuer-url` matches the console's and a second with no OIDC
+at all must be able to have this on for the first and off for the second.
+
+`docs/adr-0007-impersonation.md` is the argument, including what the grant costs
+and the two questions the implementation had to settle.
+
+### 27.2 The flag
+
+`ClusterPublic` carries `impersonation_enabled: boolean`, beside
+`skip_tls_verify` and for the same reason: a setting that changes who the cluster
+thinks is asking can never be silently in effect. `POST /api/clusters` and
+`PUT /api/clusters/{id}` both accept it.
+
+Setting it on a console that does not authenticate operators with OpenID Connect
+is `422 invalid` naming the field. Accepted, it would produce a cluster that
+refuses every operator at the request rather than at the setting — accurate, and
+arriving on a page belonging to somebody who did not change it and cannot see it.
+
+The flag is **nullable** in the schema, because it was added to a table that
+already had rows and `schema_upgrade` only adds nullable columns. `null` means
+"registered before this setting existed", which is off. It is the one nullable
+boolean in this schema that is not a tri-state, and that is safe only because the
+absent answer and the false answer call for the same behaviour.
+
+### 27.3 `impersonation_unavailable` — 403
+
+A new code in §1.3's vocabulary. The cluster asked to act as the operator and
+this session cannot supply a cluster identity.
+
+**Not `rbac_denied`**, for `mutations_disabled`'s reason inverted: there the
+deployment is read-only and the operator's permissions are irrelevant, and here
+the operator's permissions are exactly what could not be *established*. Reporting
+either as a denial sends somebody to widen a ClusterRole that was already
+correct. `context.reason` says which of four:
+
+| `reason` | When |
+|---|---|
+| `auth_disabled` | The console runs in legacy proxy mode. `X-K8Boss-User` is advisory and caller-controlled, so it cannot name a cluster identity |
+| `no_session` | No verified session on the request |
+| `auth_source` | A local or LDAP session. If this console's password table could cause a request to arrive as `alice`, that table has become an identity provider the cluster trusts |
+| `no_idp_username` | A session created before ADR-0007, carrying no issuer-stated username. The console will not derive one from its own normalised account name |
+| `groups_absent` | The issuer sent no groups claim. **Absent is not empty** — see §27.5 |
+
+**There is no fallback.** A request that cannot build impersonation headers for a
+cluster that wants them fails; it does not proceed as the console. A read that
+quietly reverted would show an operator data their own RBAC forbids, which is
+§0.1's defect standard with a security consequence attached.
+
+### 27.4 The identity that is sent
+
+`Impersonate-User` is the username **the identity provider stated**, kept
+verbatim on the session rather than derived from the console's own account row:
+the console casefolds usernames for its own key, and a cluster whose
+`--oidc-username-claim` yields `Alice@example.com` does not know anybody called
+`alice@example.com`.
+
+`Impersonate-Group` is **repeated, once per group** — never comma-joined. Go's
+`http.Header` does not split a comma-joined value, so `Impersonate-Group: a,b`
+reaches the authorizer as a single group of that literal name. The request
+succeeds, is evaluated with none of the operator's group permissions, and
+produces a page of denials that look like a cluster problem.
+
+The groups are the issuer's, plus `system:authenticated`. That is the one group
+sent that the issuer did not state, and §27.6 says why it is not the exception
+ADR-0007 rejects.
+
+`Impersonate-Uid` and `Impersonate-Extra-*` are **not sent**. This console has no
+issuer-stated value for either, and inventing one is what the ADR rejects when it
+refuses to send the console's own opinion about somebody's groups to an API
+server.
+
+### 27.5 Absent groups refuse; empty groups do not
+
+`app/identity/oidc.py` keeps an **absent** groups claim apart from an **empty**
+one, on the grounds that an issuer which did not tell us must not demote anybody.
+Under impersonation that distinction stops being about console roles and becomes
+load-bearing on the cluster.
+
+Impersonating with an empty group list when the claim was merely omitted strips
+every group-derived permission the operator actually holds, and produces a page
+full of correctly-reported denials for permissions they have. So absent refuses,
+naming the claim to configure. Empty is a real answer and impersonates fine.
+
+The same rule applies at the storage boundary: a stored groups value the console
+cannot parse degrades to **absent**, not to empty. Both readings are wrong and
+only one of them is dangerous.
+
+### 27.6 The calls that stay as the ServiceAccount
+
+ADR-0007 requires these be a **list** rather than an emergent property of
+whoever wrote the last endpoint. There are three, and a test enumerates them:
+
+* **Discovery.** `discover()` memoises its catalog per cluster and hands the same
+  one to everybody, so impersonating it would let whichever operator warmed the
+  cache decide what every other operator sees the cluster as serving. It does not
+  vary by person anyway: discovery reports what the **API** serves, not what the
+  caller may do with it. Every question that is about the caller goes through
+  §9's preflight, which *is* impersonated.
+* **The connection test** (`POST /api/clusters/{id}/test`). It answers "can this
+  console reach and authenticate to this cluster, and what may it do there",
+  which is a question about the stored credential. Run as the operator it reports
+  the operator's permissions instead, and a cluster whose ServiceAccount token
+  had expired would still test clean for anyone whose own RBAC was fine.
+* **The local kubeconfig fallback.** There is no `Cluster` row, so there is
+  nothing carrying the opt-in and nothing that could have been opted in.
+
+The last two are structural rather than conditional: they build transports that
+may never impersonate at all, so no contextvar can make them.
+
+### 27.7 `subject` on every `PreflightResult`
+
+§9's results gain `subject`: the identity the `SelfSubjectAccessReview` answered
+for. A review asks "may **this credential** do this", which is the question that
+decides whether the write succeeds — so the answer was always correct, and always
+correct about the wrong subject.
+
+`403 rbac_denied` now names it too: `context.subject`, and the message reads
+"`alice@example.com` cannot patch deployments in namespace …" rather than
+"Cannot patch deployments". §11.4's disabled button can finally say *whose*
+permission is missing, which decides which ClusterRole somebody goes and edits.
+
+On a cluster that does not impersonate, `subject` is `the console's
+ServiceAccount` — deliberately a phrase no one could mistake for a username. That
+was silently true before and is now written down.
+
+### 27.8 `impersonated_user` on every audit row
+
+§10 rows gain `impersonated_user`, and the export gains a column. `null` means
+the console acted as itself — a fact, not a gap, and never defaulted to `actor`.
+
+Both are recorded because they answer different questions. `actor` is who used
+this console and is a name only this application can vouch for.
+`impersonated_user` is the name the **API server** saw, evaluated authorization
+against, and wrote into its own audit log — so an incident review can join this
+trail to the cluster's by a value neither side invented. That is a materially
+stronger claim than ADR-0003 can make about a table this application owns.
+
+Like `actor`, it is read from request context and is not a parameter of
+`record()`: a caller that can pass the identity a write was made as can pass the
+wrong one.
+
+**It is hashed only when it is set.** Appending it to `HASHED_FIELDS` would
+change the hash computation for every row ever written, including every row
+written before the column existed — and the whole table would verify as `broken`.
+That is a false tamper alarm delivered by a schema change. It lives in
+`OPTIONAL_HASHED_FIELDS` instead: a key in the payload when set, no key when
+null. Every mutation of the field still crosses that boundary and still breaks
+the chain; see ADR-0007's *What the implementation decided*.
+
+### 27.9 What §27 is not
+
+**Not a way to give somebody permissions.** Impersonation narrows what the
+console may do to what the operator may do. It never widens: an operator whose
+own RBAC forbids a write gets a denial where the console alone would have
+succeeded, which is the point.
+
+**Not a replacement for the mutations gate.** §8's two gates stay independent.
+`ADMIN_ALLOW_MUTATIONS` is a property of the deployment and is unaffected by who
+is signed in; impersonation narrows the RBAC gate, not that one.
+
+**Not a check that the issuers match.** The console cannot read a cluster's
+`--oidc-issuer-url` and will not pretend to. Where the two differ, the console
+asserts an identity the cluster has never heard of and every request is refused
+as that person. That alignment is the operator's to get right, and the
+registration form says so at the checkbox.

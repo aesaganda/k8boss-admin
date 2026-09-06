@@ -43,7 +43,7 @@ of [K8Boss](https://github.com/aesaganda/k8boss) and shares no code with it —
 | Directory | What lives there | Rules |
 |---|---|---|
 | `backend/app/api/` | FastAPI routers. Thin: parse, call, envelope. `bodies.py` holds the one `MutationBody` every write body subclasses | Logic belongs below this layer |
-| `backend/app/k8s/` | Per-request cluster context, auth strategy, client manager | `docs/architecture.md` §2 |
+| `backend/app/k8s/` | Per-request cluster context, auth strategy, client manager, and ADR-0007's impersonation decision (`impersonation.py`) — whether a call acts as the signed-in operator or as the console, refusing rather than falling back | `docs/architecture.md` §2, `docs/adr-0007-impersonation.md` |
 | `backend/app/resources/` | Catalog (discovery), reader (generic list/get/YAML, plus `read_object` by known GVK), transport (the one round trip that keeps its `Warning:` headers), shaping (rows), envelope | `docs/api-contract.md` §1.2, §4, §8 |
 | `backend/app/services/` | Typed read models: the unified workload row, node rows, the unified route row, the operator catalog (`portal.py`), one pod's detail, environment and usage (`pods.py`), network policy correlation (`network.py`), events (`events.py`), one namespace with what governs it (`projects.py`), the control plane's own health (`cluster_status.py`) | `docs/api-contract.md` §5, §6, §7.5–§7.7, §8.4, §13, §16, §17, §19 |
 | `backend/app/admin/` | **Every write.** The funnel, preflight, diff, apply, scale, rollout, node drain, debug containers, route compilation, the shipped router, the one operator Subscription (`portal.py`), the project — five creates into a namespace that does not exist (`projects.py`), the Pod Security level a namespace declares (`podsecurity.py`), growing a persistent volume claim (`pvc.py`), an autoscaler's replica bounds and which autoscaler will revert a manual scale (`hpa.py`), one VolumeSnapshot of a claim — and what a snapshot is not (`snapshot.py`), a node's taints and labels with the pods a `NoExecute` taint deletes and why no PodDisruptionBudget stops it (`node_scheduling.py`), approving a CertificateSigningRequest after decoding what it asks to become (`csr.py`), deleting a namespace after reading what goes with it — the volumes whose data is destroyed, the addresses released, the admission webhooks left without a backend (`namespace_delete.py`). Also the authorization machinery that is not a write: §9's preflight and §23's review of another subject (`access_review.py`) | `docs/safety-model.md` |
@@ -230,6 +230,7 @@ detail cannot carry that and a 500 carries nothing.
 | `conflict` | 409 | `resourceVersion` mismatch, or the API server called it conflicting |
 | `invalid` | 422 | Schema, admission or request validation |
 | `mutations_disabled` | 403 | The *deployment* is read-only. **Not** `rbac_denied` — the operator's permissions are irrelevant, and telling them otherwise sends them to fix the wrong system |
+| `impersonation_unavailable` | 403 | ADR-0007: the cluster acts as the signed-in operator and this session cannot supply a cluster identity. **Not `rbac_denied`** — the operator's permissions are what could not be *established*, and reporting a denial sends them to widen a ClusterRole that was already correct |
 | `unsupported` | 501 | The cluster does not serve that API. **Not an error in the UI** — no Ingress CRDs and no `metrics.k8s.io` are ordinary facts, and rendering them red trains people to ignore red |
 | `upstream_error` | 502 | Anything else, including 401 (the cluster answered — it refused us) |
 
@@ -375,7 +376,7 @@ serving a request — and SQLite could not reproduce it.
 | `docs/adr-0004-shipped-router.md` | Why the console installs a router at all, why HAProxy, what it does not serve, and the boundary that keeps "not a deployment engine" true of everything else |
 | `docs/adr-0005-operator-portal.md` | Why creating an OLM Subscription is not a second thing this console installs, and where that line is |
 | `docs/adr-0006-projects.md` | Why a project is five ordinary writes into a namespace that does not exist, not a template engine, and why the dry run says whose diff each object carries |
-| `docs/adr-0007-impersonation.md` | **Proposed, not accepted.** Why every cluster call is made as one ServiceAccount, what per-user impersonation would fix, what its grant costs, and the conditions any implementation would have to meet |
+| `docs/adr-0007-impersonation.md` | **Accepted.** Why every cluster call is made as one ServiceAccount by default, what per-cluster impersonation fixes, what its grant costs, the six conditions the implementation had to meet, and the two questions it forced — why `system:authenticated` is sent though no issuer states it, and why the new audit column is hashed only when set |
 | `deploy/router.yaml` | The shipped router bundle, applicable by hand. **Generated** — `make router-manifest`, enforced by a test |
 | `deploy/rbac.yaml` | The shipped roles. Each rule is annotated with the contract section it serves |
 | `README.md` | The front door: quickstart, feature list, every environment variable |

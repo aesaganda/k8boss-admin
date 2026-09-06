@@ -160,6 +160,17 @@ const ERROR_FRAMING = {
     title: 'The console backend could not be reached',
     lead: 'This says nothing about the cluster’s health — the request never left this browser’s reach.',
   },
+  impersonation_unavailable: {
+    variant: 'warning',
+    // ADR-0007, and deliberately not framed as a permission problem. This
+    // cluster acts as the signed-in operator and this session cannot supply a
+    // cluster identity — the operator's RBAC is not what failed, and telling
+    // them it was sends them to widen a ClusterRole that was already correct.
+    // The fix is on the console (sign in through SSO) or on the cluster's
+    // registration (turn impersonation off), never on the cluster's RBAC.
+    title: 'This cluster acts as you, and this session cannot say who you are',
+    lead: 'Nothing was sent to the cluster. This is not a permission you are missing.',
+  },
   unsupported: {
     variant: 'warning',
     title: 'This cluster does not serve that API',

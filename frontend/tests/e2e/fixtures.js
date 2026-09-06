@@ -147,6 +147,10 @@ export const FIXTURES = {
         authentication_type: 'service_account_token',
         has_ca_certificate: true,
         skip_tls_verify: false,
+        // ADR-0007. Present and false, like the backend's own ClusterPublic:
+        // the setting decides who the cluster thinks is asking, so a fixture
+        // that omitted it would let a form which never reads it pass.
+        impersonation_enabled: false,
         status: 'connected',
         server_version: 'v1.31.4',
         last_connected: '2026-08-18T09:03:11Z',
@@ -3972,6 +3976,8 @@ export async function mockApi(
     namespaceDeletePlan = null,
     namespaceDeleteOverrides = undefined,
     namespaceDeletes = [],
+    clusters = null,
+    clusterWrites = [],
     clusterStatus = null,
     claims = null,
     expandPlan = null,
@@ -4047,7 +4053,17 @@ export async function mockApi(
     if (path === '/audit/verify') return json(chain ?? FIXTURES.auditVerify);
     if (path === '/audit') return json(audit ?? FIXTURES.audit);
     if (path === '/health') return json(health);
-    if (path === '/clusters') return json(FIXTURES.clusters);
+    if (path === '/clusters' && route.request().method() === 'POST') {
+      const body = JSON.parse(route.request().postData() || '{}');
+      clusterWrites.push(body);
+      return json({ ...FIXTURES.clusters.items[0], ...body, id: 2 }, 201);
+    }
+    if (/^\/clusters\/\d+$/.test(path) && route.request().method() === 'PUT') {
+      const body = JSON.parse(route.request().postData() || '{}');
+      clusterWrites.push(body);
+      return json({ ...FIXTURES.clusters.items[0], ...body });
+    }
+    if (path === '/clusters') return json(clusters ?? FIXTURES.clusters);
     if (/^\/clusters\/\d+\/overview$/.test(path)) return json(FIXTURES.overview);
     if (/^\/clusters\/\d+\/test$/.test(path)) {
       return json({ reachable: true, server_version: 'v1.31.4', latency_ms: 42, permissions: [] });

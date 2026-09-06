@@ -55,6 +55,7 @@ from app.errors import (
     from_api_exception,
 )
 from app.k8s.client import get_authorization_v1
+from app.k8s.impersonation import current_subject
 from app.resources.catalog import normalize_group, wire_group
 from app.resources.shaping import get_field
 
@@ -132,8 +133,18 @@ def _result(
     ``name`` and ``subresource`` are echoed too, beyond the fields §9 lists. A
     result for ``create core/pods/exec`` is otherwise indistinguishable from one
     for ``create core/pods``, and those are different permissions.
+
+    ``subject`` is ADR-0007's condition 5. A ``SelfSubjectAccessReview`` answers
+    "may **this credential** do this", and until impersonation existed that
+    credential was always the console's — the answer was correct about the wrong
+    subject, and §11.4's disabled buttons said "not permitted" without being able
+    to say whose permission was missing. On an impersonating cluster the review
+    is issued under the operator's own identity and this field names them; on
+    every other cluster it names the console's ServiceAccount, which is what was
+    silently true before and is now written down.
     """
     return {
+        "subject": current_subject(),
         "verb": verb,
         "group": wire_group(group),
         "resource": resource,
@@ -387,12 +398,19 @@ def require(
         f" in {namespace}" if namespace else "", result["reason"],
     )
     raise RBACDenied(
-        f"Cannot {verb} {_target_phrase(group, resource, subresource)}"
+        # Whose permission, not just which. "Cannot patch deployments" sends
+        # whoever reads it to check the console's ServiceAccount, and on an
+        # impersonating cluster that ServiceAccount is not the subject the
+        # authorizer refused — so the operator edits a ClusterRole that was
+        # never consulted.
+        f"{result['subject']} cannot {verb} "
+        + _target_phrase(group, resource, subresource)
         + (f' in namespace "{namespace}"' if namespace else "")
         + ".",
         detail=result["reason"],
         hint=result["hint"],
         context={
+            "subject": result["subject"],
             "verb": verb,
             "group": normalize_group(group),
             "resource": resource,

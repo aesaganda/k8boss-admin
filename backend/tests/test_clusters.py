@@ -188,10 +188,15 @@ def test_create_returns_the_public_shape(client):
     body = response.json()
     assert set(body) == {
         "id", "name", "platform", "api_server", "authentication_type",
-        "has_ca_certificate", "skip_tls_verify", "app_domain", "status",
-        "server_version", "last_connected", "created_at", "updated_at",
+        "has_ca_certificate", "skip_tls_verify", "impersonation_enabled",
+        "app_domain", "status", "server_version", "last_connected",
+        "created_at", "updated_at",
     }
     assert body["has_ca_certificate"] is True
+    # ADR-0007 condition 1: surfaced like skip_tls_verify, so a setting that
+    # changes who the cluster thinks is asking can never be silently in effect —
+    # and off unless the operator asked for it.
+    assert body["impersonation_enabled"] is False
     # Never tested yet — and that is not the same as "failed".
     assert body["status"] == "unknown"
     assert body["server_version"] is None
