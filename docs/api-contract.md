@@ -4664,3 +4664,142 @@ Deployment with none is evicted freely, which is very often correct. Flagging it
 would put the console's opinion about somebody's availability requirements on a
 page, and a finding that fires on most rows is one nobody reads on the day it
 matters.
+
+---
+
+## 29. Quota advice — will the next workload be admitted, and what refuses it
+
+### 29.1 Two refusals a 403 makes look alike
+
+A ResourceQuota refuses at admission, and the refusal is a sentence somebody
+parses under pressure. Everything needed to answer first is already in the
+namespace: `spec.hard` minus `status.used` is headroom, and a workload's demand
+is arithmetic over its own containers.
+
+The obvious refusal is **no room**, and it is fixed by deleting something or
+raising the limit. The one that costs an afternoon is different:
+
+> A quota that bounds a compute resource makes that resource **compulsory**. If
+> any quota in the namespace bounds `requests.cpu`, every container created
+> there must state it — and one that does not is refused with *"must specify
+> requests.cpu"* **even when the quota is one percent used**.
+
+A LimitRange with a `defaultRequest` for `Container` discharges that by
+injecting the value at admission. So a namespace with a quota and no LimitRange
+is a namespace where an ordinary Deployment cannot be created at all, the
+message names a *field* rather than the missing object, and the fix is a second
+object nobody mentioned.
+
+§29 keeps the two apart, because they send an operator to two different places.
+
+### 29.2 `GET /api/quota/{namespace}`
+
+What bounds the namespace, and what every pod in it must declare.
+
+```json
+{
+  "namespace": "prod",
+  "quotas": [ { "name": "team", "applies": true,
+                "resources": [ … ], "headroom": { "requests.cpu": "1" },
+                "findings": [] } ],
+  "limitRanges": [ … ],
+  "containerDefaults": { "requests.memory": "256Mi" },
+  "mandatory": ["requests.cpu", "requests.memory"],
+  "findings": [ … ],
+  "unavailable": [], "partial": false
+}
+```
+
+`quotas: null` is a refused listing — **never `[]`**, which is the answer that
+says nothing bounds this namespace and every workload is admitted. `mandatory`
+is `null` for the same reason.
+
+`applies` is tri-state. `true` for an unscoped quota, which counts everything.
+**`null`** for one carrying `scopes` or a `scopeSelector`: which pods it counts
+depends on the priority class, terminating state or best-effort-ness of an
+object that does not exist yet, and this console will not pick a side. Including
+it invents a refusal from a quota that may not govern the workload; excluding it
+hides a real one.
+
+`cpu` and `memory` are the API's own aliases for the `requests.` forms and are
+normalised to them. Treating them as separate keys would report a namespace as
+bounding two things when it bounds one.
+
+### 29.3 `POST /api/quota/{namespace}/preview`
+
+```json
+{ "replicas": 3, "containers": [ { "name": "app",
+    "requests": { "cpu": "500m", "memory": "1Gi" } } ] }
+```
+
+A `POST` that writes nothing, like §17's and §18's plans: replicas and a
+container list do not belong in a query string. The response is §29.2 plus:
+
+```json
+{ "preview": {
+    "replicas": 3,
+    "needed": { "requests.cpu": "1.500" },
+    "unsetMandatory": [ { "container": "app", "resource": "requests.cpu" } ],
+    "checks": [ { "quota": "team", "resource": "requests.cpu",
+                  "needed": "1.500", "headroom": "1", "verdict": "refused" } ],
+    "verdict": "refused" } }
+```
+
+**`verdict` is `admitted`, `refused` or `unknown`**, and the third is a real
+answer rather than a failure. Any refusal refuses; otherwise any unknown is
+unknown. It is `unknown` whenever the arithmetic cannot be completed honestly:
+
+* a `status.used` the quota controller has not written yet — **absence is not
+  zero**, and reading it as zero gives the roomiest possible answer at the
+  moment this console knows least, to the person about to deploy;
+* a scoped quota, per §29.2;
+* a LimitRange listing that did not answer, which additionally **suppresses the
+  `unsetMandatory` check entirely** rather than computing it from an empty
+  default map. That conclusion is wrong in the dangerous direction: it reports a
+  workload as refused for a missing value a default the console could not read
+  may well supply.
+
+`unsetMandatory[]` is the §29.1 refusal and is listed separately from `checks`
+because raising a limit does not fix it.
+
+A **declared `"0"`** is a value: it satisfies the compulsory rule and consumes no
+headroom. Collapsing it into "unset" would report a refusal the API server would
+not make.
+
+An object-count bound the request does not describe — `count/deployments.apps`
+from a body that does not say how many it creates — is **skipped**, not
+verdicted. Arithmetic over an invented number is not advice.
+
+### 29.4 Finding codes
+
+| Code | Scope | When |
+|---|---|---|
+| `quota_requires_unset_resource` | namespace | Some quota bounds a compute resource and no LimitRange defaults it. Every pod omitting it is refused regardless of usage |
+| `quota_usage_unknown` | quota | `status.used` has no entry for a bounded resource. No headroom can be computed from it |
+| `quota_exhausted` | quota | A bound is at its hard limit |
+| `quota_scoped` | quota | Scopes or a scope selector, so its verdict is withheld |
+
+`quota_requires_unset_resource` is namespace-level rather than per-quota because
+the rule is a property of the namespace: *any* quota bounding the resource makes
+it compulsory for *every* pod, and the fix is one LimitRange rather than a change
+to any quota.
+
+### 29.5 What §29 is not
+
+**Not admission.** The API server admits. §4's dry-run create asks it and gets
+the authoritative answer for a manifest that exists; this answers from arithmetic
+for one that does not, and says the two things a 403 does not — how much room is
+left, and which of a quota's bounds is the tight one. No field is called
+`will_be_admitted`.
+
+**Not a write.** Editing a quota or a LimitRange is §4's `PUT` through the single
+mutation funnel.
+
+**Not a scheduler.** Fitting inside a quota is not fitting on a node. A workload
+this endpoint admits can still sit `Pending` because no node has the room, which
+is §5's question and a different one.
+
+**Not a complete model of admission.** LimitRange `max`/`min`/`maxLimitRequestRatio`
+bounds, Pod-scoped LimitRange items and priority-class scope selectors are read
+and reported but not evaluated into the verdict. Where any of them could change
+the answer, the verdict is `unknown` rather than confidently wrong.

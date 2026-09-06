@@ -532,6 +532,20 @@ version being that there is no undo for a deleted StatefulSet.
   healthy while a drain over them cannot finish, and this is the only screen
   where either mentions the other. Nothing here claims a budget is *enforced*:
   the eviction API is the enforcer. See §28.
+* **Whether the next workload will be admitted, and which limit refuses it** —
+  a ResourceQuota refuses at admission, and the refusal is a 403 somebody parses
+  under pressure. Everything needed to answer first is already in the namespace,
+  so the project page does the arithmetic: type what the workload asks for and
+  it says whether it fits, how much room is left, and *which* of a quota's
+  bounds is the tight one — none of which a 403 carries. It separates that from
+  the refusal that is not about headroom at all: **a quota bounding a compute
+  resource makes it compulsory**, so a container omitting `requests.cpu` where
+  some quota bounds it is refused with *"must specify requests.cpu"* with the
+  quota one percent used — and the fix is a LimitRange, an object the message
+  never names. `unknown` is a real verdict, drawn as one: an unwritten
+  `status.used` is not zero, and a scoped quota's applicability to a pod that
+  does not exist yet is not guessed. The API server still admits — §4's dry run
+  is what asks it. See §29.
 * Create, edit and delete NetworkPolicies, from a default-deny starter manifest —
   through the same dry-run-then-confirm funnel as every other write, so the diff
   is shown before a segmentation change reaches a cluster.

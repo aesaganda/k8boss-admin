@@ -43,6 +43,7 @@ import {
 } from '../components/ui';
 import { projects as projectsApi } from '../api/client';
 import DeleteNamespaceDialog from '../components/DeleteNamespaceDialog';
+import QuotaAdvisor from '../components/QuotaAdvisor';
 import PodSecurityDialog from '../components/PodSecurityDialog';
 import { useCluster } from '../contexts/ClusterContext';
 import { useNamespace } from '../contexts/NamespaceContext';
@@ -397,6 +398,21 @@ export default function NamespaceDetail() {
               {(project.quotas ?? []).map((quota) => (
                 <QuotaTable key={quota.name} quota={quota} />
               ))}
+            </CardBody>
+          </Card>
+        </GridItem>
+
+        {/* §29. Directly under the quota tables, because it answers the
+            question those tables raise: the numbers above say what is used,
+            and the only thing anybody wants from them is whether the next
+            workload fits. It reads its own endpoint rather than deriving from
+            `project.quotas` — the advice needs the LimitRanges too, and a
+            second derivation of the same arithmetic could disagree with the
+            first. */}
+        <GridItem span={12}>
+          <Card>
+            <CardBody>
+              <QuotaAdvisor namespace={name} />
             </CardBody>
           </Card>
         </GridItem>

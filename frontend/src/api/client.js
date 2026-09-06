@@ -710,6 +710,45 @@ export const network = {
   isolation: (params) => api.get('/network/isolation', params),
 };
 
+/* ── §29 Quota advice ───────────────────────────────────────────────────── */
+
+export const quota = {
+  /**
+   * What bounds a namespace, and what every pod in it must declare.
+   *
+   * `quotas: null` is a refused listing — **never `[]`**, which is the answer
+   * that says nothing bounds this namespace and every workload is admitted.
+   *
+   * `mandatory[]` is the field this exists for: a quota bounding a compute
+   * resource makes it compulsory on every container, and a pod omitting it is
+   * refused with "must specify …" even when the quota is barely used.
+   * `containerDefaults` is what the LimitRanges supply toward that.
+   */
+  advice: (namespace) => api.get(`/quota/${encodeURIComponent(namespace)}`),
+
+  /**
+   * Would this workload be admitted, and which limit refuses it?
+   *
+   * **Advice, not admission.** §4's dry-run create asks the API server for the
+   * authoritative answer to a manifest that exists; this answers from
+   * arithmetic for one that does not, and says the two things a 403 does not —
+   * how much room is left, and which of a quota's limits is the tight one.
+   *
+   * `verdict` is `admitted`, `refused` or **`unknown`**, and the third is a
+   * real answer: an unwritten `status.used`, a scoped quota, or a LimitRange
+   * listing that did not answer. Rendering it as admitted would give the
+   * roomiest answer at the moment least is known.
+   *
+   * body: { replicas, containers: [{ name, requests, limits }] }
+   */
+  preview: (namespace, body) =>
+    request(`/quota/${encodeURIComponent(namespace)}/preview`, {
+      method: 'POST',
+      body,
+      retry: true,
+    }),
+};
+
 /* ── §28 Disruption budgets ─────────────────────────────────────────────── */
 
 export const disruption = {
