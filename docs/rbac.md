@@ -151,6 +151,22 @@ standing.
 All six are in the reader role already — §31 adds no grant. It is listed here
 because the degradation is worth knowing before somebody trims the role.
 
+## Read: the certificate an exposure serves (§32)
+
+No new grant. All four reads are already in the shipped reader role, and this
+records what withholding each costs — worth knowing before somebody trims it.
+
+| Verb | Group / resource | Withholding it |
+|---|---|---|
+| `list` | `networking.k8s.io/ingresses` | No Ingress certificate is reported. The listing names itself in `unavailable[]`; the report never shows a short list that looks complete |
+| `list` | `route.openshift.io/routes` | The same for Routes, including the ones carrying an inline certificate — which need no Secret read at all |
+| `list` | `gateway.networking.k8s.io/gateways` | No Gateway listener certificate is reported. On a Gateway-API cluster that is the whole page, so `kinds[]` says which API could not be read rather than rendering an empty table |
+| `get` | `secrets` | **Every Secret-backed row is `state: unknown`** with a finding naming the failed read, and every host on it is `covered: null`. It is never reported as an exposure with no certificate. Routes with an inline certificate still report normally. This is the one grant §32 shares with the Secrets tab, and it is `get`, never `list`: §32 opens Secrets it was told the name of |
+
+A caller holding `get secrets` in one namespace and not another gets a report
+that is right about both — the readable rows carry certificates, the rest carry
+their reason.
+
 ## Read: the resource browser
 
 | Permission | Feature | Withheld |

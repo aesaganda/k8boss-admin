@@ -792,6 +792,16 @@ export const routes = {
   /** params: { namespace, backend (repeatable), limit } */
   list: (params) => api.get('/routes', params),
 
+  /**
+   * §32 — the certificate each exposure points at: when it expires and which
+   * hostnames it names. A separate read from `list` on purpose: it opens one
+   * Secret per distinct certificate, and putting that behind the Routes table
+   * would make the table as slow as the slowest Secret read on the page.
+   *
+   * params: { namespace, limit }
+   */
+  certificates: (params) => api.get('/routes/certificates', params),
+
   get: (backend, namespace, name) => api.get(routePath(backend, namespace, name)),
 
   /**

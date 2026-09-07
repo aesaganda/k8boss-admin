@@ -44,6 +44,7 @@ import {
 import DeleteDialog from '../components/DeleteDialog';
 import RouteDialog from '../components/RouteDialog';
 import RouterPanel from '../components/RouterPanel';
+import CertificatePanel from '../components/CertificatePanel';
 import { routes as routesApi } from '../api/client';
 import { useCluster } from '../contexts/ClusterContext';
 import { useNamespace } from '../contexts/NamespaceContext';
@@ -464,6 +465,10 @@ export default function Routes() {
           ) : null
         }
       />
+
+      <div style={{ marginTop: '1.5rem' }}>
+        <CertificatePanel />
+      </div>
 
       <div style={{ marginTop: '1.5rem' }}>
         <RouterPanel gate={gate} onChanged={reloadAll} />

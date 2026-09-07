@@ -32,6 +32,7 @@ from app.api.bodies import MutationBody
 from app.admin import router as router_service
 from app.admin import routes as routes_admin
 from app.services import routes as routes_service
+from app.services import tls as tls_service
 
 logger = logging.getLogger(__name__)
 
@@ -232,6 +233,25 @@ def get_capabilities() -> dict[str, Any]:
     three.
     """
     return routes_service.capabilities()
+
+
+@router.get("/routes/certificates")
+def list_route_certificates(
+    namespace: str | None = Query(
+        None, description="Omit to report across all namespaces."
+    ),
+    limit: int = Query(500, ge=1, le=5000),
+) -> dict[str, Any]:
+    """§32 — every certificate the edge points at, with its expiry and its names.
+
+    One segment after ``routes``, like ``/routes/capabilities``, so it cannot
+    collide with the three-segment single-exposure path.
+
+    ``limit`` bounds each of the three *listings*. It does not bound how many
+    Secrets are opened — that is `tls.MAX_CERTIFICATE_READS`, spent per distinct
+    Secret, and a row past it says so rather than looking examined.
+    """
+    return tls_service.certificate_report(namespace=namespace, limit=limit)
 
 
 @router.get("/routes")
