@@ -1735,20 +1735,39 @@ listing failed rather than that nothing was found.
 
 ### 19.2 The third answer to the selector question
 
-There are now three selector matchers in this tree answering three questions, and
-the divergence is deliberate rather than drift:
+A label selector this console cannot evaluate — a `matchExpressions` operator
+outside the four Kubernetes defines — has three answers available, and only one
+of them is honest: *matches*, *does not match*, and *we could not tell*.
+`shaping.label_selector_matches` is **tri-state** and returns the third.
 
-* `workloads.selector_matches` resolves an operator it does not model to
-  **False**. Over-matching would attribute other workloads' pods to a row.
-* §5's drain plan uses that one. Under-reporting a block sends the operator to
-  the eviction API, which enforces the budget properly — a safe direction.
-* §28 uses `shaping.label_selector_matches`, which is **tri-state**. Here `False`
-  would manufacture the "this budget protects nothing" sentence, and the operator
-  deletes a budget that works. So an undecidable selector is `null` coverage and
-  its own finding, which says in words that it is *not* a report of zero.
+There was for a while a second matcher, `workloads.selector_matches`, that
+resolved an unmodelled operator to `False`. That is defensible on its own terms —
+over-matching would attribute other workloads' pods to a row — and it did not
+stay on its own terms: §5's drain plan imported it, and the answer it produced
+there was "no PodDisruptionBudget covers this pod", stated in a plan an operator
+reads before draining a node. The budget was never consulted again; the API
+server refused the eviction mid-drain instead. A matcher that resolves one
+ambiguity is reused for a question where that resolution is a lie, and nothing
+about the call site shows it.
 
-Same objects, three questions, three defensible answers. What would be a defect
-is one matcher used for all three because it was already imported.
+So there is one matcher, and the three questions are answered by the three
+callers, each with the third state in front of it:
+
+* **§28** reports `selected_pods: null`, an `undecidable_pods` count, and a
+  finding that says in words this is *not* a report of zero. `False` here
+  manufactures the "this budget protects nothing" sentence and the operator
+  deletes a budget that works.
+* **§5's drain plan** lists the budget under `pdbUnknown` on the pod: coverage
+  unknown, not absent. It is deliberately not a blocker — the eviction
+  subresource is the enforcer, and refusing a drain over a selector we merely
+  could not parse is how `force` becomes reflex (§5.4).
+* **§6's workload row** returns `restarts_24h: null` for the whole workload as
+  soon as one pod is undecidable. Summing the rest would be a floor rendered as
+  a total, and a restart count that reads low is the one nobody re-checks.
+
+Same objects, three questions, three answers — but the divergence now lives at
+the three call sites, where the cost of each choice is visible, instead of inside
+a shared helper that hands out one of them to whoever imports it.
 
 ### 19.3 What it does not claim
 

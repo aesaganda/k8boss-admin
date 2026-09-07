@@ -437,6 +437,15 @@ returns `207`-style detail: `applied: true` with per-pod `result` fields, becaus
 "drain succeeded" when three pods failed to evict is exactly the confident wrong
 answer this project exists to avoid.
 
+Every entry also carries `pdb` — the PodDisruptionBudget that covers this pod, or
+`null` — and `pdbUnknown[]`, the budgets whose selector this console could not
+evaluate, so whether they cover the pod is **unknown rather than absent** (§28.5).
+`pdbUnknown` is never merged into `pdb`, and it is deliberately not a blocker: the
+eviction subresource is the enforcer, and refusing a drain over a selector we
+merely could not parse is how `force` becomes reflex. The plan states the doubt
+and the operator decides. `pdb_checked: false` is the coarser version of the same
+admission — the budget listing itself failed, so no entry's `pdb` means anything.
+
 ### 5.5 Node debug pods
 
 `kubectl debug node/<name>`: a pod pinned to one machine with its filesystem
@@ -4630,22 +4639,31 @@ which would say the console checked and found none.
 | `pdb_selection_unknown` | the pod listing | A `matchExpressions` operator this console does not model. The count is unknown, and this is explicitly **not** a report that the budget covers nothing |
 | `pdb_overlaps` | the pod listing | A covered pod is also covered by another budget, named in the detail |
 
-### 28.5 Which selector matcher, and why it matters
+### 28.5 The selector matcher is tri-state, and the callers own the third state
 
-§28 uses `shaping.label_selector_matches`, which is **tri-state**, and
-deliberately not `services.workloads.selector_matches`, which resolves an
-unmodelled operator to `False`.
+There is **one** label-selector matcher in this tree,
+`shaping.label_selector_matches`, and it returns `True`, `False` or `None`.
+`None` means a `matchExpressions` operator outside the four Kubernetes defines:
+*we could not decide whether this object is selected*. It is not a match and it
+is not a non-match.
 
-That is the right direction there: attributing other workloads' pods to a row is
-worse than attributing none. It is the wrong direction here, because `False`
-manufactures the exact `pdb_selects_nothing` sentence §28 exists to make
-trustworthy — and the operator deletes a working budget as dead.
+There was a second matcher, `services.workloads.selector_matches`, that resolved
+an unmodelled operator to `False`. That was defensible where it was written —
+attributing other workloads' pods to a row is worse than attributing none — and
+it was reused by §5's drain plan, where the same `False` read as "no
+PodDisruptionBudget covers this pod" in a plan an operator studies before
+draining a node. It has been removed rather than given a third state, because a
+matcher that resolves the ambiguity for its author hands that resolution to
+every later caller with nothing at the call site to show it happened.
 
-§5's drain plan uses the two-state matcher against these same objects, and that
-is a third defensible answer to a different question: *will this specific
-eviction be refused right now*. Under-reporting a block there sends the operator
-to the eviction API, which enforces it properly. Under-reporting coverage here
-sends them to delete the budget.
+The three callers each spend the `None` where they know what it costs:
+
+| §  | Caller | On `None` |
+|---|---|---|
+| 28 | `services/disruption.py` | `selected_pods: null`, an `undecidable_pods` count, and `pdb_selection_unknown`, whose detail says in words that this is not a report of zero. `False` would manufacture `pdb_selects_nothing` and the operator deletes a working budget |
+| 5  | `admin/nodes.py` drain plan | the budget is named in the pod's `pdbUnknown[]` — coverage unknown, not absent — and is **not** a blocker. The eviction subresource is the enforcer, and blocking a drain over a selector we could not parse is how `force` becomes reflex |
+| 6  | `services/workloads.py` | `restarts_24h: null` for the whole workload as soon as one pod is undecidable. Summing the rest is a floor rendered as a total, and §0.1's rule applies: a number we could not derive is `null`, never a partial count |
+| 11 | `services/network.py` | `null` coverage on the policy, per §8.3 |
 
 ### 28.6 What §28 is not
 

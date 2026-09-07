@@ -50,7 +50,7 @@ from app.errors import Invalid, NotFound, from_api_exception
 from app.k8s.client import get_apps_v1, get_batch_v1, get_core_v1
 from app.models import rfc3339 as _rfc3339_datetime
 from app.resources.envelope import collect, envelope, unavailable_entry
-from app.resources.shaping import phase_detail, pod_row
+from app.resources.shaping import label_selector_matches, phase_detail, pod_row
 
 logger = logging.getLogger(__name__)
 
@@ -328,52 +328,6 @@ def _selector_terms(selector: Any) -> tuple[dict[str, str], list[Any]]:
     return match_labels, match_expressions
 
 
-def selector_matches(selector: Any, labels: dict[str, str] | None) -> bool:
-    """Does a LabelSelector select this label set?
-
-    Both halves are implemented, including ``matchExpressions``. Supporting only
-    ``matchLabels`` would silently attribute *no* pods to any workload that used
-    an expression — and the row would then report ``restarts_24h: 0``, which is a
-    number, not a gap, so nothing downstream could tell it was made up.
-
-    An empty selector is handled by the caller, not here: by the LabelSelector
-    rules it matches every pod in the namespace, which is a true statement that
-    makes for a useless attribution.
-    """
-    labels = labels or {}
-    match_labels, match_expressions = _selector_terms(selector)
-
-    for key, value in match_labels.items():
-        if labels.get(key) != value:
-            return False
-
-    for expression in match_expressions:
-        key = _get(expression, "key")
-        operator = _get(expression, "operator")
-        values = list(_get(expression, "values", default=[]) or [])
-        present = key in labels
-        if operator == "In":
-            if not present or labels[key] not in values:
-                return False
-        elif operator == "NotIn":
-            if present and labels[key] in values:
-                return False
-        elif operator == "Exists":
-            if not present:
-                return False
-        elif operator == "DoesNotExist":
-            if present:
-                return False
-        else:
-            # An operator the API server accepted and we do not model. Refusing
-            # to match is the safe direction: over-matching would attribute other
-            # workloads' pods to this row.
-            logger.debug("Unknown label selector operator %r; treating as no match", operator)
-            return False
-
-    return True
-
-
 def selector_is_empty(selector: Any) -> bool:
     """True when the selector constrains nothing (and so selects everything)."""
     match_labels, match_expressions = _selector_terms(selector)
@@ -641,20 +595,33 @@ class PodIndex:
             ))
 
     def restarts_for_selector(self, namespace: str | None, selector: Any) -> int | None:
-        """Restarts of the pods this selector picks, or None if it picks everything.
+        """Restarts of the pods this selector picks, or ``None`` if it cannot be counted.
 
-        None for an empty selector: by the LabelSelector rules it matches every
-        pod in the namespace, and attributing a whole namespace's restarts to one
-        workload is a number that is confidently wrong rather than missing.
+        ``None`` for an empty selector: by the LabelSelector rules it matches
+        every pod in the namespace, and attributing a whole namespace's restarts
+        to one workload is a number that is confidently wrong rather than
+        missing.
+
+        ``None`` too when **any** pod's membership could not be decided — a
+        selector using a `matchExpressions` operator this console does not model.
+        The sum would otherwise be a floor presented as a total, and a
+        `restarts_24h` that reads low is exactly the number nobody re-checks. One
+        undecidable pod poisons the whole count rather than being silently
+        excluded, because there is no way to render "23 restarts, plus however
+        many belong to the pods we could not classify".
         """
         if selector is None or selector_is_empty(selector):
             return None
-        return sum(
-            fact.restarts
-            for fact in self.facts
-            if (namespace is None or fact.namespace == namespace)
-            and selector_matches(selector, fact.labels)
-        )
+        total = 0
+        for fact in self.facts:
+            if namespace is not None and fact.namespace != namespace:
+                continue
+            member = label_selector_matches(selector, fact.labels)
+            if member is None:
+                return None
+            if member:
+                total += fact.restarts
+        return total
 
     def restarts_for_owners(self, uids: set[str]) -> int:
         """Restarts of the pods directly owned by any of these objects."""
@@ -1509,6 +1476,5 @@ __all__ = [
     "resolve_kind_filter",
     "resolve_plural",
     "restarts_in_window",
-    "selector_matches",
     "workload_row",
 ]

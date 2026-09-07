@@ -118,10 +118,45 @@ function PlanTable({ plan, executed }) {
         key: 'reason',
         title: 'Why',
         modifier: 'breakWord',
-        // A skipped pod without a reason is a plan entry that cannot be
-        // audited by the person reading it, so the empty string is rendered as
-        // the explicit "no qualification" rather than left blank.
-        cell: (row) => row.reason || <span style={{ color: 'var(--admin-muted, #6a6e73)' }}>—</span>,
+        cell: (row) => {
+          // Budgets whose selector the backend could not evaluate — a
+          // `matchExpressions` operator it does not model — so whether they
+          // cover this pod is unknown. Deliberately not a blocker (the eviction
+          // subresource is the enforcer, and refusing a drain over a selector we
+          // merely could not parse is how `force` becomes reflex), but it cannot
+          // be silent either: this row says "Evict", and rendering its Why as
+          // the "no qualification" dash would state that the plan checked the
+          // budgets and found none covering this pod. It checked and could not
+          // tell, which is the difference §0.1 exists for.
+          const unknown = row.pdbUnknown ?? [];
+          // A skipped pod without a reason is a plan entry that cannot be
+          // audited by the person reading it, so the empty string is rendered as
+          // the explicit "no qualification" rather than left blank.
+          if (!row.reason && unknown.length === 0) {
+            return <span style={{ color: 'var(--admin-muted, #6a6e73)' }}>—</span>;
+          }
+          return (
+            <>
+              {row.reason}
+              {unknown.length > 0 && (
+                <div
+                  data-testid={`pdb-unknown-${row.namespace}/${row.pod}`}
+                  style={{
+                    color: 'var(--pf-t--global--text--color--status--warning--default, #795600)',
+                    fontSize: '0.8125rem',
+                    marginBlockStart: row.reason ? '0.25rem' : 0,
+                  }}
+                >
+                  {`Coverage by PodDisruptionBudget${unknown.length === 1 ? '' : 's'} `}
+                  {unknown.join(', ')}
+                  {' could not be determined: the selector uses an operator this console does not '}
+                  {'model. If it does cover this pod, the API server may refuse the eviction — which '}
+                  {'appears as a failed eviction, not a silent skip.'}
+                </div>
+              )}
+            </>
+          );
+        },
       },
       ...(executed
         ? [

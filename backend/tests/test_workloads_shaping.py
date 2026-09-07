@@ -26,6 +26,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from app.resources.shaping import label_selector_matches
 from app.services.workloads import (
     PodIndex,
     container_images,
@@ -33,7 +34,6 @@ from app.services.workloads import (
     derive_status,
     replica_counts,
     restarts_in_window,
-    selector_matches,
     workload_row,
 )
 from tests.conftest import obj
@@ -485,6 +485,41 @@ def test_an_empty_selector_yields_unknown_rather_than_a_namespace_wide_total():
     assert index.restarts_for_selector("prod", _selector(labels={})) is None
 
 
+def test_an_undecidable_pod_makes_the_whole_restart_count_unknown():
+    """One pod whose membership cannot be decided poisons the count.
+
+    The alternative — skip that pod and sum the rest — produces a floor
+    presented as a total. `restarts_24h: 2` on a workload that actually restarted
+    forty times is a number, so nothing downstream can tell it is short, and a
+    restart count that reads low is precisely the one nobody re-checks. There is
+    no rendering for "2, plus however many belong to the pods we could not
+    classify", so the honest answer is that we could not count."""
+    index = PodIndex(
+        [_pod(restarts=2, started=NOW - timedelta(hours=1), name="a")],
+        now=NOW,
+    )
+    unmodelled = _selector(
+        labels={}, expressions=[obj(key="tier", operator="Gt", values=["3"])]
+    )
+
+    assert index.restarts_for_selector("prod", unmodelled) is None
+
+
+def test_an_undecidable_pod_in_another_namespace_does_not_poison_the_count():
+    """Namespace scoping runs before the membership question, so a selector this
+    console cannot model only costs the count in its own namespace. Otherwise a
+    single odd pod anywhere in the cluster would blank a column everywhere."""
+    index = PodIndex(
+        [_pod(restarts=4, started=NOW - timedelta(hours=1), namespace="staging")],
+        now=NOW,
+    )
+    unmodelled = _selector(
+        labels={}, expressions=[obj(key="tier", operator="Gt", values=["3"])]
+    )
+
+    assert index.restarts_for_selector("prod", unmodelled) == 0
+
+
 def test_restarts_are_attributable_by_owner_for_cronjobs():
     """A CronJob has no selector; ownership is the only true link to its pods."""
     index = PodIndex(
@@ -519,14 +554,26 @@ def test_match_expressions_are_implemented(operator, values, labels, expected):
     a number, not a gap, so nothing downstream could tell it was invented."""
     selector = _selector(labels={}, expressions=[obj(key="tier", operator=operator, values=values)])
 
-    assert selector_matches(selector, labels) is expected
+    assert label_selector_matches(selector, labels) is expected
 
 
-def test_an_unknown_selector_operator_does_not_match():
-    """Over-matching would attribute other workloads' pods to this row."""
+def test_an_unknown_selector_operator_is_unknown_not_a_non_match():
+    """There is now **one** label-selector matcher in this tree, and it is
+    tri-state.
+
+    There used to be two, and the duplicate resolved an unmodelled operator to
+    `False`. That is defensible for workload attribution — over-matching would
+    credit other workloads' pods to this row — and it was silently wrong
+    everywhere else it was reused: §5's drain plan read it as "no budget covers
+    this pod", and §28 would have read it as "this budget protects nothing".
+    Both are the confidently wrong answer, in the two places it costs most.
+
+    So the duplicate is gone and every caller handles the third state itself: a
+    restart count that cannot be computed is `None` rather than a floor, and the
+    drain plan reports the coverage as unknown rather than absent."""
     selector = _selector(labels={}, expressions=[obj(key="tier", operator="Gt", values=["3"])])
 
-    assert selector_matches(selector, {"tier": "5"}) is False
+    assert label_selector_matches(selector, {"tier": "5"}) is None
 
 
 # --------------------------------------------------------------------------- #
