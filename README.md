@@ -561,6 +561,20 @@ version being that there is no undo for a deleted StatefulSet.
   the subject, including cluster-wide bindings, so `applied: true` is never read
   as "revoked"; when that listing is refused it says so rather than reporting an
   empty result. See §30.
+* **Why is this pod Pending** — the console used to answer that with the word
+  `Pending`. The real answer exists: the scheduler computed it over its whole
+  predicate chain and wrote it into an event three clicks away in a list nobody
+  filters. The pod's **Scheduling** tab splits the question first — a Pending pod
+  that already has a node has been *placed*, and what is holding it is an image
+  or a volume on that machine, not cluster capacity — then quotes the
+  scheduler's message verbatim **with the age of the attempt behind it**, because
+  it is a snapshot and a node added since does not rewrite it. A missing message
+  is drawn as *"no explanation is readable"*, since events age out of etcd within
+  the hour and a blank there reads as nothing being wrong. The node table only
+  ever **rules a node out**: there is no "fits", because the scheduler weighs
+  affinity, topology spread, volume zone and every plugin the cluster runs, and
+  a console that promoted its own shrug would send you to argue with a scheduler
+  that had already said no. See §31.
 * Create, edit and delete NetworkPolicies, from a default-deny starter manifest —
   through the same dry-run-then-confirm funnel as every other write, so the diff
   is shown before a segmentation change reaches a cluster.
