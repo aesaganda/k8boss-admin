@@ -546,6 +546,21 @@ version being that there is no undo for a deleted StatefulSet.
   `status.used` is not zero, and a scoped quota's applicability to a pod that
   does not exist yet is not guessed. The API server still admits — §4's dry run
   is what asks it. See §29.
+* **Granting and revoking a role, with what the role actually confers on screen** —
+  a `roleRef` is a name. §4's editor can already write the binding, and its diff
+  is a name appearing in a list; what that name can now *do* is in a different
+  object nobody opened. So the grant dialog resolves the role first and calls out
+  five capabilities: a wildcard, `create rolebindings` (the grantee can now grant
+  themselves and anyone else everything else bindable here), `create pods/exec`
+  (**a shell in a pod reads every Secret mounted into it, so `edit` hands over
+  the namespace's credentials without having a rule about Secrets at all**),
+  `impersonate`, and direct Secret reads. A role this console could not read is
+  **unknown**, never "grants nothing" — and a role that does not exist is its own
+  state, because the API server accepts a binding to it and it starts granting
+  the moment somebody creates that name. On a revoke it lists what *else* names
+  the subject, including cluster-wide bindings, so `applied: true` is never read
+  as "revoked"; when that listing is refused it says so rather than reporting an
+  empty result. See §30.
 * Create, edit and delete NetworkPolicies, from a default-deny starter manifest —
   through the same dry-run-then-confirm funnel as every other write, so the diff
   is shown before a segmentation change reaches a cluster.

@@ -1,5 +1,6 @@
 """
-Access preflight endpoints (§9) and the subject access review (§23).
+Access preflight endpoints (§9), the subject access review (§23), and §30's
+grant and revoke.
 
 Two routes over :mod:`app.admin.preflight`: one question, and a batch of them.
 The batch exists because the interesting callers ask many at once — cluster
@@ -30,6 +31,8 @@ from pydantic import BaseModel, Field
 
 from app.admin import access_review
 from app.admin import preflight
+from app.admin import rbac_grants
+from app.api.bodies import MutationBody
 from app.errors import Invalid
 
 logger = logging.getLogger(__name__)
@@ -197,6 +200,118 @@ def post_subject_review(body: SubjectReviewRequest) -> dict[str, Any]:
     A privileged read: one audit row per request names who asked about whom.
     """
     return access_review.review(body.model_dump())
+
+
+# --------------------------------------------------------------------------- #
+# §30 — granting and revoking a role in one namespace
+# --------------------------------------------------------------------------- #
+
+class GrantSubject(BaseModel):
+    """The identity being bound or unbound."""
+
+    kind: str = Field(
+        ...,
+        description=f"One of {', '.join(rbac_grants.SUBJECT_KINDS)}.",
+    )
+    name: str = Field(..., description="The subject's name.")
+    namespace: str | None = Field(
+        None,
+        description=(
+            "A ServiceAccount's namespace. Defaults to the namespace being "
+            "granted in — a ServiceAccount subject without one matches nobody, "
+            "so it is filled rather than omitted."
+        ),
+    )
+
+
+class GrantRole(BaseModel):
+    """The `roleRef`. A RoleBinding to a **ClusterRole** confers that role's
+    rules inside this namespace only — it is not a cluster-wide grant."""
+
+    kind: str = Field(
+        ..., description=f"One of {', '.join(rbac_grants.ROLE_KINDS)}."
+    )
+    name: str = Field(..., description="The role's name.")
+
+
+class GrantPlanRequest(BaseModel):
+    """§30's plan body. No `dryRun`: a plan writes nothing at all."""
+
+    operation: str = Field(
+        ..., description=f"One of {', '.join(rbac_grants.OPERATIONS)}."
+    )
+    role: GrantRole
+    subject: GrantSubject
+
+
+class GrantRequest(MutationBody):
+    """§30's write body — the plan's fields, plus §0.4's version and §18's
+    acknowledgement."""
+
+    operation: str = Field(
+        ..., description=f"One of {', '.join(rbac_grants.OPERATIONS)}."
+    )
+    role: GrantRole
+    subject: GrantSubject
+    resource_version: str | None = Field(
+        None,
+        alias="resourceVersion",
+        description=(
+            "The binding's version from the plan. A mismatch is `409 conflict` "
+            "with a fresh subject list rather than a write that replaces the "
+            "whole array over somebody else's grant. Absent on a create, which "
+            "has no live object."
+        ),
+    )
+    acknowledge_consequences: list[str] | None = Field(
+        None,
+        alias="acknowledgeConsequences",
+        description=(
+            "Consequence codes from the plan. Every one it reports must be "
+            "named, and they are recomputed here — an acknowledgement of a "
+            "`view` grant cannot be spent on an `admin` one."
+        ),
+    )
+
+
+@router.post("/access/namespaces/{namespace}/grants/plan")
+def post_grant_plan(request: GrantPlanRequest, namespace: str) -> dict[str, Any]:
+    """§30 — what this grant or revoke would actually do. Reads only.
+
+    The three questions the binding itself cannot answer: what the role confers
+    (resolved and summarised, with `state: unreadable` kept apart from a role
+    that grants nothing), whether the role exists at all (a binding to a missing
+    role is accepted and starts granting when somebody creates it), and — for a
+    revoke — what else still names the subject, with `cluster_bindings: null`
+    when the cluster-wide listing was refused rather than `[]`.
+
+    A request that cannot proceed comes back `blocked` with a 200, not a 422:
+    this is the screen where the grant is decided, and the residual list is
+    exactly what answers "then where does their access come from".
+    """
+    return rbac_grants.plan(namespace, request.model_dump(by_alias=True))
+
+
+@router.put("/access/namespaces/{namespace}/grants")
+def put_grant(request: GrantRequest, namespace: str) -> dict[str, Any]:
+    """§30 — add or remove one subject on one RoleBinding, through the funnel.
+
+    A grant with no binding to extend is a `create` of a whole RoleBinding;
+    everything else is a `patch` of `subjects`. They are preflighted as what they
+    are, so a caller who may patch but not create is told which one they lack.
+
+    **`applied: true` means the binding's subject list is what you sent.** On a
+    revoke it does not mean the subject can no longer act here — `residual` in
+    this response lists what still names them, and §23's subject review is how
+    to ask the API server the authoritative question afterwards.
+    """
+    payload = request.model_dump(by_alias=True)
+    return rbac_grants.apply_grant(
+        namespace,
+        payload,
+        dry_run=request.dry_run,
+        acknowledge_consequences=request.acknowledge_consequences,
+    )
 
 
 __all__ = ["router"]

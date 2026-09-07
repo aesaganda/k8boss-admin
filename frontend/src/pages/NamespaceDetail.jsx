@@ -45,6 +45,7 @@ import { projects as projectsApi } from '../api/client';
 import DeleteNamespaceDialog from '../components/DeleteNamespaceDialog';
 import QuotaAdvisor from '../components/QuotaAdvisor';
 import PodSecurityDialog from '../components/PodSecurityDialog';
+import GrantRoleDialog from '../components/GrantRoleDialog';
 import { useCluster } from '../contexts/ClusterContext';
 import { useNamespace } from '../contexts/NamespaceContext';
 import { useAsync, useGates } from './_data';
@@ -59,6 +60,11 @@ const MODES = ['enforce', 'audit', 'warn'];
 const CHECKS = [
   { id: 'patch', verb: 'patch', group: 'core', resource: 'namespaces' },
   { id: 'delete', verb: 'delete', group: 'core', resource: 'namespaces' },
+  // §30. `create` is the one asked for here because it is the harder half: a
+  // first grant creates the binding, and a caller who may patch an existing one
+  // but not create a new one still gets the button. The write preflights the
+  // verb it is actually about to use, and a denial there names it.
+  { id: 'bind', verb: 'create', group: 'rbac.authorization.k8s.io', resource: 'rolebindings' },
 ];
 
 /** `cpu=500m, memory=512Mi` for a LimitRange map, or a muted "unset". */
@@ -243,6 +249,7 @@ export default function NamespaceDetail() {
 
   const [settingLevel, setSettingLevel] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [granting, setGranting] = useState(false);
 
   const { data, loading, error, reload } = useAsync(() => projectsApi.get(name), {
     key: `project:${activeClusterId}:${name}`,
@@ -314,6 +321,14 @@ export default function NamespaceDetail() {
           namespace={name}
           current={project.podSecurity}
           onClose={() => setSettingLevel(false)}
+          onApplied={reload}
+        />
+      )}
+
+      {granting && (
+        <GrantRoleDialog
+          namespace={name}
+          onClose={() => setGranting(false)}
           onApplied={reload}
         />
       )}
@@ -455,7 +470,23 @@ export default function NamespaceDetail() {
         <GridItem lg={7} md={12}>
           <Card isFullHeight>
             <CardBody>
-              <SectionHeader title="Role bindings" description="Who is bound to a role inside this namespace. Cluster-wide bindings act here too and are not listed." />
+              <SectionHeader
+                title="Role bindings"
+                description="Who is bound to a role inside this namespace. Cluster-wide bindings act here too and are not listed."
+                actions={
+                  // §30. It opens a plan rather than a form that writes: what a
+                  // roleRef confers is in a different object, and there is
+                  // nothing useful to confirm until that object has been read.
+                  <ActionButton
+                    key="grant"
+                    variant="secondary"
+                    gate={gate('bind')}
+                    onClick={() => setGranting(true)}
+                  >
+                    Grant or revoke a role
+                  </ActionButton>
+                }
+              />
               {project.roleBindings === null && (
                 <SectionUnavailable unavailable={project.unavailable} resource="rolebindings" what="Role bindings" />
               )}

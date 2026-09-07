@@ -1859,3 +1859,89 @@ the verdict. Where any of them could change the answer the verdict is `unknown`.
 And fitting inside a quota is not fitting on a node. A workload §29 admits can
 still sit `Pending` because nothing has room for it, which is the scheduler's
 answer and a different question — §5's, not this one's.
+
+---
+
+## 21. Granting a role (§30) — the diff that is three words long
+
+A RoleBinding's diff is a name appearing in a list. §4 can already produce it,
+and what it shows is true and useless: the object that says what the name can now
+*do* is somewhere else, and the operator who confirmed the grant did not open it.
+
+This is §17's problem — the namespace delete whose diff is a metadata block —
+pointed at a security control instead of at storage. The write is the same one
+§4 makes. The screen in front of it is the feature.
+
+### 21.1 The two grants that reach further than their names
+
+**`admin` in a namespace includes `create rolebindings`.** The grantee can grant
+themselves and anybody else every other role bindable there. That makes the
+revoke asymmetric in a way nothing on the screen would otherwise say: taking the
+binding back does not take back what they granted while they had it.
+
+**`edit` includes `create pods/exec`.** A shell in a pod reads every Secret
+mounted into it and every environment value it was started with — so the role
+hands over the namespace's credentials **while having no rule about Secrets at
+all**. A console that scanned for a `secrets` rule would confirm this grant as
+touching none, which is a confidently wrong answer about who can read a database
+password.
+
+Five capabilities are called out and no more, because a finding that fires on
+most roles is one nobody reads on the day it matters: a wildcard, the two above,
+`impersonate`, and direct Secret reads. Everything else the role grants is still
+granted; this list is the subset worth a sentence of its own, and the response
+says so rather than implying the rest is nothing.
+
+### 21.2 Three states for one role, because they send you three places
+
+`present` is a role that was read. `absent` is a role that is not there — and the
+API server **accepts a binding to it**, which grants nothing today and starts
+granting whatever appears under that name later, with nobody deciding a second
+time. `unreadable` is a read that failed.
+
+`rule_count` is `null` for the last two and for an aggregated ClusterRole whose
+controller has not written its rules yet. Never `0`. This is §0.1's corollary at
+its sharpest: "this role grants nothing" is the answer that must not be produced
+by a read that did not happen, and the screen it would be produced on is the one
+where somebody decides to bind it.
+
+### 21.3 "Revoked" is a claim, and usually a false one
+
+Removing a subject from a binding changes a subject list. It does not remove
+their access if another binding here names them, or if any ClusterRoleBinding
+does — a cluster-wide grant applies in every namespace, including this one.
+
+So the revoke plan lists what else names them, and the write carries that list
+into its response, so that `applied: true` cannot be read as "they can no longer
+act here". The summary on screen says the same thing in words rather than leaving
+it to a table.
+
+**And the residual list is itself tri-state.** The namespace's bindings are in
+hand; the cluster-wide listing is a second read that can be refused. When it is,
+`cluster_bindings` is `null` and gets its own acknowledgement. `[]` there would
+mean *the cluster was searched and nothing else grants this* — the sentence
+somebody closes a ticket on, and the one this model exists to stop being produced
+by a read that never ran.
+
+Even the clean case does not claim the permission is gone. §30 subtracts objects;
+§23 asks the API server's whole authorization chain. Both revoke consequences
+point at §23 for the authoritative answer, and no field here is named
+`has_access`.
+
+### 21.4 What it refuses rather than guesses
+
+Two RoleBindings sharing a `roleRef` make "remove alice from `view`" ambiguous.
+§30 refuses and names them instead of picking the first, because picking would
+report a revoke that left her bound through the second — the same failure the
+drain's per-pod results exist to prevent, one object earlier.
+
+A binding-name collision is refused rather than renamed. `view-1` is a decision
+about an object the operator will later go looking for, made by a console they
+never saw make it.
+
+And the last subject out of a binding leaves the binding, empty. Deleting it
+would be a second verb whose blast radius — every other subject in it — this plan
+would then have to explain as well, in exchange for tidiness. The empty
+`subjects: []` is sent rather than `null` for the same reason the plan exists at
+all: only one of them shows, in the diff, that the binding survived with nobody
+in it.

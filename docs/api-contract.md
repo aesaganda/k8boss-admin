@@ -4821,3 +4821,194 @@ is §5's question and a different one.
 bounds, Pod-scoped LimitRange items and priority-class scope selectors are read
 and reported but not evaluated into the verdict. Where any of them could change
 the answer, the verdict is `unknown` rather than confidently wrong.
+
+---
+
+## 30. Granting and revoking a role — what the binding actually confers
+
+### 30.1 A `roleRef` is a name, not a capability
+
+`subjects: [alice]` under `roleRef: ClusterRole/admin` is three words, and §4's
+editor can already write them. Its diff is honest and useless: a name appearing
+in a list. What that name can now *do* is in a different object, and the operator
+who confirmed the grant did not open it.
+
+Two ordinary examples, both of them the reason the grant was made:
+
+* `admin` in a namespace includes `create rolebindings`. The grantee can now
+  grant themselves, and anybody else, every other role bindable here — and
+  revoking this one binding later does not undo what they granted in between.
+* `edit` includes `create pods/exec`. A shell in a pod reads every Secret
+  mounted into it and every value in its environment, so the role hands over the
+  namespace's credentials **while having no rule about Secrets at all**. A
+  console that looked only for a `secrets` rule would confirm this grant as
+  touching none.
+
+§30 resolves the role and puts what it confers on the screen where the decision
+is made. Three further facts about RoleBindings, none of them visible in one:
+
+**A binding to a role that does not exist is accepted.** The API server does not
+validate `roleRef` against anything. The binding grants nothing — until somebody
+creates a role by that name, at which point it starts granting whatever that role
+holds, with nobody making a second decision. Anyone holding `create roles` in the
+namespace can be that somebody.
+
+**A role that could not be read grants *unknown*, never nothing.** §0.1's
+corollary aimed at a security control: "this role grants nothing" is the one
+answer that must not come out of a read that did not happen, and it would be
+produced on the screen where somebody decides to bind it.
+
+**Removing a subject from a binding is not revoking their access.** They may be
+named in another binding here, or in a ClusterRoleBinding — which grants
+cluster-wide and therefore also here. `applied: true` is a claim about a subject
+list, not about a permission.
+
+### 30.2 `POST /api/access/namespaces/{namespace}/grants/plan`
+
+`{"operation": "grant"|"revoke", "role": {"kind": "Role"|"ClusterRole", "name": "…"},
+"subject": {"kind": "User"|"Group"|"ServiceAccount", "name": "…", "namespace": "…"}}`
+
+Reads only — ungated and unaudited. It does not dry-run the write; a dry run is a
+write request the caller has not made yet, and it needs the preflight the funnel
+does.
+
+```json
+{ "namespace": "prod", "operation": "grant",
+  "role": {"kind": "ClusterRole", "name": "edit"},
+  "subject": {"kind": "User", "name": "alice", "apiGroup": "rbac.authorization.k8s.io"},
+  "binding": {"name": "edit", "namespace": "prod", "role": {"kind": "ClusterRole", "name": "edit"}},
+  "createName": null, "resourceVersion": "7781",
+  "capability": {"state": "present", "rules": [ … ], "rule_count": 12,
+                 "aggregates": false,
+                 "powers": [{"code": "grant_pod_exec", "detail": "…"}]},
+  "currentSubjects": [ … ], "requestedSubjects": [ … ],
+  "residual": null, "blocked": null,
+  "consequences": [ … ], "unavailable": [], "partial": false, "gate": { … } }
+```
+
+`capability.state` is `present`, `absent` or `unreadable`. **`rule_count` is
+`null` for the last two and for a present ClusterRole whose `aggregationRule` the
+controller has not filled in yet** — never `0`. An explicit `rules: []` is a real
+zero and reads as one; `aggregates` says which case a null is.
+
+`subject.namespace` defaults to the namespace being granted in for a
+ServiceAccount. It is filled rather than omitted because a ServiceAccount subject
+with no namespace matches nobody, and a binding that matches nobody is a grant
+reported as made that applies to no identity.
+
+A request that cannot proceed comes back `blocked` with a **200**, not a 422 —
+this is the screen where the grant is decided, and the residual list below is
+what answers "then where does their access come from".
+
+### 30.3 The five powers
+
+`capability.powers` is deliberately not every verb the role holds. A finding that
+fires on most roles is one nobody reads on the day it matters (§28.6's rule).
+Each of these is either invisible from the role's name or reaches further than
+the name suggests:
+
+| Code | When |
+|---|---|
+| `grant_full_control` | A rule with `*` verbs on `*` resources in `*` groups |
+| `grant_privilege_escalation` | `create`/`update`/`patch` on `rolebindings`, or the `escalate` or `bind` verbs — the two the API server checks when refusing to let somebody hand out more than they hold. **Fires on the stock `admin` ClusterRole**, which is correct: binding `admin` delegates the namespace's RBAC with it |
+| `grant_impersonate` | The `impersonate` verb over users, groups or ServiceAccounts. Managing ServiceAccounts is not impersonating them, and does not fire |
+| `grant_secret_read` | `get`/`list`/`watch` on `secrets` |
+| `grant_pod_exec` | `create` on `pods/exec` or `pods/attach`. `resources: [pods]` is **not** this — RBAC names the subresource separately |
+
+### 30.4 Consequence codes
+
+| Code | When |
+|---|---|
+| `grant_confers_full_control` | The wildcard power |
+| `grant_confers_privilege_escalation` | The escalation power |
+| `grant_confers_impersonation` | The impersonation power |
+| `grant_confers_secret_access` | Secret reads **or** exec. The detail says which, because exec reaching them without a Secrets rule is the surprising half |
+| `grant_role_unreadable` | `state: unreadable`. The binding is still made and still grants whatever the role holds |
+| `grant_role_absent` | `state: absent`, and when it starts granting |
+| `grant_rules_not_aggregated` | A present aggregate whose rules are unwritten |
+| `revoke_access_remains` | Another binding still names the subject |
+| `revoke_residual_unknown` | The ClusterRoleBinding listing was refused, or answered with more pages behind it |
+
+**The narrower three are suppressed under `grant_confers_full_control`.** Both
+are true; one is actionable, and asking somebody to tick "this also reads
+Secrets" underneath "this grants everything" lengthens the list without improving
+the decision — §28.4's rule about `pdb_never_allows_disruption` and
+`pdb_blocking_now`, at the handshake layer. `powers` still carries all of them,
+because that list is a description rather than a question.
+
+### 30.5 `residual` — what a revoke does not take away
+
+Present on a revoke plan and on its write response, `null` on a grant:
+
+```json
+{"namespace_bindings": [{"name": "edit", "namespace": "prod", "role": {…}}],
+ "cluster_bindings": null, "cluster_truncated": false}
+```
+
+`cluster_bindings: null` means the cluster-wide listing was **refused**, and the
+read names itself in `unavailable[]`. `[]` means the cluster was searched and
+nothing else grants this — which is the sentence somebody closes a ticket on, so
+it is never produced by a read that did not happen.
+
+`cluster_truncated: true` is the same statement one page weaker: the listing
+answered and there are more pages behind it, so an empty `cluster_bindings`
+means *the first page did not name them*. What was read is kept — it is strictly
+more useful than discarding it — and `revoke_residual_unknown` fires either way.
+
+**A truncated listing of the namespace's own bindings is a refusal, not a
+warning.** Which binding to write, whether the subject is already named and what
+else grants them access are all read off that one listing; each answered from a
+first page is a confident answer about bindings nobody looked at. The plan comes
+back `blocked` and the write is a `422`.
+
+The mitigation on both revoke codes points at §23: this endpoint subtracts
+objects, and only `SubjectAccessReview` asks the API server's whole authorization
+chain. §30 never claims to have computed effective access.
+
+### 30.6 `PUT /api/access/namespaces/{namespace}/grants`
+
+The plan's body plus `dryRun`, `resourceVersion` and `acknowledgeConsequences`.
+One funnel call, with the verb it is actually about to use:
+
+* A grant with no binding to extend is a **`create`** of a whole RoleBinding.
+* Everything else is a **`patch`** of `subjects`, carrying the plan's
+  `resourceVersion` (§0.4) — the array is replaced wholesale, so without it a
+  concurrent grant is silently dropped rather than answered with a `409`.
+
+The empty subject list is sent as `[]` and not as `null`. Both are the same grant
+— none — but only `[]` shows in the diff that the binding survives with nobody in
+it, which is the fact §30 refuses to hide.
+
+**`applied: true` means the binding's subject list is what you sent.** On a
+revoke it does not mean the subject can no longer act here; `residual` travels
+with the response so that reading cannot be made.
+
+### 30.7 What §30 is not
+
+**Not a second path to the cluster.** §4 already writes RoleBindings. This
+endpoint exists to attach a preview and a handshake to an action whose
+consequences are not in its own diff, for the reason §20, §24, §25 and §26 do.
+
+**Not a multi-binding editor.** If two RoleBindings in the namespace share a
+`roleRef`, §30 refuses and names them: "remove alice from `view`" has two
+meanings there, and silently picking the first would report a revoke that left
+her bound through the second.
+
+**Not a delete.** Revoking the last subject leaves the binding with an empty
+`subjects` list, which grants nothing. Deleting it instead would be a second verb
+whose blast radius — every *other* subject in it — this plan would then also have
+to explain, for the sake of tidiness. §4 deletes it.
+
+**Not a role editor.** `roleRef` is immutable, so "move alice from `view` to
+`edit`" is a revoke and a grant: two writes, two diffs, two audit rows. §30 does
+not hide that behind one button. It also never invents a binding name — a
+collision with a binding of another `roleRef` is refused rather than renamed to
+`view-1`, because a console that picks a name the operator never saw has made a
+decision about an object they will go looking for.
+
+**Not cluster-scoped.** §30 writes RoleBindings only. A ClusterRoleBinding is not
+a namespace administrator's action with a namespace's blast radius, and offering
+it on a namespace page is how one gets made by somebody who meant the namespace.
+§4 creates them.
+
+**Not an effective-access answer.** That is §23, and §30's own mitigations say so.

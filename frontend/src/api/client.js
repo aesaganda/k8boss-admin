@@ -1070,6 +1070,46 @@ export const access = {
       subject,
       checks: (checks || []).map(withWireGroup),
     }),
+
+  /**
+   * §30. What a grant or revoke would actually do, before it is made.
+   *
+   * `roleRef` is a name; what it confers is in a different object. The plan
+   * resolves the role and answers three things the binding cannot:
+   *
+   * - **What it confers.** `capability.powers` names the ones that are either
+   *   invisible from the role's name or reach further than it suggests —
+   *   `create rolebindings` (the grantee can grant themselves), `create
+   *   pods/exec` (reads every Secret mounted in the namespace whether or not
+   *   the role mentions Secrets), `impersonate`, wildcard.
+   * - **Whether it can be read at all.** `capability.state` is `present`,
+   *   `absent` or `unreadable`, and `rule_count` is `null` for the last two.
+   *   Never `0` — "grants nothing" must not come out of a read that failed.
+   *   `absent` is its own state because the API server *accepts* a binding to a
+   *   role that does not exist, and it starts granting when one appears.
+   * - **What a revoke does not take away.** `residual.namespace_bindings` and
+   *   `residual.cluster_bindings` are what else names the subject.
+   *   `cluster_bindings: null` means the cluster-wide listing was refused —
+   *   **not** that nothing else grants it.
+   *
+   * body: `{ operation: 'grant' | 'revoke', role: { kind, name }, subject: { kind, name, namespace } }`
+   */
+  grantPlan: (namespace, body) =>
+    api.post(`/access/namespaces/${encodeURIComponent(namespace)}/grants/plan`, body),
+
+  /**
+   * §30's write, through the single funnel. A grant with no binding to extend
+   * is a `create` of a whole RoleBinding; everything else is a `patch` of
+   * `subjects`, carrying the plan's `resourceVersion` so a concurrent grant is
+   * a `409` rather than a subject silently dropped by an array replace.
+   *
+   * **`applied: true` means the binding's subject list is what you sent.** On a
+   * revoke it does not mean the subject can no longer act here — read
+   * `residual` in the response, and ask `subjectReview` for the authoritative
+   * answer afterwards.
+   */
+  grant: (namespace, body) =>
+    api.put(`/access/namespaces/${encodeURIComponent(namespace)}/grants`, body),
 };
 
 /* ── §10 Audit ──────────────────────────────────────────────────────────── */
