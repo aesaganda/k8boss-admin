@@ -810,10 +810,6 @@ def derive_status(kind: str, obj: Any) -> tuple[str, str | None]:
     return _cronjob_status(obj)
 
 
-def _scaled_to_zero(counts: dict) -> bool:
-    return counts.get("desired") == 0
-
-
 _ZERO_REPLICAS_REASON = (
     "Scaled to zero replicas: no pods are expected to be running, so this is a "
     "deliberate state and not a failure."
