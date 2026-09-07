@@ -4128,6 +4128,133 @@ export function routerInstallObjectsFor(body, { preflightDenied = [] } = {}) {
   });
 }
 
+/**
+ * §30's plan. The three states of `capability` are the point of the feature, so
+ * the builder makes each of them reachable rather than deriving one.
+ *
+ * `rule_count` is `null` for every state but `present`, and never `0` — that is
+ * the whole §0.1 corollary this endpoint exists to hold, and a fixture that
+ * defaulted it to a number would let the frontend's rendering of the null pass
+ * untested.
+ */
+export function grantPlanFor(body, {
+  state = 'present',
+  ruleCount = 1,
+  powers = [],
+  aggregates = false,
+  binding = null,
+  residual = undefined,
+  blocked = null,
+  consequences = null,
+  resourceVersion = '7781',
+  unavailable = [],
+} = {}) {
+  const revoke = body.operation === 'revoke';
+  const capability = {
+    state,
+    rules: state === 'present' && !aggregates ? [{}] : null,
+    rule_count: state === 'present' && !aggregates ? ruleCount : null,
+    aggregates,
+    powers,
+  };
+  const derived = [];
+  if (powers.some((p) => p.code === 'grant_full_control')) {
+    derived.push({
+      code: 'grant_confers_full_control',
+      label: `ClusterRole ${body.role.name} confers full control of this namespace`,
+      consequence: 'Every verb on every resource here, including the Secrets and these bindings.',
+      mitigation: 'Bind a narrower role.',
+    });
+  }
+  if (powers.some((p) => p.code === 'grant_pod_exec')) {
+    derived.push({
+      code: 'grant_confers_secret_access',
+      label: `ClusterRole ${body.role.name} exposes this namespace's Secrets`,
+      consequence:
+        'They will be able to read the Secrets in this namespace — through `pods/exec`, which reaches them even though the role has no rule about Secrets.',
+      mitigation: 'Bind a role without `create pods/exec`.',
+    });
+  }
+  if (state === 'unreadable') {
+    derived.push({
+      code: 'grant_role_unreadable',
+      label: `ClusterRole ${body.role.name} could not be read`,
+      consequence:
+        'This console could not fetch the role, so what it confers is unknown. The binding will still be created.',
+      mitigation: 'Grant this console `get` on the role.',
+    });
+  }
+  const residualBlock =
+    residual === undefined
+      ? revoke
+        ? { namespace_bindings: [], cluster_bindings: [], cluster_truncated: false }
+        : null
+      : residual;
+  if (revoke && residualBlock) {
+    const other = residualBlock.namespace_bindings ?? [];
+    const cluster = residualBlock.cluster_bindings;
+    if (other.length || (cluster ?? []).length) {
+      derived.push({
+        code: 'revoke_access_remains',
+        label: `${body.subject.kind} ${body.subject.name} is still bound elsewhere`,
+        consequence: 'This revoke removes one binding, not their access.',
+        mitigation: 'Ask the API server with a subject review.',
+      });
+    }
+    if (cluster === null) {
+      derived.push({
+        code: 'revoke_residual_unknown',
+        label: 'Cluster-wide bindings could not be listed',
+        consequence:
+          'A ClusterRoleBinding grants everywhere, including here, so whether they keep access through one is unknown. This is not a report that none exists.',
+        mitigation: 'Grant this console `list` on clusterrolebindings.',
+      });
+    }
+  }
+
+  return {
+    namespace: 'prod',
+    operation: body.operation,
+    role: body.role,
+    subject: { ...body.subject, apiGroup: 'rbac.authorization.k8s.io' },
+    binding,
+    createName: binding ? null : body.role.name,
+    resourceVersion: binding ? resourceVersion : null,
+    capability,
+    currentSubjects: [],
+    requestedSubjects: blocked ? [] : [{ ...body.subject, apiGroup: 'rbac.authorization.k8s.io' }],
+    residual: residualBlock,
+    blocked,
+    consequences: blocked ? [] : (consequences ?? derived),
+    unavailable,
+    partial: unavailable.length > 0,
+    gate: { enabled: true, detail: 'This deployment permits changing role bindings.' },
+  };
+}
+
+/** §30's write. `applied` is true only when the request was not a dry run. */
+export function grantWriteFor(body, options = {}) {
+  const plan = grantPlanFor(body, options);
+  return {
+    dryRun: body.dryRun !== false,
+    applied: body.dryRun === false,
+    resourceVersion: '7782',
+    diff:
+      '--- live\n+++ projected\n@@ -1,3 +1,4 @@\n subjects:\n+- kind: User\n+  name: alice\n',
+    warnings: [],
+    operation: plan.operation,
+    role: plan.role,
+    subject: plan.subject,
+    binding: plan.binding ?? { name: body.role.name, namespace: 'prod', role: body.role },
+    capability: plan.capability,
+    currentSubjects: plan.currentSubjects,
+    requestedSubjects: plan.requestedSubjects,
+    residual: plan.residual,
+    consequences: plan.consequences,
+    unavailable: plan.unavailable,
+  };
+}
+
 export async function mockApi(
   page,
   {
@@ -4147,6 +4274,10 @@ export async function mockApi(
     debug = null,
     debugAttach = null,
     preflight = null,
+    // §30. `grantOptions` varies the plan the two routes derive; `grant`
+    // replaces the plan outright for the shapes the derivation cannot produce.
+    grant = null,
+    grantOptions = null,
     nodeDetail = null,
     nodeDebug = null,
     // §24. `nodeSchedulingOptions` varies the node and its pods for the two
@@ -4624,6 +4755,17 @@ export async function mockApi(
       return json(
         subjectReview ? subjectReview(body) : subjectReviewFor(body, subjectReviewOptions ?? {}),
       );
+    }
+    // §30. Two routes over one derivation, so the plan the dialog reads and the
+    // response the write returns cannot drift apart in a fixture the way they
+    // could in two hand-written payloads.
+    if (path.startsWith('/access/namespaces/') && path.endsWith('/grants/plan')) {
+      const body = JSON.parse(route.request().postData() || '{}');
+      return json(grant ? grant(body) : grantPlanFor(body, grantOptions ?? {}));
+    }
+    if (path.startsWith('/access/namespaces/') && path.endsWith('/grants')) {
+      const body = JSON.parse(route.request().postData() || '{}');
+      return json(grantWriteFor(body, grantOptions ?? {}));
     }
     if (path === '/access/preflight') {
       return json(

@@ -629,6 +629,26 @@ rules:
     resources: ["rolebindings"]
     verbs: ["create"]
 
+  # §30 granting and revoking a role in an existing namespace. `create` is
+  # already granted above for §6; this adds the other half, because a grant into
+  # a namespace that already has a binding for the role is a patch of its
+  # `subjects` and not a second binding.
+  #
+  # The same escalation prevention applies as it does to §6, and it is the
+  # reason this is the narrowest useful pair: the API server refuses to let this
+  # ServiceAccount bind a role granting more than it holds, unless it holds
+  # `bind` on clusterroles — which the §14 block below grants and which a
+  # deployment that does not want §14 should not add for §30's sake. Without
+  # `bind`, §30 works for every role this console's own grant covers and refuses
+  # the rest with a `403` naming the write, which is the honest failure.
+  #
+  # There is deliberately no `delete`: §30 patches subjects and never removes a
+  # binding, so a revoke of the last subject leaves an empty binding rather than
+  # taking every other subject in it with them.
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["rolebindings"]
+    verbs: ["patch"]
+
   # §18 setting a namespace's Pod Security level — one merge patch on its
   # labels. Overlaps the §14 router block below, which grants `patch namespaces`
   # among much else; it is stated separately because a deployment that wants

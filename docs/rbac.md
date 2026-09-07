@@ -269,6 +269,22 @@ rule, and both reads belong to the reader role for §8 and §6. A console that c
 edit a claim's YAML today can already grow it — §20 is the path that checks
 first and says what a green result means.
 
+### §30 — granting and revoking a role
+
+| Verb | Group / resource | Withholding it |
+|---|---|---|
+| `list` | `rbac.authorization.k8s.io/rolebindings` | The plan cannot run at all. Every branch — which binding to write, whether the subject is already named, what else still grants access — is computed from this listing, so it raises rather than producing a plan built on an empty one |
+| `get` | `rbac.authorization.k8s.io/rolebindings` | The one binding being written cannot be re-read, so the write loses its `before` and its fresh `resourceVersion` |
+| `get` | `rbac.authorization.k8s.io/roles`, `…/clusterroles` | The role reads as **`unreadable`**: `rule_count` is `null`, no capability is reported, and the grant carries its own acknowledgement saying what it confers was not established. It is never reported as granting nothing |
+| `list` | `rbac.authorization.k8s.io/clusterrolebindings` | A revoke's `residual.cluster_bindings` is `null` and the endpoint is `partial`. The plan says whether the subject keeps access cluster-wide is **unknown** — never that nothing else grants it |
+| `create` | `rbac.authorization.k8s.io/rolebindings` | A first grant is refused. Adding a subject to a binding that already exists still works: they are different permissions and §30 preflights the one it is about to use |
+| `patch` | `rbac.authorization.k8s.io/rolebindings` | Adding to or removing from an existing binding is refused. Creating a new one still works |
+
+The API server additionally requires that the caller **hold the permissions being
+granted**, or hold `escalate`/`bind` on the role. That check is the API server's
+and is not preflighted: it is per-role and per-caller, and the refusal it
+produces arrives as `403 rbac_denied` naming the write.
+
 ### The generic write is deliberately not granted
 
 §4 lets the resource browser *display* everything the cluster serves. The shipped
