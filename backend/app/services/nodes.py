@@ -466,6 +466,34 @@ def _pods_by_node(pods: Iterable[Any]) -> dict[str, list[Any]]:
     return grouped
 
 
+def active_pods_by_node(
+    unavailable: list[dict[str, Any]],
+) -> dict[str, list[Any]] | None:
+    """``{node name: its pods}`` for the whole cluster, or ``None`` if unreadable.
+
+    One listing for every node rather than one per node: a hundred-node cluster
+    would otherwise make a hundred round trips to fill in one column, and the
+    read deadline would fire long before the last of them.
+
+    ``None`` and not ``{}``. An empty map would make every node report zero pods
+    and its full allocatable as free — the direction that sends somebody to
+    schedule onto a node that is already full.
+
+    Shared with §31, which needs exactly this to say what is left on each node.
+    Two copies of it would be two chances for one of them to start counting
+    finished pods, and the two pages would then disagree about the same cluster.
+    """
+    grouped: dict[str, list[Any]] | None = None
+    with collect(unavailable, "", "pods"), _api_errors(
+        verb="list", group="", resource="pods"
+    ):
+        listing = get_core_v1().list_pod_for_all_namespaces(
+            field_selector=_ACTIVE_PODS_SELECTOR
+        )
+        grouped = _pods_by_node(shaping.get_field(listing, "items", default=[]) or [])
+    return grouped
+
+
 def list_nodes() -> dict[str, Any]:
     """``GET /api/nodes`` (§5) — every node, as the §1.2 envelope.
 
@@ -485,14 +513,7 @@ def list_nodes() -> dict[str, Any]:
     with _api_errors(verb="list", group="", resource="nodes"):
         nodes = list(shaping.get_field(get_core_v1().list_node(), "items", default=[]) or [])
 
-    grouped: dict[str, list[Any]] | None = None
-    with collect(unavailable, "", "pods"), _api_errors(
-        verb="list", group="", resource="pods"
-    ):
-        listing = get_core_v1().list_pod_for_all_namespaces(
-            field_selector=_ACTIVE_PODS_SELECTOR
-        )
-        grouped = _pods_by_node(shaping.get_field(listing, "items", default=[]) or [])
+    grouped = active_pods_by_node(unavailable)
 
     rows = []
     for node in nodes:
@@ -552,6 +573,7 @@ def get_node(name: str) -> dict[str, Any]:
 
 __all__ = [
     "TERMINAL_PHASES",
+    "active_pods_by_node",
     "cpu_cores",
     "get_node",
     "is_terminated",

@@ -690,6 +690,67 @@ export const FIXTURES = {
   // sample, which makes the pod total unknown rather than an understatement
   // presented as a fact; `migrate` has finished, so its missing sample is an
   // ordinary absence and is skipped by the arithmetic instead.
+  // §31. The pod that will not schedule, with the three states the panel must
+  // not collapse: the scheduler's own message, a node ruled out with reasons,
+  // and a node whose capacity was not examined at all.
+  podScheduling: {
+    namespace: 'prod',
+    pod: 'checkout-7d9f8b6c5d-abcde',
+    phase: 'Pending',
+    waiting_on: 'scheduler',
+    node: null,
+    pending_seconds: 1320,
+    scheduled_condition: {
+      status: 'False',
+      reason: 'Unschedulable',
+      message: '0/3 nodes are available.',
+      last_transition: '2026-08-18T09:10:00Z',
+    },
+    scheduler: {
+      reason: 'FailedScheduling',
+      message:
+        '0/3 nodes are available: 2 Insufficient cpu, 1 node(s) had untolerated taint {gpu: true}.',
+      count: 14,
+      last_seen: '2026-08-18T09:12:00Z',
+      first_seen: '2026-08-18T09:02:00Z',
+      age_seconds: 2400,
+    },
+    requests: { cpu_cores: 3, memory_bytes: 2147483648 },
+    claims: [],
+    nodes: [
+      {
+        name: 'ip-10-0-1-4',
+        verdict: 'ruled_out',
+        capacity_checked: true,
+        reasons: [
+          {
+            code: 'node_insufficient_cpu',
+            detail: 'Needs 3 cores; 1.2 of 4 allocatable are unrequested here.',
+          },
+        ],
+      },
+      {
+        name: 'ip-10-0-1-9',
+        verdict: 'ruled_out',
+        capacity_checked: true,
+        reasons: [
+          {
+            code: 'node_untolerated_taint',
+            detail: 'Taint gpu=true:NoSchedule is not tolerated by this pod.',
+          },
+        ],
+      },
+      {
+        name: 'ip-10-0-2-7',
+        verdict: 'no_reason_found',
+        capacity_checked: false,
+        reasons: [],
+      },
+    ],
+    unavailable: [],
+    partial: false,
+  },
+
   podMetrics: {
     items: [
       {
@@ -4271,6 +4332,7 @@ export async function mockApi(
     podDetail = null,
     podEnvironment = null,
     podMetrics = null,
+    podScheduling = null,
     debug = null,
     debugAttach = null,
     preflight = null,
@@ -4498,6 +4560,9 @@ export async function mockApi(
     }
     if (/^\/pods\/[^/]+\/[^/]+\/metrics$/.test(path)) {
       return json(podMetrics ?? FIXTURES.podMetrics);
+    }
+    if (/^\/pods\/[^/]+\/[^/]+\/scheduling$/.test(path)) {
+      return json(podScheduling ?? FIXTURES.podScheduling);
     }
     if (/^\/pods\/[^/]+\/[^/]+$/.test(path)) {
       const name = decodeURIComponent(path.split('/').at(-1));

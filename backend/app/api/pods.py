@@ -1,5 +1,5 @@
 """
-The pod detail page's three reads (§7.5–§7.7).
+The pod detail page's reads (§7.5–§7.7) and §31's scheduling answer.
 
 Thin, like every router in this package: parse, call, return. What each of the
 three refuses to say lives one layer down, in :mod:`app.services.pods`.
@@ -20,6 +20,7 @@ from typing import Any
 from fastapi import APIRouter, Path
 
 from app.services import pods as pods_service
+from app.services import scheduling as scheduling_service
 
 logger = logging.getLogger(__name__)
 
@@ -86,4 +87,44 @@ def get_pod_metrics(
     return pods_service.get_pod_metrics(namespace, name)
 
 
-__all__ = ["get_pod", "get_pod_environment", "get_pod_metrics", "router"]
+@router.get("/pods/{namespace}/{name}/scheduling")
+def get_pod_scheduling(
+    namespace: str = Path(..., description="Pod namespace."),
+    name: str = Path(..., description="Pod name."),
+) -> dict[str, Any]:
+    """§31 — why is this pod Pending, and what would change it.
+
+    `waiting_on` comes first because it splits the question in two. A Pending
+    pod that already has `spec.nodeName` has been **placed**: it is waiting on
+    the kubelet — an image, a volume, an init container — and node capacity is
+    the wrong place to look. Only `waiting_on: "scheduler"` is a scheduling
+    problem.
+
+    `scheduler` is the scheduler's own `FailedScheduling` message, verbatim,
+    with the age of the attempt that produced it. It is a **snapshot**: a node
+    added since does not rewrite it. And **`null` there means no such event is
+    readable right now** — events age out of etcd within the hour — never that
+    the pod has not been rejected.
+
+    `nodes[]` is this console's own re-derivation and says so: each node is
+    `ruled_out` with reasons or `no_reason_found`. **There is no `fits`.** The
+    scheduler weighs affinity, topology spread, volume zone, extended resources
+    and every plugin the cluster runs; none of that is evaluated here, so
+    "nothing ruled this node out" is the strongest honest statement and is not
+    the same as "it has room". `capacity_checked: false` marks the nodes that
+    were not even judged on room, because the pod listing did not answer.
+
+    Reads only, and every one but the pod itself is secondary: a refused node
+    listing costs the table, names itself in `unavailable[]`, and leaves the
+    rest of the answer standing.
+    """
+    return scheduling_service.why_pending(namespace, name)
+
+
+__all__ = [
+    "get_pod",
+    "get_pod_environment",
+    "get_pod_metrics",
+    "get_pod_scheduling",
+    "router",
+]

@@ -1323,6 +1323,32 @@ export const pods = {
   metrics: (namespace, name) => api.get(`${podPath(namespace, name)}/metrics`),
 
   /**
+   * §31. Why is this pod Pending, and what would change it.
+   *
+   * Read `waiting_on` first — it splits the question in two. A Pending pod that
+   * already has `node` set has been *placed*: it is waiting on the kubelet, and
+   * cluster capacity is the wrong place to look.
+   *
+   * `scheduler` is the scheduler's own `FailedScheduling` message with the age
+   * of the attempt behind it. It is a **snapshot**: a node added since does not
+   * rewrite it. **`null` means no such event is readable** — events age out of
+   * etcd within the hour — and never that the pod has not been rejected.
+   *
+   * `nodes[]` is this console's re-derivation: each row is `ruled_out` with
+   * reasons or `no_reason_found`. **There is no `fits`.** The scheduler weighs
+   * affinity, topology spread, volume zone and every plugin the cluster runs;
+   * none of that is evaluated here. `capacity_checked: false` marks a row whose
+   * free capacity was not even examined. `nodes: null` is an unreadable listing,
+   * never a cluster with no nodes.
+   *
+   * `claims[].blocks_scheduling` is tri-state, and the `null` matters: an
+   * unbound claim whose binding mode could not be read is either the cause or
+   * the symptom, and a `WaitForFirstConsumer` claim is the symptom — it is
+   * unbound *because* the pod is unscheduled.
+   */
+  scheduling: (namespace, name) => api.get(`${podPath(namespace, name)}/scheduling`),
+
+  /**
    * params: { container, tailLines, previous, sinceSeconds, timestamps }
    * Returns text/plain. A multi-container pod with no `container` is a
    * 422 `invalid` listing the containers — never a silent pick of the first.

@@ -54,6 +54,7 @@ import {
 import DebugPanel from '../components/DebugPanel';
 import LogViewer from '../components/LogViewer';
 import PodEnvironment from '../components/PodEnvironment';
+import PodScheduling from '../components/PodScheduling';
 import PodMetrics from '../components/PodMetrics';
 import PodTerminal from '../components/PodTerminal';
 import DeleteDialog from '../components/DeleteDialog';
@@ -84,6 +85,10 @@ const TABS = [
   { key: 'environment', title: 'Environment' },
   { key: 'logs', title: 'Logs' },
   { key: 'events', title: 'Events' },
+  // §31. Beside Events rather than inside Details, because it is the question
+  // asked *instead* of reading the details: an operator whose pod will not start
+  // is not browsing its labels.
+  { key: 'scheduling', title: 'Scheduling' },
   { key: 'terminal', title: 'Terminal' },
   // §7.4. Its own tab rather than a step inside the Terminal: the pod this is
   // for is the one whose image has no shell, so an operator reaching for it has
@@ -591,6 +596,8 @@ export default function PodDetail() {
           )
         ) : tab === 'events' ? (
           <EventsTab namespace={namespace} name={name} clusterId={activeClusterId} />
+        ) : tab === 'scheduling' ? (
+          <PodScheduling namespace={namespace} name={name} clusterId={activeClusterId} />
         ) : tab === 'terminal' ? (
           execGate.allowed ? (
             <PodTerminal namespace={namespace} name={name} containers={containers} height={520} />

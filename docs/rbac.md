@@ -133,6 +133,24 @@ identity do X" and returns an answer.
 >
 > Deleting the rule costs exactly one tab. It is a reasonable default to remove.
 
+## Read: why a pod is Pending (§31)
+
+Every one of these but the pod itself is secondary: withholding it costs a
+section of the answer, names itself in `unavailable[]`, and leaves the rest
+standing.
+
+| Verb | Group / resource | Withholding it |
+|---|---|---|
+| `get` | `pods` | The endpoint has no answer and raises. Already granted for §7.5 |
+| `list` | `events` | The scheduler's own verdict is unreadable. It is drawn as **"no explanation is readable"** — never as a blank, which would read as nothing being wrong |
+| `list` | `nodes` | `nodes: null`. Which nodes are ruled out is unknown, and the panel says so rather than rendering an empty table, which would report a cluster with no nodes |
+| `list` | `pods` (cluster-wide) | Every node's `capacity_checked` is false: what each already holds is unknown, so none is judged on room. No node is reported as having any |
+| `list` | `persistentvolumeclaims` | `claims: null`. Whether a volume is holding the pod back is unknown, never that it mounts none |
+| `list` | `storage.k8s.io/storageclasses` | Every unbound claim's `blocks_scheduling` is `null`: cause and symptom cannot be told apart without the binding mode |
+
+All six are in the reader role already — §31 adds no grant. It is listed here
+because the degradation is worth knowing before somebody trims the role.
+
 ## Read: the resource browser
 
 | Permission | Feature | Withheld |

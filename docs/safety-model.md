@@ -1945,3 +1945,86 @@ would then have to explain as well, in exchange for tidiness. The empty
 `subjects: []` is sent rather than `null` for the same reason the plan exists at
 all: only one of them shows, in the diff, that the binding survived with nobody
 in it.
+
+---
+
+## 22. Why is this pod Pending (§31) — the answer that already existed
+
+Every other section here is about a write. This one is about a read, and it
+belongs beside them because it is the same failure in a different place: an
+answer delivered confidently that is not true.
+
+The scheduler computed the answer. It is in an event. The console showed the
+word `Pending` and left the operator to find it.
+
+### 22.1 Two questions wearing one phase
+
+A `Pending` pod that already carries `spec.nodeName` has been **placed**. What
+is holding it is on that machine — an image, a volume, an init container — and
+cluster capacity has nothing to do with it. A console that answers both cases
+with a table of node capacity sends half its users to audit a fleet over a
+failed image pull on one box.
+
+So `waiting_on` is the first field, and the panel branches on it before it shows
+anything else. Only `scheduler` gets the nodes.
+
+### 22.2 A snapshot rendered as a status
+
+`0/5 nodes are available: 3 Insufficient cpu` is what the scheduler saw at one
+instant. It is not maintained. A node added since, a pod deleted since, a taint
+removed since — none of them rewrite it, and the event can sit there for its
+whole TTL describing a cluster that no longer exists.
+
+The age is therefore never optional. It is beside the message, in words, saying
+what the number means: *this is what it saw then*.
+
+### 22.3 The null that must not read as a clean bill
+
+Events age out of etcd, an hour by default. A pod pending since this morning has
+an explanation that expired.
+
+`scheduler: null` is drawn as a **warning**, not as blank space, and it says so
+in the sentence: no explanation is readable, and that is not a report that the
+scheduler is content. A blank there is the reassuring reading of a missing fact,
+on the one screen where something is demonstrably wrong.
+
+### 22.4 The verdict this feature refuses to offer
+
+The per-node table is this console's own re-derivation. It checks cordoning,
+readiness, untolerated taints, `nodeSelector`, and requests against allocatable
+minus what is already requested. Every one of those is a reason to **rule a node
+out**.
+
+There is no `fits`, and adding one would be the defect. The scheduler also
+weighs inter-pod affinity and anti-affinity, topology spread, volume node
+affinity and zone, extended resources, host ports, RuntimeClass overhead and
+every plugin the cluster runs. None of that is evaluated. `no_reason_found`
+means *this console found nothing against it*, which is a statement about this
+console — and promoting it to "this node has room" would send somebody to argue
+with a scheduler that had already rejected the node for a reason they cannot
+see.
+
+`capacity_checked` is the same discipline one level finer. A node whose free
+capacity was never compared — the pod listing failed, a neighbour's request
+would not parse, the node publishes no pod-slot count — reached
+`no_reason_found` by a shorter path, and the row says which. Two shrugs of
+different strength must not be drawn as one.
+
+### 22.5 The claim that is the symptom
+
+An unbound PersistentVolumeClaim usually blocks scheduling. One whose
+StorageClass uses `WaitForFirstConsumer` is unbound *because* the pod is
+unscheduled — the provisioner is waiting for a node to be chosen so it can
+create the volume in the right zone.
+
+Reporting that as the blocker sends an operator to fix storage while storage
+waits on them to fix scheduling. So the field is tri-state, and the `null` — an
+unbound claim whose binding mode could not be read — is the honest answer to a
+question with two possible causes and even odds.
+
+### 22.6 What it does not claim
+
+It does not predict where the pod will land, it writes nothing, and it is a read
+at a moment rather than a watch. Its whole contribution is the separation: which
+of the two questions this is, how old the answer is, and which nodes are out for
+reasons an operator can act on.

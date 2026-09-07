@@ -5012,3 +5012,140 @@ it on a namespace page is how one gets made by somebody who meant the namespace.
 §4 creates them.
 
 **Not an effective-access answer.** That is §23, and §30's own mitigations say so.
+
+---
+
+## 31. Why is this pod Pending
+
+### 31.1 The question this console answered with one word
+
+`Pending` is a phase, not an answer. The answer exists — the scheduler computed
+it over its whole predicate chain and wrote it into an event — and until §31 it
+was three clicks away in a list nobody filters.
+
+Four things stand between that event and a correct reading of it, and each one
+is a place a better console still gets it wrong:
+
+**Half of Pending is not about the scheduler.** A pod with `spec.nodeName` set
+has been *placed*. What is holding it is on that machine — an image that will
+not pull, a volume that will not mount, an init container that has not finished
+— and cluster capacity has nothing to do with it. One phase in the API, two
+entirely different investigations, so `waiting_on` is the first field in the
+response.
+
+**The message is a snapshot, not a status.** It carries what the scheduler saw
+at the instant of one failed attempt. A node added since, a pod deleted since, a
+taint removed since — none of them rewrite it. An operator reading a
+forty-minute-old `0/5 nodes are available` as the present goes looking for
+capacity that arrived half an hour ago, so the age travels with it.
+
+**Its absence is not innocence.** Events age out of etcd — one hour by default —
+so a pod pending since this morning has an explanation that expired. `scheduler:
+null` means *no `FailedScheduling` event is readable right now*, and never that
+the scheduler is content with the pod.
+
+**A re-derivation cannot say a node fits.** §31 checks what it can check and
+rules nodes out. It never rules one in.
+
+### 31.2 `GET /api/pods/{namespace}/{name}/scheduling`
+
+Reads only — no gate, no preflight, no audit row. The pod is the primary read
+and raises; everything else is secondary and names itself in `unavailable[]`.
+
+```json
+{ "namespace": "prod", "pod": "checkout-7d9-abc",
+  "phase": "Pending", "waiting_on": "scheduler", "node": null,
+  "pending_seconds": 1320,
+  "scheduled_condition": {"status": "False", "reason": "Unschedulable",
+                          "message": "…", "last_transition": "…"},
+  "scheduler": {"reason": "FailedScheduling",
+                "message": "0/3 nodes are available: 2 Insufficient cpu, …",
+                "count": 14, "last_seen": "…", "first_seen": "…",
+                "age_seconds": 2400},
+  "requests": {"cpu_cores": 3, "memory_bytes": 2147483648},
+  "claims": [ … ],
+  "nodes": [ … ],
+  "unavailable": [], "partial": false }
+```
+
+`waiting_on` is `scheduler`, `kubelet` or `nothing`. Only the first is a
+scheduling problem; the second sends the reader to that node's events and
+container statuses; the third is a settled pod, answered rather than refused
+because "why was this put *there*" is asked about running pods too.
+
+`scheduled_condition` is `null` when the API server has written no conditions
+yet. That is a real state — nothing has evaluated the pod — and synthesising a
+"not scheduled" from it would attribute a verdict to a scheduler that has not
+looked.
+
+`pending_seconds` is `null` on a settled pod. Reporting one would be the pod's
+age dressed up as a complaint.
+
+### 31.3 `nodes[]` — rule-outs, and the verdict that does not exist
+
+```json
+{"name": "ip-10-0-1-4", "verdict": "ruled_out", "capacity_checked": true,
+ "reasons": [{"code": "node_insufficient_cpu", "detail": "Needs 3 cores; …"}]}
+```
+
+`verdict` is `ruled_out` or `no_reason_found`. **There is no `fits`, and there
+must not become one.** The scheduler also weighs inter-pod affinity and
+anti-affinity, topology spread constraints, volume node affinity and zone,
+extended and scalar resources, host port conflicts, pod overhead against a
+RuntimeClass, and every scheduling plugin the cluster runs. None of that is
+evaluated here, so `no_reason_found` means exactly what it says — this console
+checked what it can check and found nothing — and promoting it would send an
+operator to argue with the scheduler about a node it already rejected for a
+reason they cannot see.
+
+| Code | When |
+|---|---|
+| `node_cordoned` | `spec.unschedulable` |
+| `node_not_ready` | The Ready condition is **`False`**. An absent one is unobserved, not unhealthy, and does not rule the node out |
+| `node_untolerated_taint` | A `NoSchedule` or `NoExecute` taint the pod does not tolerate. `PreferNoSchedule` is **not** here: it lowers the node's score and does not exclude it |
+| `node_selector_mismatch` | A `nodeSelector` key the node does not carry. `nodeAffinity` is deliberately not evaluated — a partial implementation of its operators and weights would rule nodes out for terms it misread |
+| `node_insufficient_cpu` | The request exceeds **allocatable** minus what is already requested there. Not capacity: allocatable is what the kubelet offers the scheduler, and it is the only number the scheduler compares against |
+| `node_insufficient_memory` | The same, for memory |
+| `node_pod_slots_full` | The node is at its pod limit, whatever the request's size |
+
+`capacity_checked: false` marks a node that was **not fully compared** — the pod
+listing failed, a neighbour's request would not parse, or the node publishes no
+pod-slot count. Its `no_reason_found` is weaker still, and the response says so
+rather than letting a half-examined node look like a cleared one.
+
+`nodes: null` is an unreadable listing. Never `[]`, which would say the cluster
+has no nodes on the screen where somebody is working out why nothing will take
+their pod.
+
+### 31.4 `claims[]` — the cause, or the symptom
+
+An unbound claim usually blocks scheduling. A claim whose StorageClass uses
+`WaitForFirstConsumer` is unbound **because** the pod is unscheduled: the
+provisioner is waiting for the scheduler to pick a node so it can create the
+volume in the right zone. Reporting that as the blocker sends an operator to fix
+storage while storage waits on them to fix scheduling.
+
+So `blocks_scheduling` is tri-state: `true` for an unbound `Immediate` claim or
+one that does not exist, `false` for a bound claim or an unbound
+`WaitForFirstConsumer` one, and `null` when the binding mode could not be
+established — which is either the cause or the symptom, and guessing picks one
+of two systems with even odds.
+
+`claims: null` is an unreadable listing; `[]` is a pod that mounts none.
+
+### 31.5 What §31 is not
+
+**Not a scheduler.** It does not simulate placement and does not predict where
+the pod will land. Every statement it makes about a node is a reason that node
+is *out*.
+
+**Not a fix.** It writes nothing. The actions it points at — cordoning, taints,
+quota, scaling — are §5's, §24's, §29's and §6's, each through the funnel.
+
+**Not live.** The scheduler's message is a record of one past attempt, and this
+endpoint is a read at a moment. Neither is a watch.
+
+**Not `kubectl describe pod`.** That prints the same event and every other one
+beside it. §31's contribution is the separation — which of the two questions
+this is, how stale the answer is, and which nodes are out for reasons an
+operator can act on.
