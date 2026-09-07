@@ -77,7 +77,14 @@ test.describe('the routes listing', () => {
     await expect(page.getByRole('link', { name: 'shop', exact: true })).toBeVisible();
     await expect(page.getByText('https://shop.example.com/')).toBeVisible();
     // The Kind column: the row is one exposure, and this says which API it is.
-    await expect(page.getByRole('row', { name: /shop/ }).getByText('Ingress')).toBeVisible();
+    // Scoped to this table: §32's certificate table is on the same page and has
+    // a row for the same exposure, so an unscoped row lookup is ambiguous.
+    await expect(
+      page
+        .getByRole('grid', { name: 'Routes' })
+        .getByRole('row', { name: /shop/ })
+        .getByText('Ingress'),
+    ).toBeVisible();
   });
 
   test('an unsupported backend is an ordinary fact, not an error', async ({ page }) => {

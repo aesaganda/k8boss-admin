@@ -1165,6 +1165,235 @@ export const FIXTURES = {
    * §13 exposures. Three rows carrying the three `admitted` states, because
    * that column is the one a green row can lie in.
    */
+  /**
+   * §32 — the certificates behind the exposures. Five rows, each a different
+   * way of being right or wrong about one:
+   *
+   *   shop      valid, and covers the host it serves.
+   *   admin     expiring inside the window, and names a host it no longer
+   *             serves — current, correctly issued and useless.
+   *   legacy    a Secret this console could not read: unknown, not absent.
+   *   internal  a passthrough Route, whose certificate is in the pod.
+   *   gw        a Gateway listener, because TLS lives there and not on an
+   *             HTTPRoute.
+   */
+  routeCertificates: {
+    items: [
+      {
+        id: 'ingress/prod/shop#0',
+        kind: 'Ingress',
+        group: 'networking.k8s.io',
+        name: 'shop',
+        namespace: 'prod',
+        slot: '0',
+        source: 'secret',
+        termination: 'edge',
+        hosts: ['shop.example.com'],
+        secret: { namespace: 'prod', name: 'shop-tls' },
+        sourceDetail: 'spec.tls[0].secretName names the Secret shop-tls.',
+        certificate: {
+          subject_common_name: 'shop.example.com',
+          issuer_common_name: 'Example CA R3',
+          serial: '03:ab:5f',
+          not_before: '2026-07-01T00:00:00Z',
+          not_after: '2026-12-01T00:00:00Z',
+          dns_names: ['shop.example.com'],
+          ip_addresses: [],
+          email_addresses: [],
+          uris: [],
+          key: { algorithm: 'ECDSA', size: 256, curve: 'secp256r1' },
+          signature_algorithm: 'sha256',
+          self_signed: false,
+          chain_length: 2,
+          error: null,
+        },
+        state: 'valid',
+        expires_in_seconds: 7344000,
+        hostsCovered: [{ host: 'shop.example.com', covered: true }],
+        findings: [],
+      },
+      {
+        id: 'ingress/prod/admin#0',
+        kind: 'Ingress',
+        group: 'networking.k8s.io',
+        name: 'admin',
+        namespace: 'prod',
+        slot: '0',
+        source: 'secret',
+        termination: 'edge',
+        hosts: ['admin.example.com'],
+        secret: { namespace: 'prod', name: 'admin-tls' },
+        sourceDetail: 'spec.tls[0].secretName names the Secret admin-tls.',
+        certificate: {
+          subject_common_name: 'old-admin.example.com',
+          issuer_common_name: 'Example CA R3',
+          serial: '0a:11',
+          not_before: '2026-06-01T00:00:00Z',
+          not_after: '2026-09-19T00:00:00Z',
+          dns_names: ['old-admin.example.com'],
+          ip_addresses: [],
+          email_addresses: [],
+          uris: [],
+          key: { algorithm: 'RSA', size: 2048, curve: null },
+          signature_algorithm: 'sha256',
+          self_signed: false,
+          chain_length: 1,
+          error: null,
+        },
+        state: 'expiring',
+        expires_in_seconds: 1036800,
+        hostsCovered: [{ host: 'admin.example.com', covered: false }],
+        findings: [
+          {
+            code: 'certificate_expiring',
+            detail: 'This certificate expires on 2026-09-19T00:00:00Z, in 12 days.',
+          },
+          {
+            code: 'host_not_covered',
+            detail:
+              'This certificate does not name admin.example.com. Its names are old-admin.example.com. Clients reaching those hosts get a name-mismatch error, whatever the expiry says.',
+          },
+          {
+            code: 'chain_leaf_only',
+            detail:
+              'This bundle holds only the leaf certificate — no intermediate is included.',
+          },
+        ],
+      },
+      {
+        id: 'ingress/prod/legacy#0',
+        kind: 'Ingress',
+        group: 'networking.k8s.io',
+        name: 'legacy',
+        namespace: 'prod',
+        slot: '0',
+        source: 'secret',
+        termination: 'edge',
+        hosts: ['legacy.example.com'],
+        secret: { namespace: 'prod', name: 'legacy-tls' },
+        sourceDetail: 'spec.tls[0].secretName names the Secret legacy-tls.',
+        certificate: null,
+        state: 'unknown',
+        expires_in_seconds: null,
+        hostsCovered: [{ host: 'legacy.example.com', covered: null }],
+        findings: [
+          {
+            code: 'certificate_unreadable',
+            detail:
+              'The Secret prod/legacy-tls could not be read; the banner above says why. Nothing here says this exposure has no certificate — only that this console could not read the one it names.',
+          },
+        ],
+      },
+      {
+        id: 'route/prod/internal#tls',
+        kind: 'Route',
+        group: 'route.openshift.io',
+        name: 'internal',
+        namespace: 'prod',
+        slot: 'tls',
+        source: 'backend',
+        termination: 'passthrough',
+        hosts: ['internal.apps.example.com'],
+        secret: null,
+        sourceDetail:
+          'This Route passes TLS through to the pod, which holds the certificate.',
+        certificate: null,
+        state: 'unknown',
+        expires_in_seconds: null,
+        hostsCovered: [{ host: 'internal.apps.example.com', covered: null }],
+        findings: [
+          {
+            code: 'certificate_in_backend',
+            detail:
+              'This Route passes TLS through to the pod, which holds the certificate. The router never sees one, and neither does this console.',
+          },
+        ],
+      },
+      {
+        id: 'gateway/prod/edge#https/0',
+        kind: 'Gateway',
+        group: 'gateway.networking.k8s.io',
+        name: 'edge',
+        namespace: 'prod',
+        slot: 'https/0',
+        source: 'secret',
+        termination: 'terminate',
+        hosts: ['*.example.com'],
+        secret: { namespace: 'certs', name: 'wildcard-tls' },
+        sourceDetail:
+          'Listener https references the Secret wildcard-tls in namespace certs.',
+        certificate: {
+          subject_common_name: '*.example.com',
+          issuer_common_name: null,
+          serial: 'ff',
+          not_before: '2026-01-01T00:00:00Z',
+          not_after: '2026-09-04T00:00:00Z',
+          dns_names: ['*.example.com'],
+          ip_addresses: [],
+          email_addresses: [],
+          uris: [],
+          key: { algorithm: 'ECDSA', size: 256, curve: 'secp256r1' },
+          signature_algorithm: 'sha256',
+          self_signed: true,
+          chain_length: 1,
+          error: null,
+        },
+        state: 'expired',
+        expires_in_seconds: -259200,
+        hostsCovered: [{ host: '*.example.com', covered: true }],
+        findings: [
+          {
+            code: 'certificate_expired',
+            detail: 'This certificate expired on 2026-09-04T00:00:00Z, 3 days ago.',
+          },
+          {
+            code: 'self_signed',
+            detail:
+              'The issuer and the subject of this certificate are the same name, so no certificate authority vouches for it.',
+          },
+        ],
+      },
+    ],
+    continue: null,
+    remaining: null,
+    partial: true,
+    unavailable: [
+      {
+        group: '',
+        resource: 'secrets',
+        namespace: 'prod',
+        reason: 'forbidden',
+        detail: 'secrets "legacy-tls" is forbidden',
+      },
+    ],
+    kinds: [
+      {
+        kind: 'Route',
+        group: 'route.openshift.io',
+        state: 'available',
+        version: 'v1',
+        detail: 'This cluster serves route.openshift.io/v1 routes.',
+      },
+      {
+        kind: 'Ingress',
+        group: 'networking.k8s.io',
+        state: 'available',
+        version: 'v1',
+        detail: 'This cluster serves networking.k8s.io/v1 ingresses.',
+      },
+      {
+        kind: 'Gateway',
+        group: 'gateway.networking.k8s.io',
+        state: 'available',
+        version: 'v1',
+        detail: 'This cluster serves gateway.networking.k8s.io/v1 gateways.',
+      },
+    ],
+    truncated: [],
+    expiringWindowSeconds: 2592000,
+    maxCertificateReads: 100,
+  },
+
   routes: {
     items: [
       {
@@ -4368,6 +4597,7 @@ export async function mockApi(
     cliDeletes = [],
     routeCapabilities = null,
     routes = null,
+    routeCertificates = null,
     routeRender = null,
     routeWrite = null,
     routeDetail = null,
@@ -4855,6 +5085,13 @@ export async function mockApi(
     // a capabilities read with a single exposure.
     if (path === '/routes/capabilities') {
       return json(routeCapabilities ?? FIXTURES.routeCapabilities);
+    }
+    // §32. One segment after `/routes`, like capabilities, and ordered
+    // with them for the same reason: the three-segment exposure path
+    // below would otherwise answer this as a backend named
+    // "certificates".
+    if (path === '/routes/certificates') {
+      return json(routeCertificates ?? FIXTURES.routeCertificates);
     }
     if (path === '/routes/render') {
       const body = JSON.parse(route.request().postData() || '{}');

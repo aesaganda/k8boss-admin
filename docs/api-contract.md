@@ -5149,3 +5149,224 @@ endpoint is a read at a moment. Neither is a watch.
 beside it. §31's contribution is the separation — which of the two questions
 this is, how stale the answer is, and which nodes are out for reasons an
 operator can act on.
+
+---
+
+## 32. The certificate an exposure serves
+
+### 32.1 The fact no Kubernetes API reports
+
+`kubectl get ingress` prints `TLS: 1 secret`. `oc get route` prints `edge`.
+Neither prints a date and neither prints a name, and those are the two facts
+that decide whether the site is up tomorrow. Both are inside the certificate, in
+the clear — every client that completes a handshake with that server is handed
+them — and reaching them means base64-decoding a Secret and running
+`openssl x509 -text`, which is why nobody does it until the site is down.
+
+Two questions, and the second is the one that surprises people.
+
+**When does it expire** is the famous one, and the easy one: it is a date in the
+object.
+
+**Is it even for this hostname** is the other, and a certificate can be current,
+correctly issued and completely useless. An Ingress moved to a new host, a
+wildcard that covers `*.example.com` and not `example.com`, a Secret two
+Ingresses share where only one of them was renamed — each produces a green row
+in every Kubernetes tool there is and a browser that refuses to connect.
+
+### 32.2 `GET /api/routes/certificates`
+
+Reads only — no gate, no preflight, no audit row. Query: `namespace` (omit for
+every namespace) and `limit` (bounds each of the three *listings*, not how many
+Secrets are opened).
+
+```json
+{ "items": [
+    { "id": "ingress/prod/checkout#0",
+      "kind": "Ingress", "group": "networking.k8s.io",
+      "name": "checkout", "namespace": "prod", "slot": "0",
+      "source": "secret", "termination": "edge",
+      "hosts": ["shop.example.com"],
+      "secret": {"namespace": "prod", "name": "shop-tls"},
+      "sourceDetail": "spec.tls[0].secretName names the Secret shop-tls.",
+      "certificate": {
+        "subject_common_name": "shop.example.com",
+        "issuer_common_name": "Example CA R3",
+        "serial": "03:ab:5f",
+        "not_before": "2026-07-01T00:00:00Z",
+        "not_after": "2026-12-01T00:00:00Z",
+        "dns_names": ["shop.example.com"], "ip_addresses": [],
+        "email_addresses": [], "uris": [],
+        "key": {"algorithm": "ECDSA", "size": 256, "curve": "secp256r1"},
+        "signature_algorithm": "sha256",
+        "self_signed": false, "chain_length": 2, "error": null },
+      "state": "valid",
+      "expires_in_seconds": 7344000,
+      "hostsCovered": [{"host": "shop.example.com", "covered": true}],
+      "findings": [] } ],
+  "continue": null, "remaining": null,
+  "partial": false, "unavailable": [],
+  "kinds": [ {"kind": "Route", "group": "route.openshift.io",
+              "state": "available", "version": "v1", "detail": "…"} ],
+  "truncated": [],
+  "expiringWindowSeconds": 2592000,
+  "maxCertificateReads": 100 }
+```
+
+`kinds[]` carries all three regardless of what the cluster serves, with the
+§13 `available` / `unsupported` / `unknown` classification — from the same
+function §13 uses, so the two can never disagree. Without it a Gateway
+API cluster with no Ingresses would render an empty page that reads as "no
+certificates here", which is this section's own failure applied to itself.
+`unsupported` is an ordinary fact and does **not** make the report partial;
+`unknown` does. Its `unavailable[]` entry is built by §13's own
+`unknown_entry`, which **raises** rather than inventing a reason token for an
+error that is not a statement about whether we could look — because the token
+anybody inventing one reaches for first is `unreachable`, and that sends an
+operator to check a network that answered fine.
+
+### 32.3 `state`, and the null that is not a zero
+
+| `state` | Meaning |
+|---|---|
+| `valid` | `notAfter` is further away than `expiringWindowSeconds` |
+| `expiring` | `notAfter` is inside that window |
+| `expired` | `notAfter` is in the past |
+| `not_yet_valid` | `notBefore` is in the future — outranks the expiry buckets |
+| `unknown` | no certificate was read |
+
+`expires_in_seconds` is **negative** for an expired certificate and `null` when
+none was read. It is never clamped and never zero-for-unknown: `0` is a real
+value here and it means *expires this second*, which is the one number an
+operator acts on without reading the rest of the row.
+
+`not_yet_valid` is not exotic. A freshly-issued certificate on a cluster whose
+clock is behind the issuer's is exactly this, and reading it as "valid, 89 days
+left" sends the operator to look at the router.
+
+### 32.4 Where a certificate lives, and the two places it legitimately is not
+
+`source` is the first field to read, the way §31's `waiting_on` is:
+
+| `source` | Where the certificate is |
+|---|---|
+| `secret` | A Secret — an Ingress `spec.tls[]` block, a Route's `externalCertificate`, or a Gateway listener's `certificateRefs` |
+| `inline` | A Route's own `spec.tls.certificate` |
+| `backend` | A `passthrough` exposure: the pod holds it and the router never sees it |
+| `router_default` | TLS terminates and nothing names a certificate, so the router serves its own — which lives in the router's namespace under a name this console is not told |
+
+The last two are **not** missing certificates. Drawing either as one puts a red
+row on an exposure working exactly as designed, and sends somebody to create a
+Secret nothing was asking for.
+
+**One entry per certificate, not per object.** An Ingress with two `spec.tls[]`
+blocks has two certificates covering two host sets, so it produces two rows;
+§13's row reports the first Secret because it is a summary of one exposure, and
+using it here would mean saying `shop.example.com` is covered by a certificate
+that has nothing to do with it. A Gateway listener naming three
+`certificateRefs` produces three. `slot` is what makes `id` unique per
+certificate.
+
+A Gateway `certificateRefs` entry may point into another namespace. The Secret
+is read where the reference actually points — looking in the Gateway's own
+namespace would report a certificate that exists and works as missing. Whether
+the reference is *permitted* is the Gateway controller's decision, visible in
+the listener's conditions, and no ReferenceGrant is read here.
+
+### 32.5 `hostsCovered` — tri-state, matched the way a browser matches
+
+Coverage is computed against **subject alternative names only**. Every browser
+shipping today ignores the Common Name for host verification, so a console that
+matched on CN would call a certificate correct that no client will accept. A
+certificate carrying no SAN at all gets `no_subject_alt_names` and authenticates
+no hostname, however correct its subject looks.
+
+Wildcards follow RFC 6125 §6.4.3: one label, leftmost only, and the whole label.
+`*.a.com` covers `b.a.com`, and covers neither `a.com` nor `c.b.a.com`;
+`w*.a.com` is not a wildcard. Relaxing any of those would report a host as
+covered that Chrome will refuse — a green row in front of an outage.
+
+A host that is a literal IP is matched against the certificate's IP SANs and
+never its DNS SANs, because that is how a client matches it.
+
+`covered` is `true`, `false` or **`null`**. `false` is a claim about a
+certificate; with none read there is nothing to make it with, so every host on
+an unread row is `null`.
+
+A Route with `wildcardPolicy: Subdomain` serves every sibling of its host, so
+`*.<parent>` is added to `hosts` and checked. A certificate naming only
+`foo.apps.example.com` covers the route's own name and none of the traffic the
+policy invites, and no field anywhere says so.
+
+### 32.6 `findings[]`
+
+| `code` | What it says |
+|---|---|
+| `certificate_expired` | `notAfter` has passed, with how long ago |
+| `certificate_expiring` | Inside `expiringWindowSeconds`, with how long is left |
+| `certificate_not_yet_valid` | `notBefore` is in the future |
+| `host_not_covered` | A host this exposure serves is not among the SANs, with both lists |
+| `no_subject_alt_names` | The certificate names nothing, so it authenticates nothing |
+| `chain_leaf_only` | The bundle carries the leaf and no intermediate |
+| `self_signed` | Issuer and subject are the same name — reported as a fact, not a fault |
+| `certificate_unreadable` | The Secret, or the bytes in it, could not be read |
+| `certificate_not_read` | The report's read budget was spent before this row |
+| `certificate_not_named` | `source: router_default` |
+| `certificate_in_backend` | `source: backend` |
+
+`chain_leaf_only` is a statement about the **bundle**, not about any client: it
+says no intermediate is present, which is structural and checkable. It is not a
+chain verification, and §32 performs none.
+
+### 32.7 The read budget
+
+One report opens at most `maxCertificateReads` **distinct** Secrets, cached by
+`(namespace, name)` for its lifetime. Forty Ingresses behind one wildcard Secret
+therefore cost one read — and, more usefully, all forty rows agree about it.
+
+A source past the budget comes back `certificate: null`, `state: unknown` and
+`certificate_not_read`, which says *we stopped looking*. It never looks
+examined, and the cap is never applied to rows instead of reads: that would hide
+thirty-nine rows to save nothing.
+
+### 32.8 Only `tls.crt`, and only from a `kubernetes.io/tls` Secret
+
+The certificate is public material. The private key is not, and this section
+never touches it: exactly one key of the Secret is read, by that name, and
+`tls.key` is not read, decoded, counted or named. **No PEM appears in the
+response at all** — the report is dates and names, and shipping certificate
+bodies to a browser buys nothing.
+
+A Secret of any other type is refused **by type** rather than searched for
+something certificate-shaped. `Opaque` Secrets hold arbitrary application data,
+and a console that went rummaging through one would be reading passwords on a
+page about expiry dates.
+
+This is deliberately **not** behind `SECRET_REVEAL_ENABLED`. That gate exists
+for the *values* of a Secret; what §32 returns is derived, public metadata about
+one key of one Secret type — the same bytes that server hands every client that
+connects to it. Gating it there would make the section useless on every
+deployment that leaves the gate off, which is all of them, while protecting
+nothing. RBAC still applies: a caller who cannot read the Secret gets an
+`unavailable[]` entry and `state: unknown`, never a row that looks examined.
+
+### 32.9 What §32 is not
+
+**Not a verifier.** No trust store is consulted, no chain is built, no signature
+is checked and no revocation is looked up. A certificate this section calls
+unexpired and name-matching can still be rejected by every browser on earth. The
+UI says so above the table rather than under it, because a green column read as
+"this works" is a claim the console cannot make.
+
+**Not what the router serves.** The Secret is what the object *points at*. A
+router started with `--default-ssl-certificate`, a controller-specific
+annotation overriding the Secret, a cert-manager renewal that has landed in the
+Secret but not in a router that has not reloaded — in each of those the bytes on
+the wire differ from the bytes here. Only a handshake settles it, and this
+console makes none.
+
+**Not a monitor.** It is a read at a moment. There is no watch, no alert and no
+schedule; `expiringWindowSeconds` is a rendering threshold, not a notification.
+
+**Not a certificate manager.** It writes nothing. Renewing one is cert-manager's
+job or the CA's, and replacing one is §4's YAML editor through the funnel.

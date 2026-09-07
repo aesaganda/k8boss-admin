@@ -179,6 +179,23 @@ def age_seconds(value: Any) -> int | None:
     return int(delta) if delta > 0 else 0
 
 
+def seconds_until(value: Any) -> int | None:
+    """Seconds from now until ``value``, or ``None`` if there is no timestamp.
+
+    The mirror of :func:`age_seconds`, and deliberately **not** clamped, which is
+    the whole reason it is a separate function rather than a negated call to
+    that one. `age_seconds` floors at zero because an object cannot have been
+    created in the future and a negative age is clock skew. A certificate's
+    `notAfter` genuinely can be in the past, and that case — the expired
+    certificate — is the one §32 exists to surface. Clamping it would render an
+    expiry that lapsed three weeks ago as `0`, which reads as *expires today*
+    and buys an outage a deadline it has already missed.
+    """
+    parsed = _as_datetime(value)
+    if parsed is None:
+        return None
+    return int((parsed - datetime.now(timezone.utc)).total_seconds())
+
 _QUANTITY_RE = re.compile(r"^(?P<number>[+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)(?P<suffix>[a-zA-Z]*)$")
 
 # Binary suffixes are checked as whole tokens; decimal ones are single
@@ -2141,6 +2158,134 @@ def decode_certificate_request(raw: Any) -> dict[str, Any]:
         }
     except (ValueError, TypeError, UnsupportedAlgorithm) as exc:
         return {**blank, "error": f"The request parsed but could not be read: {exc}"}
+
+
+def _hex_serial(value: int) -> str:
+    """``03:ab:5f`` — the colon-separated hex every certificate viewer prints.
+
+    Zero-padded to a whole number of octets so a serial with a leading zero
+    nibble is not silently shortened: the serial is what a revocation request
+    is keyed on, and one character out is a request against a different
+    certificate.
+    """
+    digits = format(value, "x")
+    if len(digits) % 2:
+        digits = "0" + digits
+    return ":".join(digits[index:index + 2] for index in range(0, len(digits), 2))
+
+def _certificate_names(certificate: Any) -> dict[str, list[str]]:
+    """The SANs on one certificate, as the four lists §32 reports.
+
+    Empty lists — not ``None`` — when the extension is absent: the certificate
+    parsed and genuinely carries no alternative names. That distinction is the
+    whole of §32's host check, because a certificate with **no** SAN at all is
+    rejected by every current browser regardless of what its Common Name says,
+    and "we could not read the names" must not render the same way.
+    """
+    try:
+        alt = certificate.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+    except x509.ExtensionNotFound:
+        return {"dns_names": [], "ip_addresses": [], "email_addresses": [], "uris": []}
+    return {
+        "dns_names": [str(name) for name in alt.get_values_for_type(x509.DNSName)],
+        "ip_addresses": [str(ip) for ip in alt.get_values_for_type(x509.IPAddress)],
+        "email_addresses": [str(mail) for mail in alt.get_values_for_type(x509.RFC822Name)],
+        "uris": [str(uri) for uri in alt.get_values_for_type(x509.UniformResourceIdentifier)],
+    }
+
+
+def _first_common_name(name: Any) -> str | None:
+    """The first CN of an X.501 name, or ``None`` when it carries none.
+
+    ``None`` and not the empty string: a certificate issued to an organisation
+    with no CN is ordinary, and an empty string in that cell renders as a name
+    that is blank rather than as one that was never set.
+    """
+    values = [str(attribute.value) for attribute in name.get_attributes_for_oid(NameOID.COMMON_NAME)]
+    return values[0] if values else None
+
+
+def decode_certificate_chain(raw: Any) -> dict[str, Any]:
+    """Decode a PEM bundle — the certificate an exposure serves (§32).
+
+    **This is the reason §32 exists.** `spec.tls.secretName` on an Ingress names
+    the Secret; it does not say when the certificate inside expires or whose
+    name it carries, and those are the two facts that decide whether the site is
+    up tomorrow. Both are in the bundle, in the clear — every client that
+    completes a handshake with that server is handed them — and no Kubernetes
+    API reports either one.
+
+    The **leaf is the first certificate in the bundle**, which is what RFC 8446
+    §4.4.2 requires of the sender and what every serving stack writes. A bundle
+    whose first entry is a CA is a misordered bundle, and this function reports
+    what it was given rather than reordering it: guessing which entry was meant
+    to be the leaf would make the console right about a file that is wrong, and
+    the router will serve it in the order it is written.
+
+    Pure and **total**, for the same reason :func:`decode_certificate_request`
+    is: the bytes come from a Secret somebody else wrote, and a shaper that
+    raised on a malformed one would take a whole report down with it. A bundle
+    that could not be decoded comes back with every derived field ``None`` and
+    ``error`` set — never an empty name list and never a null expiry beside
+    ``error: None``, either of which reads as a certificate that was read and
+    found to be nameless or eternal.
+    """
+    blank: dict[str, Any] = {
+        "subject_common_name": None, "issuer_common_name": None,
+        "serial": None, "not_before": None, "not_after": None,
+        "dns_names": None, "ip_addresses": None, "email_addresses": None,
+        "uris": None, "key": None, "signature_algorithm": None,
+        "self_signed": None, "chain_length": None, "error": None,
+    }
+    if raw is None or (isinstance(raw, (str, bytes)) and not str(raw).strip()):
+        return {**blank, "error": "There is no certificate here to decode."}
+
+    data = raw.encode("utf-8", "replace") if isinstance(raw, str) else bytes(raw)
+    try:
+        chain = x509.load_pem_x509_certificates(data)
+    except (ValueError, TypeError) as exc:
+        return {**blank, "error": f"Not a PEM certificate bundle this console could parse: {exc}"}
+    except UnsupportedAlgorithm as exc:
+        return {**blank, "error": f"The certificate uses an algorithm this console cannot read: {exc}"}
+    if not chain:
+        # Not currently reachable: `cryptography` 50 raises `MalformedFraming`
+        # for input with no CERTIFICATE block in it — a key-only file, a stray
+        # comment — rather than returning an empty list. Kept anyway, because
+        # the empty return is not part of that function's documented contract
+        # and this one's *is* totality: the alternative to this branch is an
+        # `IndexError` out of a shaper that promises never to raise, which would
+        # take the whole report down over one malformed Secret.
+        return {**blank, "error": "That PEM block contains no certificate."}
+
+    leaf = chain[0]
+    try:
+        names = _certificate_names(leaf)
+        signature_hash = getattr(leaf.signature_hash_algorithm, "name", None)
+        return {
+            # Reported, and never used for the host check. Every browser
+            # shipping today ignores the Common Name for name verification and
+            # requires a SAN; a console that matched on CN would call a
+            # certificate correct that no client will accept.
+            "subject_common_name": _first_common_name(leaf.subject),
+            "issuer_common_name": _first_common_name(leaf.issuer),
+            "serial": _hex_serial(leaf.serial_number),
+            "not_before": rfc3339(leaf.not_valid_before_utc),
+            "not_after": rfc3339(leaf.not_valid_after_utc),
+            **names,
+            "key": _key_description(leaf.public_key()),
+            "signature_algorithm": str(signature_hash) if signature_hash else None,
+            # Name equality, **not** a signature check. A certificate whose
+            # issuer and subject match is self-signed in the sense that matters
+            # here — no public CA vouches for it — and verifying the signature
+            # would not change that answer, only the confidence in it. Said as
+            # a fact rather than as a fault: a cluster-internal certificate is
+            # deliberately self-signed and the operator already knows.
+            "self_signed": leaf.issuer == leaf.subject,
+            "chain_length": len(chain),
+            "error": None,
+        }
+    except (ValueError, TypeError, UnsupportedAlgorithm) as exc:
+        return {**blank, "error": f"The certificate parsed but could not be read: {exc}"}
 
 
 def certificatesigningrequest_row(obj: Any) -> dict[str, Any]:

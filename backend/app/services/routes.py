@@ -278,8 +278,32 @@ class BackendState:
         return self.state == STATE_AVAILABLE
 
 
-def backend_state(backend: RouteBackend) -> BackendState:
-    """Resolve one backend against this cluster's discovery.
+@dataclass
+class ServedVersion:
+    """Which version of one group-resource this cluster serves, and how we know.
+
+    Split out of :class:`BackendState` because §32 asks the same question about
+    ``gateways`` — a kind that is not a §13 backend at all, since this console
+    never writes one. The classification below is the part that must not be
+    duplicated: a second implementation would eventually report `unsupported`
+    for a group discovery merely failed on, and "this cluster has no Gateways"
+    is the confidently wrong answer the whole mechanism exists to prevent.
+    """
+
+    state: str
+    version: str | None
+    detail: str
+    error: AdminError | None = None
+
+
+def resolve_served_version(
+    *,
+    group: str,
+    versions: tuple[str, ...],
+    plural: str,
+    kind: str,
+) -> ServedVersion:
+    """Resolve one group-resource against this cluster's discovery.
 
     Each candidate version is tried in preference order. The *classification of
     the failures* is the part that matters:
@@ -302,50 +326,65 @@ def backend_state(backend: RouteBackend) -> BackendState:
     misses: list[str] = []
     blind: AdminError | None = None
 
-    for version in backend.versions:
+    for version in versions:
         try:
-            catalog.resolve(backend.group, version, backend.plural)
+            catalog.resolve(group, version, plural)
         except Unsupported as e:
-            misses.append(f"{backend.group}/{version}: {e.message}")
+            misses.append(f"{group}/{version}: {e.message}")
         except NotFound as e:
-            misses.append(f"{backend.group}/{version}: {e.message}")
+            misses.append(f"{group}/{version}: {e.message}")
         except AdminError as e:
             # Keep the first blind spot. They are all the same outage, and the
             # first one carries the version the operator is most likely to be
             # asking about.
             blind = blind or e
         else:
-            return BackendState(
-                backend=backend,
+            return ServedVersion(
                 state=STATE_AVAILABLE,
                 version=version,
-                detail=(
-                    f"This cluster serves {backend.group}/{version} "
-                    f"{backend.plural}."
-                ),
+                detail=f"This cluster serves {group}/{version} {plural}.",
             )
 
     if blind is not None:
-        return BackendState(
-            backend=backend,
+        return ServedVersion(
             state=STATE_UNKNOWN,
             version=None,
             detail=(
-                f"Whether this cluster serves {backend.kind} objects could not be "
+                f"Whether this cluster serves {kind} objects could not be "
                 f"determined: {blind.message} This is not the same as the cluster "
                 "not having them."
             ),
             error=blind,
         )
 
-    return BackendState(
-        backend=backend,
+    return ServedVersion(
         state=STATE_UNSUPPORTED,
         version=None,
         detail=(
-            f"This cluster does not serve {backend.kind} objects. "
+            f"This cluster does not serve {kind} objects. "
             + ("; ".join(misses) if misses else "")
         ).strip(),
+    )
+
+
+def backend_state(backend: RouteBackend) -> BackendState:
+    """Resolve one §13 backend against this cluster's discovery.
+
+    A thin binding of :func:`resolve_served_version` to the backend it was asked
+    about, so §13 and §32 cannot disagree about whether a cluster serves an API.
+    """
+    served = resolve_served_version(
+        group=backend.group,
+        versions=backend.versions,
+        plural=backend.plural,
+        kind=backend.kind,
+    )
+    return BackendState(
+        backend=backend,
+        state=served.state,
+        version=served.version,
+        detail=served.detail,
+        error=served.error,
     )
 
 
@@ -417,15 +456,18 @@ def _backend_payload(state: BackendState) -> dict[str, Any]:
     }
 
 
-def _unknown_entry(state: BackendState) -> dict[str, Any]:
-    """The §1.2 ``unavailable[]`` entry for a backend we could not classify.
+def unknown_entry(group: str, plural: str, error: AdminError) -> dict[str, Any]:
+    """The §1.2 ``unavailable[]`` entry for a group-resource we could not classify.
 
     Built from the real error, so the reason token is ``forbidden`` when
     discovery was refused and ``unreachable`` when the API server did not
     answer. Those send an operator to two different places.
+
+    Public because §32 asks the same question about ``gateways``. The rule below
+    is the reason it is shared rather than reimplemented: a second copy would
+    reach for a default token, and the first default anybody picks is
+    ``unreachable``.
     """
-    error = state.error
-    assert error is not None  # only called for STATE_UNKNOWN, which always has one
     reason = reason_for_error(error)
     if reason is None:
         # Discovery failed for something that is not a statement about whether
@@ -434,12 +476,14 @@ def _unknown_entry(state: BackendState) -> dict[str, Any]:
         # token, because "unreachable" here would send somebody to check a
         # network that answered fine.
         raise error
-    return unavailable_entry(
-        state.backend.group,
-        state.backend.plural,
-        reason,
-        detail=error.detail or error.message,
-    )
+    return unavailable_entry(group, plural, reason, detail=error.detail or error.message)
+
+
+def _unknown_entry(state: BackendState) -> dict[str, Any]:
+    """:func:`unknown_entry` bound to the backend §13 was asking about."""
+    error = state.error
+    assert error is not None  # only called for STATE_UNKNOWN, which always has one
+    return unknown_entry(state.backend.group, state.backend.plural, error)
 
 
 
@@ -1188,6 +1232,7 @@ __all__ = [
     "FEATURE_WEIGHTED_BACKENDS",
     "FEATURE_WILDCARD_SUBDOMAIN",
     "RouteBackend",
+    "ServedVersion",
     "STATE_AVAILABLE",
     "STATE_UNKNOWN",
     "STATE_UNSUPPORTED",
@@ -1198,5 +1243,7 @@ __all__ = [
     "ingress_route_row",
     "list_routes",
     "resolve_backend",
+    "resolve_served_version",
+    "unknown_entry",
     "route_row",
 ]

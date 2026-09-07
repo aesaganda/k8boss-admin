@@ -2028,3 +2028,90 @@ It does not predict where the pod will land, it writes nothing, and it is a read
 at a moment rather than a watch. Its whole contribution is the separation: which
 of the two questions this is, how old the answer is, and which nodes are out for
 reasons an operator can act on.
+
+---
+
+## 23. The certificate an exposure serves (§32) — the green row in front of an outage
+
+Every other section here is about a write. This one is a read, and it belongs
+beside them because it is the same failure somewhere else: **an answer delivered
+confidently that is not true.**
+
+`kubectl get ingress` prints `TLS: 1 secret`. `oc get route` prints `edge`.
+Neither prints a date and neither prints a name. Both facts are inside the
+certificate, in the clear — every client that completes a handshake with that
+server is handed them — and reaching them means base64-decoding a Secret and
+running `openssl x509 -text`. Nobody does that until the site is down, which is
+why the certificate expiry outage is the one that was scheduled months in
+advance and still surprised everybody.
+
+### The second question, which is the one that catches people
+
+*When does it expire* is the famous half, and the easy one: it is a date.
+
+*Is it even for this hostname* is the other, and a certificate can be current,
+correctly issued and completely useless. An Ingress moved to a new host, a
+wildcard covering `*.example.com` and not `example.com`, a Secret two Ingresses
+share where only one was renamed — each of those produces a **green row in every
+Kubernetes tool there is** and a browser that refuses to connect.
+
+So coverage is checked, against **subject alternative names only**. Every
+browser shipping today ignores the Common Name for host verification; matching
+on it would let this console call a certificate correct that no client will
+accept, which is the defect standard with a padlock drawn on it. Wildcards
+follow RFC 6125 — one label, leftmost, whole label — because relaxing any of
+those reports a host as covered that Chrome refuses.
+
+### Four things §32 refuses to say
+
+**That a client will accept it.** No trust store is consulted, no chain is
+built, no signature is verified, no revocation is checked. A certificate this
+section calls unexpired and name-matching can still be rejected by every browser
+on earth. The UI puts that sentence **above** the table, not under it: a green
+column read as "this works" is a claim the console cannot make, and a caveat
+below the fold is a caveat nobody reads.
+
+**That this is what the router serves.** The Secret is what the object *points
+at*. A router started with `--default-ssl-certificate`, an annotation overriding
+the Secret, a cert-manager renewal that landed in the Secret but not in a router
+that has not reloaded — in each of those the bytes on the wire differ from the
+bytes here. Only a handshake settles it, and this console makes none.
+
+**That an unreadable certificate is a missing one.** A Secret the caller cannot
+read leaves `certificate: null`, `state: unknown` and a finding naming the failed
+read. It never renders as an exposure with no certificate — the reading that
+sends somebody to create a Secret that already exists and is fine — and every
+host on that row is `covered: null`, because `false` is a claim about a
+certificate and there is none here to make it with.
+
+**That an exposure with no certificate of its own is broken.** A `passthrough`
+exposure keeps its certificate in the pod; one that terminates TLS and names
+nothing is served by the router's default. Both are ordinary, both are drawn
+neutral, and both say where the certificate actually is. Painting either red
+puts a fault on an exposure working exactly as designed.
+
+### The null that is not a zero, again
+
+`expires_in_seconds` is `null` when nothing was read and **negative** — never
+clamped — when the certificate has already lapsed. `0` is a real value here and
+it means *expires this second*: it is the one number on the page an operator
+acts on without reading the rest of the row, so using it for "we could not look"
+would buy an outage a deadline it has already missed.
+
+### One key, by name
+
+The certificate is public and the private key is not. §32 reads exactly one key
+of a `kubernetes.io/tls` Secret — `tls.crt` — and `tls.key` is not read,
+decoded, counted or named. **No PEM reaches the response at all**: the report is
+dates and names, and shipping certificate bodies to a browser buys nothing that
+could be lost. A Secret of any other type is refused *by type* rather than
+searched for something certificate-shaped, because rummaging through an `Opaque`
+Secret would be reading application passwords on a page about expiry dates.
+
+It is deliberately not behind `SECRET_REVEAL_ENABLED`: that gate guards the
+*values* of a Secret, and what comes back here is derived, public metadata about
+the one key of the one Secret type whose contents that server hands every client
+that connects to it. Gating it there would make the section useless on every
+deployment that leaves the gate off — which is all of them — while protecting
+nothing. RBAC still decides: a caller who cannot read the Secret gets an
+`unavailable[]` entry and `state: unknown`.

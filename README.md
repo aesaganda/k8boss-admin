@@ -575,6 +575,21 @@ version being that there is no undo for a deleted StatefulSet.
   affinity, topology spread, volume zone and every plugin the cluster runs, and
   a console that promoted its own shrug would send you to argue with a scheduler
   that had already said no. See §31.
+* **The certificate behind each exposure** — `kubectl get ingress` prints
+  `TLS: 1 secret`; it does not print a date and it does not print a name, and
+  those are the two facts that decide whether the site is up tomorrow. The
+  Routes page decodes what each Route, Ingress and Gateway listener actually
+  points at and reports the expiry **and** whether the certificate's subject
+  alternative names cover the hostname it serves — because a certificate can be
+  freshly issued, correctly signed and for a host you moved off last month,
+  which is a green row in every Kubernetes tool there is and a browser that
+  refuses to connect. An Ingress with two `spec.tls[]` blocks gets two rows, not
+  one summarised into the first. A Secret it could not read is **unknown**, never
+  an exposure with no certificate. A passthrough exposure and one served by the
+  router's default are drawn as what they are rather than as faults. It verifies
+  nothing — no chain, no revocation, no handshake — and says so above the table
+  rather than under it. Only `tls.crt`, only from `kubernetes.io/tls` Secrets,
+  and no PEM ever reaches the browser. See §32.
 * Create, edit and delete NetworkPolicies, from a default-deny starter manifest —
   through the same dry-run-then-confirm funnel as every other write, so the diff
   is shown before a segmentation change reaches a cluster.
