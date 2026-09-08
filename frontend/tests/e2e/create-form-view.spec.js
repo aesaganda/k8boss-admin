@@ -194,6 +194,23 @@ test.describe('the create dialog form view', () => {
     expect(await yamlText(page)).not.toContain('replicas');
   });
 
+  test('a control whose field holds the wrong shape says so instead of showing it empty', async ({
+    page,
+  }) => {
+    // `labels: production` is a string where a block of keys belongs. An empty
+    // mapping editor over it would say the field is empty while the document
+    // says otherwise, and the first row added would overwrite the string.
+    await openForm(page, DEPLOYMENT.replace('  labels:\n    app: example\n', '  labels: production\n'));
+
+    const labels = page.getByTestId('create-labels-add');
+    await expect(labels).toBeDisabled();
+    await expect(page.getByTestId('create-section-metadata')).toContainText(
+      'this control expects a set of key/value pairs',
+    );
+    // And it is still there afterwards: the form left it alone.
+    expect(await yamlText(page)).toContain('labels: production');
+  });
+
   test('a selector that cannot match its own pods is reported, and repaired only on request', async ({
     page,
   }) => {

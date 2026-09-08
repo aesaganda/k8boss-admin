@@ -1305,6 +1305,9 @@ export function localIssues(document, model) {
   if (model.kind === 'NetworkPolicy') {
     const types = getIn(document, ['spec', 'policyTypes']);
     const list = Array.isArray(types) ? types : [];
+    if (types != null && !Array.isArray(types)) {
+      add('error', '`spec.policyTypes` is a single value; the API server expects a list of them.');
+    }
     // Both halves of the selector, the way `shaping.selector_is_empty` reads
     // it. A policy carrying only `matchExpressions` is narrow, and calling it
     // "every pod in the namespace" is the wrong answer in the expensive
@@ -1312,7 +1315,7 @@ export function localIssues(document, model) {
     if (selectorIsEmpty(getIn(document, ['spec', 'podSelector']))) {
       add('info', 'The pod selector is empty, so this policy applies to every pod in the namespace.');
     }
-    if (list.length === 0) {
+    if (types == null) {
       add(
         'warning',
         'No policy types are listed. The API server then infers them from the rules present, and sets Ingress regardless — so an empty policy is a deny-all-inbound policy, not an inert one.',

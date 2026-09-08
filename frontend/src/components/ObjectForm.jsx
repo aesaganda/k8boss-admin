@@ -734,6 +734,33 @@ function Help({ text }) {
   );
 }
 
+/**
+ * What each control needs to find at its path, and what to call what it found.
+ *
+ * A document can hold any shape anywhere — `labels: production` instead of a
+ * mapping, `policyTypes: Ingress` instead of a list. Rendering a mapping editor
+ * over a string shows an empty editor, and the first row added would overwrite
+ * the string with something else entirely: the screen would say the field is
+ * empty while the document says it is not, and the operator would approve a
+ * diff for the difference between them. So a control that cannot show what is
+ * there says so and stays out of the way, exactly like `scalarBlocker`'s case
+ * one level up.
+ */
+const CONTROL_SHAPES = {
+  keyValue: { ok: (value) => isMapping(value), wants: 'a set of key/value pairs' },
+  stringLines: { ok: (value) => Array.isArray(value), wants: 'a list' },
+  checkboxSet: { ok: (value) => Array.isArray(value), wants: 'a list' },
+  containers: { ok: (value) => Array.isArray(value), wants: 'a list' },
+};
+
+/** A value described as an operator would read it in the YAML. */
+function describeShape(value) {
+  if (Array.isArray(value)) return 'a list';
+  if (isMapping(value)) return 'a block of keys';
+  if (value instanceof Date) return 'a timestamp';
+  return `the ${typeof value} ${JSON.stringify(value)}`;
+}
+
 function Field({ field, model, document: doc, onDocument, onReplace, isDisabled }) {
   const id = `create-${field.id}`;
   const value = getIn(doc, field.path);
@@ -743,9 +770,12 @@ function Field({ field, model, document: doc, onDocument, onReplace, isDisabled 
   // it — rather than a form that appears to work and silently drops what was
   // written there.
   const blocker = scalarBlocker(doc, field.path);
+  const shape = CONTROL_SHAPES[field.control] ?? { ok: (v) => !isMapping(v) && !Array.isArray(v), wants: 'a single value' };
   const blockedReason = blocker
     ? `"${formatPath(blocker)}" in this document holds a single value rather than a block, so this control cannot write inside it. Edit it in YAML view.`
-    : null;
+    : value != null && !shape.ok(value)
+      ? `"${formatPath(field.path)}" in this document is ${describeShape(value)}, and this control expects ${shape.wants}. It is left exactly as written; edit it in YAML view.`
+      : null;
   const inert = isDisabled || Boolean(blockedReason);
 
   const put = (next) => onDocument(next === undefined ? unsetIn(doc, field.path) : setIn(doc, field.path, next));
