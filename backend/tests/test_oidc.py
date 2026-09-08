@@ -155,9 +155,9 @@ def start_handshake(client) -> tuple[str, str]:
     """Begin a sign-in; return ``(state, nonce)`` read back from the sealed cookie."""
     response = client.get("/api/auth/oidc/start")
     assert response.status_code == 302
-    sealed = response.cookies[handshake_service.COOKIE_NAME]
-    pending = handshake_service.unseal(sealed)
-    client.cookies.set(handshake_service.COOKIE_NAME, sealed)
+    sealed = response.cookies[handshake_service.cookie_name("oidc")]
+    pending = handshake_service.unseal(sealed, provider="oidc")
+    client.cookies.set(handshake_service.cookie_name("oidc"), sealed)
     return pending.state, pending.nonce
 
 
@@ -197,7 +197,7 @@ def test_the_handshake_cookie_is_lax_not_strict(client, issuer):
     response = client.get("/api/auth/oidc/start")
 
     header = response.headers["set-cookie"]
-    assert handshake_service.COOKIE_NAME in header
+    assert handshake_service.cookie_name("oidc") in header
     assert "SameSite=lax" in header or "samesite=lax" in header.lower()
     assert "HttpOnly" in header
 
@@ -697,16 +697,18 @@ def test_the_return_path_cannot_leave_this_origin(client, issuer, hostile):
     response = client.get("/api/auth/oidc/start", params={"next": hostile})
 
     assert response.status_code == 302
-    pending = handshake_service.unseal(response.cookies[handshake_service.COOKIE_NAME])
+    pending = handshake_service.unseal(
+        response.cookies[handshake_service.cookie_name("oidc")], provider="oidc"
+    )
     assert pending.next_path == "/"
 
 
 def test_a_same_origin_return_path_is_honoured(client, issuer, signing_key):
     state = None
     response = client.get("/api/auth/oidc/start", params={"next": "/workloads"})
-    sealed = response.cookies[handshake_service.COOKIE_NAME]
-    client.cookies.set(handshake_service.COOKIE_NAME, sealed)
-    pending = handshake_service.unseal(sealed)
+    sealed = response.cookies[handshake_service.cookie_name("oidc")]
+    client.cookies.set(handshake_service.cookie_name("oidc"), sealed)
+    pending = handshake_service.unseal(sealed, provider="oidc")
     state, nonce = pending.state, pending.nonce
     issuer["token_response"] = {"id_token": mint(signing_key, nonce=nonce)}
 

@@ -906,6 +906,13 @@ rules:
   # refused as that person. There is no check for that here or anywhere else —
   # this console cannot read a cluster's apiserver flags and will not pretend to.
   #
+  # On an OpenShift cluster whose operators sign in through `OPENSHIFT_ENABLED`,
+  # that mismatch cannot happen: the name the console sends was read from this
+  # cluster's own `users/~`, so it is by construction a name this cluster knows.
+  # The two providers that may impersonate at all are OIDC and OpenShift — see
+  # `docs/adr-0007-impersonation.md` for why a plain OAuth 2.0 or SAML session
+  # may not.
+  #
   # - apiGroups: [""]
   #   resources: ["users"]
   #   verbs: ["impersonate"]

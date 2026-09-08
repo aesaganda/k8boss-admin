@@ -27,6 +27,9 @@ import { useAuth } from '../contexts/AuthContext';
  * and a reason we did not anticipate is exactly the one worth showing.
  */
 const SSO_REASONS = {
+  sso_not_configured:
+    'This console is no longer offering that sign-in method. It was turned off, or its '
+    + 'configuration was removed, while you were signing in.',
   provider_unreachable:
     'The console could not reach the identity provider. This is the provider or the '
     + 'network path to it, not your account — nothing about your credentials was checked.',
@@ -46,12 +49,12 @@ const SSO_REASONS = {
   account_refused:
     'You were signed in to the identity provider successfully, but this console will not '
     + 'issue a session for that account. The most common causes are a username that '
-    + 'already belongs to a local account, and a directory group this console does not '
-    + 'permit.',
+    + 'already belongs to a local account, a username that belongs to a different '
+    + 'sign-in method, and a directory group this console does not permit.',
 };
 
 export default function Login() {
-  const { ldapEnabled, ssoEnabled, sso, ssoFailure, login, startSso } = useAuth();
+  const { ldapEnabled, ssoProviders, ssoFailure, login, startSso } = useAuth();
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [source, setSource] = useState('auto');
@@ -163,21 +166,30 @@ export default function Login() {
           </Button>
         </Form>
 
-        {/* Offered only when the deployment has a usable issuer AND client id.
-            A button that leads to an error reads as a broken console; no button
-            reads as "SSO is not set up here", which is both true and the thing
-            an operator can act on. */}
-        {ssoEnabled && (
+        {/* One button per configured provider, and none for a provider that is
+            only half-configured — the backend withholds those, because a button
+            that leads to an error reads as a broken console while no button
+            reads as "this is not set up here", which is both true and the thing
+            an operator can act on.
+
+            Each carries its own label, because a deployment offering two of
+            these has to be able to say which is which: "Single sign-on" twice
+            is a choice nobody can make. */}
+        {ssoProviders.length > 0 && (
           <>
             <Divider className="admin-login__divider" />
-            <Button
-              variant="secondary"
-              isBlock
-              onClick={startSso}
-              data-testid="login-sso"
-            >
-              {sso?.label || 'Single sign-on'}
-            </Button>
+            {ssoProviders.map((provider) => (
+              <Button
+                key={provider.name}
+                variant="secondary"
+                isBlock
+                className="admin-login__sso"
+                onClick={() => startSso(provider.name)}
+                data-testid={`login-sso-${provider.name}`}
+              >
+                {provider.label || 'Single sign-on'}
+              </Button>
+            ))}
           </>
         )}
       </section>

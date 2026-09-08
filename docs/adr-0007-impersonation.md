@@ -200,6 +200,10 @@ for it; the parenthetical says where it lives.
 >    effect.
 > 2. **OIDC sessions only.** A local or LDAP session on an impersonating cluster
 >    gets a refusal naming the reason, not a fallback to the ServiceAccount.
+>    (Amended — see *Which sign-in methods qualify*, below. The set is now OIDC
+>    **and** the cluster's own OpenShift OAuth server, and the amendment narrows
+>    the test rather than widening it: the question was never "is this single
+>    sign-on".)
 > 3. **Absent groups refuses.** An OIDC identity whose groups claim was absent
 >    cannot impersonate; empty is fine, unknown is not.
 > 4. **No silent fallback, anywhere.** Every call is either impersonated or
@@ -216,7 +220,7 @@ for it; the parenthetical says where it lives.
 | # | Where it is enforced | The test that would fail |
 |---|---|---|
 | 1 | `Cluster.impersonation_enabled`, nullable and read through `bool()`; echoed by `to_public_dict`; refused at the form by `_validate_impersonation` when the console has no OIDC | `test_a_cluster_that_did_not_ask_is_not_impersonated`, `test_a_null_flag_is_off_rather_than_a_third_state`, `test_the_flag_is_surfaced_like_skip_tls_verify`, `test_turning_it_on_without_oidc_is_refused_at_the_form` |
-| 2 | `impersonation.decide` on `auth_source`, and again on `settings.auth_enabled` for legacy proxy mode | `test_a_password_session_cannot_become_a_cluster_identity`, `test_legacy_proxy_mode_cannot_impersonate`, `test_the_refusal_is_not_rbac_denied` |
+| 2 | `impersonation.decide` against `IMPERSONATION_SOURCES`, and again on `settings.auth_enabled` for legacy proxy mode | `test_a_password_session_cannot_become_a_cluster_identity`, `test_legacy_proxy_mode_cannot_impersonate`, `test_the_refusal_is_not_rbac_denied`, `test_only_the_two_cluster_native_sources_may_impersonate`, `test_a_saml_session_cannot_act_as_a_cluster_identity`, `test_an_openshift_session_may_act_as_the_cluster_identity` |
 | 3 | `decide` on `idp_groups is None`; `_decode_groups` degrades an unparseable blob to absent rather than empty | `test_an_absent_groups_claim_refuses`, `test_an_empty_groups_claim_impersonates` |
 | 4 | `decide` raises inside `get_clients` before a bundle exists; `impersonatable` is a property of the transport; `as_service_account` is the only suppression and its call sites are enumerated | `test_a_refused_session_never_receives_a_transport`, `test_a_transport_that_may_never_impersonate_ignores_the_decision`, `test_the_service_account_exemptions_are_exactly_these` |
 | 5 | `AuditRecord.impersonated_user` read from request context; `subject` on every `PreflightResult` and in `RBACDenied.message` | `test_the_audit_row_records_the_console_user_and_the_cluster_identity`, `test_a_denial_names_the_subject_it_was_refused_for` |
@@ -247,6 +251,65 @@ whole claim this feature makes is that the console asserts an identity the
 cluster would have derived itself. It is the one group sent that the issuer did
 not state, it is a named constant, and `deploy/rbac.yaml`'s commented grant lists
 it first so the `resourceNames` set matches what is actually sent.
+
+### Which sign-in methods qualify
+
+*Amendment, recorded when the console grew four single sign-on providers rather
+than one.* Condition 2 above was written when there was exactly one, and it named
+that one. With `oidc`, `oauth`, `openshift` and `saml` all able to authenticate
+somebody, "OIDC sessions only" had to be restated as the rule it was always
+standing in for, and the restatement is `IMPERSONATION_SOURCES` in
+`app/k8s/impersonation.py`: **`oidc` and `openshift`, and nothing else.**
+
+The line is **not** "did an external system authenticate them". Four of the six
+methods satisfy that reading, and it is the wrong question. The right one is the
+one this ADR has been asking throughout: *would the API server have derived this
+same username and group list had the operator presented their own credential to
+it?* Only then is the console asserting an identity rather than inventing one,
+and inventing one is what the whole document refuses.
+
+* **`oidc` qualifies** because a Kubernetes API server can be pointed at the very
+  same issuer with `--oidc-issuer-url`, and then `Impersonate-User` carries the
+  name that issuer's own token would have produced. Whether a given deployment
+  did point it there is the operator's to get right; getting it wrong produces
+  denials for an identity nobody holds, which is visible and is not a silent
+  grant.
+* **`openshift` qualifies more strongly than anything else here**, and it is the
+  case that makes the restated rule obviously correct rather than merely
+  defensible: the username and groups are read from the cluster's own `User`
+  object, by the cluster, in response to a token the cluster minted. There is no
+  second system whose opinion has to line up with the API server's, because there
+  is no second system. This is the closest the feature gets to its own claim —
+  "the console asserts an identity the cluster would have derived itself" — being
+  literally true.
+* **`oauth` and `saml` do not qualify**, and not because the provider is
+  untrustworthy. It genuinely authenticated somebody, and asserted it in a
+  vocabulary no API server consumes. A bare OAuth 2.0 userinfo field named by
+  `OAUTH_USERNAME_FIELD`, and a SAML `NameID`, are names *this console chose the
+  shape of*. Putting one in `Impersonate-User` and calling it the operator's
+  cluster identity is exactly the invention rejected under *"Impersonating groups
+  the console derived rather than received"* — the same act, applied to the
+  username instead of the groups.
+* **`local` and `ldap` do not qualify** for the reason condition 2 originally
+  gave: the password table and the directory bind are this console's own.
+
+An operator who needs impersonation behind a SAML IdP or a plain OAuth server has
+a real answer that does not require widening this set: put an OIDC broker (Dex,
+Keycloak) in front of it and configure *that* as the issuer for both this console
+and the API server's `--oidc-issuer-url`. That is a deployment they can verify,
+rather than a claim only this console makes.
+
+**Widening `IMPERSONATION_SOURCES` is an amendment to this ADR, not a
+configuration change.** It is a frozenset in one module with a test asserting its
+exact contents, so adding a provider to it is a deliberate act that shows up in a
+diff — which is the whole value of `decide` refusing rather than falling back.
+
+One thing is *not* conditioned on this set: every provider's own username and
+groups are captured onto the session at the callback, including the two that may
+not impersonate. The callback is the only place in the tree holding a verified
+assertion, and a session that did not capture them there can never reconstruct
+them. Deciding which sources qualify is a decision this document may revisit;
+that revision must not be blocked by sessions that never carried the values.
 
 ### The audit column is hashed only when it is set
 
@@ -295,7 +358,9 @@ written for.
   and the standard this ADR applies to attribution.
 - `docs/adr-0006-projects.md` — where the gap was named as the next architectural
   step, and why §17 asks for the subject.
-- `docs/api-contract.md` §12 — what the console's own identity is and is not.
+- `docs/api-contract.md` §12 — what the console's own identity is and is not,
+  including the four single sign-on providers and which of them this document
+  admits.
 - `docs/rbac.md` — every permission by feature, and the ServiceAccount they all
   belong to.
 - `docs/api-contract.md` §27 — the normative shape: the flag, the error code, the

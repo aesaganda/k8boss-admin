@@ -7,8 +7,8 @@ const AuthContext = createContext(null);
 /**
  * Read and clear a failed single sign-on from the URL.
  *
- * The OIDC callback is a browser navigation, so it cannot answer with a §1.3
- * error envelope — the SPA is not listening, the address bar is. It redirects
+ * A single sign-on callback is a browser navigation, so it cannot answer with a
+ * §1.3 error envelope — the SPA is not listening, the address bar is. It redirects
  * back carrying `auth_error` (a §1.3 code, so the app has one vocabulary rather
  * than two) and `auth_reason` (a slug the login page words).
  *
@@ -98,7 +98,7 @@ export function AuthProvider({ children }) {
   }, []);
 
   /**
-   * Leave the SPA for the identity provider.
+   * Leave the SPA for one identity provider.
    *
    * A full-page navigation, deliberately: the handshake needs a real browsing
    * context (the IdP renders a login form, often a second factor, sometimes a
@@ -109,9 +109,9 @@ export function AuthProvider({ children }) {
    * The current path rides along so an operator who was deep-linked to a page
    * and got bounced to sign in lands back where they were going.
    */
-  const startSso = useCallback(() => {
+  const startSso = useCallback((provider = 'oidc') => {
     const next = `${window.location.pathname}${window.location.search}`;
-    window.location.assign(authApi.ssoStartUrl(next));
+    window.location.assign(authApi.ssoStartUrl(provider, next));
   }, []);
 
   const logout = useCallback(async () => {
@@ -122,11 +122,28 @@ export function AuthProvider({ children }) {
     }
   }, [clearSession]);
 
+  const providers = useMemo(() => {
+    if (Array.isArray(config?.ssoProviders)) return config.ssoProviders;
+    if (config?.oidcEnabled && config?.oidc) {
+      return [{ name: 'oidc', label: config.oidc.label, startPath: config.oidc.startPath }];
+    }
+    return [];
+  }, [config]);
+
   const value = useMemo(
     () => ({
       enabled: Boolean(config?.enabled),
       ldapEnabled: Boolean(config?.ldapEnabled),
-      ssoEnabled: Boolean(config?.oidcEnabled),
+      // Every configured single sign-on provider, in the order the backend
+      // listed them. Reading the list rather than `oidcEnabled` is what lets the
+      // login page draw a button for OAuth 2.0, OpenShift or SAML.
+      //
+      // The fallback is the mirror of the backend keeping `oidc` alive: a
+      // frontend deployed against a backend that predates `ssoProviders` would
+      // otherwise show no sign-in button at all, which is a console nobody can
+      // log in to produced by a release that changed no behaviour.
+      ssoProviders: providers,
+      ssoEnabled: providers.length > 0,
       sso: config?.oidc ?? null,
       methods: config?.methods ?? ['local'],
       user,
@@ -138,7 +155,7 @@ export function AuthProvider({ children }) {
       startSso,
       refresh,
     }),
-    [config, user, loading, error, ssoFailure, login, logout, startSso, refresh],
+    [config, providers, user, loading, error, ssoFailure, login, logout, startSso, refresh],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

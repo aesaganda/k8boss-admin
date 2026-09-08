@@ -1371,18 +1371,34 @@ trace.
 
 Authentication is disabled by default for compatibility with deployments that
 already put an authenticating proxy in front. When `AUTH_ENABLED=true`, every
-HTTP and WebSocket API except `GET /api/health`, `GET /api/auth/config`,
-`POST /api/auth/login`, `GET /api/auth/oidc/start` and
-`GET /api/auth/oidc/callback` requires a valid opaque session cookie. Unsafe HTTP
-methods also require the session's `X-CSRF-Token`. Session bearer tokens are
-HttpOnly cookies and only their SHA-256 digests are stored.
+HTTP and WebSocket API requires a valid opaque session cookie, except:
 
-The two OIDC routes are public because single sign-on **is how a session is
+* `GET /api/health`, `GET /api/auth/config`, `POST /api/auth/login`;
+* `GET /api/auth/{provider}/start` and `GET /api/auth/{provider}/callback` for
+  each of the four single sign-on providers (§12.4);
+* `POST /api/auth/saml/acs` and `GET /api/auth/saml/metadata`.
+
+Unsafe HTTP methods also require the session's `X-CSRF-Token`. Session bearer
+tokens are HttpOnly cookies and only their SHA-256 digests are stored.
+
+The sign-on routes are public because single sign-on **is how a session is
 obtained** — challenging them for one is a deadlock whose symptom is a sign-in
-button that answers 401. Public is not unprotected: `/start` mints a sealed
-handshake and redirects, and `/callback` refuses anything that does not match a
-handshake this console started, issuing a session only after a
-signature-verified assertion.
+button that answers 401. The list is **exact paths built from the provider
+registry**, never a prefix rule: "anything under `/api/auth/`" is one route away
+from exempting something that should never have been.
+
+Public is not unprotected. `/start` mints a sealed handshake and redirects; a
+callback refuses anything that does not match a handshake this console started
+and issues a session only after a verified assertion. `POST /api/auth/saml/acs`
+is the one unauthenticated POST in this API, and it is exempt from the CSRF check
+for a reason that does not generalise: the request comes from the identity
+provider's origin, and demanding a token from a party that has never seen a page
+of this console is not a check, it is a guaranteed failure. What stands in its
+place is the assertion itself — a signature checked against a configured
+certificate, and an `InResponseTo` *inside that signed subtree* which must equal
+the request id sealed in the browser's own handshake cookie. **A future POST
+route in this list needs its own answer to that question rather than inheriting
+this one.**
 
 ### 12.1 `GET /api/auth/config`
 
@@ -1390,19 +1406,37 @@ Public discovery:
 
 ```json
 { "enabled": true, "localEnabled": true, "ldapEnabled": true, "oidcEnabled": true,
-  "methods": ["local", "ldap", "oidc"],
+  "methods": ["local", "ldap", "oidc", "openshift"],
+  "ssoProviders": [
+    { "name": "oidc", "label": "Single sign-on", "startPath": "/api/auth/oidc/start" },
+    { "name": "openshift", "label": "OpenShift", "startPath": "/api/auth/openshift/start" }
+  ],
   "oidc": { "label": "Single sign-on", "startPath": "/api/auth/oidc/start" } }
 ```
 
 It names *which* methods exist and never how they are wired. This is the one
 unauthenticated endpoint in the API, and the login page only needs to know which
-buttons to draw; returning the issuer, the client id or the configured groups
-would let anyone who can reach the console enumerate its identity provider.
+buttons to draw; returning an issuer, a client id, an API server address or the
+configured groups would let anyone who can reach the console enumerate its
+identity infrastructure.
 
-`oidcEnabled` is true only when `AUTH_ENABLED`, `OIDC_ENABLED`, `OIDC_ISSUER` and
-`OIDC_CLIENT_ID` are all set. A half-configured deployment shows no SSO button,
-because a button that leads to an error reads as a broken console rather than an
-unconfigured one.
+`ssoProviders` is the general form: one entry per configured provider, in a
+stable order, each with the label its button carries. A deployment offering two
+of them has to be able to say which is which — "Single sign-on" twice is a choice
+nobody can make.
+
+A provider appears **only when every value its flow needs is present**, and only
+when `AUTH_ENABLED` is set. A half-configured deployment shows no button for that
+provider, because a button that leads to an error reads as a broken console
+rather than an unconfigured one; and a console that is not authenticating
+requests has no session to issue, so a handshake would end back at a console that
+never asked who the operator was.
+
+`oidcEnabled` and `oidc` are the OpenID Connect entry of `ssoProviders`,
+repeated. They are retained rather than removed because a browser holding an
+older build of the SPA reads them, and dropping them would take that deployment's
+sign-in button away at the moment the backend was upgraded — a console nobody can
+log in to, produced by a release that changed no behaviour.
 
 ### 12.2 `POST /api/auth/login`
 
@@ -1428,43 +1462,158 @@ server-side session and clears the cookie. A logout carrying no session revokes
 nothing and records nothing — a sign-out row for somebody who was never signed in
 is noise in the one table that must not have any.
 
-### 12.4 Single sign-on (OpenID Connect)
+### 12.4 Single sign-on
 
-One issuer per deployment, configured from the environment exactly as LDAP is
-(`OIDC_*`, see the README). Multiple concurrent issuers is a real design change —
-a table, a CRUD surface, per-row encrypted secrets and a subject-collision story
+**Four providers, one of each per deployment**, all configured from the
+environment exactly as LDAP is:
+
+| `name` | What it is | Where identity comes from | Settings |
+|---|---|---|---|
+| `oidc` | An OpenID Connect issuer | A signed ID token, verified completely | `OIDC_*` |
+| `oauth` | A plain OAuth 2.0 authorization server (GitHub, GitLab, a non-OIDC Keycloak client) | A userinfo endpoint read with the access token | `OAUTH_*` |
+| `openshift` | The cluster's own built-in OAuth server | `users/~`, read from the cluster with the access token | `OPENSHIFT_*` |
+| `saml` | A SAML 2.0 identity provider | A signed assertion, read out of the verified subtree | `SAML_*` |
+
+Several concurrent providers **of the same kind** is a real design change — a
+table, a CRUD surface, per-row encrypted secrets and a subject-collision story
 across issuers — not a config key, and the console says it does not do that
-rather than half-doing it.
+rather than half-doing it. Four different kinds do not collide the same way: each
+account row carries the `auth_source` that owns it, so a username two of them
+assert is refused rather than merged (see **Account binding** below).
 
-#### `GET /api/auth/oidc/start?next=<path>`
+The routes are generic. There is one `/start`, one callback per binding, and one
+place where the throttle, the audit calls, the account provisioning and the
+failure redirect are written — because four hand-written route pairs would be
+four copies of those, and the first one to lose a copy would be invisible from
+outside: same status, same shape, no failing test, and a hole in the audit trail
+found later by somebody asking who signed in.
 
-302 to the issuer's authorization endpoint: Authorization Code flow with PKCE
-S256, carrying `state` and `nonce`. Those four values plus the exact
-`redirect_uri` are sealed into a short-lived cookie.
+An unknown `{provider}` is a **404**, checked before anything else happens: the
+failure redirect interpolates the name, so an unvalidated one would be reflected
+into a URL this console sends a browser to. `GET /api/auth/saml/callback` is a
+404 for the same reason — SAML's assertion arrives on a POST at `.../acs`, and a
+console that also answered on the redirect path would let the URL an
+administrator registered and the URL it answers on silently differ.
+
+#### `GET /api/auth/{provider}/start?next=<path>`
+
+302 to the provider, carrying whatever binds the response to this sign-in:
+
+* `oidc` — Authorization Code + PKCE S256, with `state` and `nonce`.
+* `oauth` and `openshift` — Authorization Code + PKCE S256, with `state` and
+  **no** `nonce`. A nonce binds an ID token; there is none here, and a parameter
+  nothing ever checks is what a later reader mistakes for a protection in force.
+* `saml` — a DEFLATE-compressed `AuthnRequest` on the HTTP-Redirect binding. Its
+  `ID` is the value the assertion's `InResponseTo` must equal, and it is sealed
+  in the handshake as `state` for exactly that comparison.
+
+Those values plus the exact callback URL are sealed into a short-lived cookie,
+**one per provider** — name and path both carry the provider, and the provider is
+written inside the sealed payload and checked on unseal. An operator can click
+the wrong button, go back and click another; a shared cookie would let the second
+handshake overwrite the first and would let one provider's callback consume a
+handshake the other started, which is how a flow with weaker checks completes a
+sign-in a stronger one began.
 
 `next` must be a same-origin path. An absolute URL, a scheme-relative
 `//host`, or anything containing a backslash becomes `/`. A login link carrying
 `?next=https://evil.example` would otherwise produce a page on this console's
 domain that authenticates the operator and hands them to somebody else's site.
 
-The handshake cookie is `SameSite=Lax`, **not** `Strict` like the session cookie.
-The callback is a top-level navigation from the issuer's origin, and browsers do
-not send a `Strict` cookie on a cross-site navigation — a `Strict` handshake
-cookie is simply absent when the callback runs, and every sign-in fails.
+**The handshake cookie's `SameSite` differs by binding, and neither value is
+`Strict`.** The redirect providers use `Lax`: their callback is a top-level
+navigation from the provider's origin, and browsers do not send a `Strict` cookie
+on a cross-site navigation, so a `Strict` handshake cookie is simply absent when
+the callback runs and every sign-in fails. SAML uses `None` and therefore
+`Secure`: its assertion arrives on a cross-site *form POST*, which carries no
+`Lax` cookie either. Since browsers discard a `SameSite=None` cookie that is not
+`Secure`, **SAML is not offered at all unless `AUTH_COOKIE_SECURE` is set** —
+the same rule as a missing client id, applied to a prerequisite that is easy to
+miss.
 
-#### `GET /api/auth/oidc/callback`
+#### `GET /api/auth/{provider}/callback` — `oidc`, `oauth`, `openshift`
 
-Verifies the ID token completely before reading a single claim from it:
-signature against the issuer's JWKS, an **algorithm allowlist** (asymmetric only
-— never the token's own `alg`), `iss`, `aud`, `exp`/`iat` as required claims, and
-the `nonce` against this browser's handshake. Then the PKCE verifier is presented
-on the code exchange.
+`state` is compared against the sealed handshake before anything else. Then the
+provider's own verification runs:
 
-Each of those has a specific attack behind it: a token minted by the same issuer
-for a different client is valid and correctly signed, so without an audience check
-anyone holding one can sign in here; `alg: none` and HS256-with-the-public-key
-both work against a verifier that trusts the token's header; and without a nonce
-an assertion captured from any other sign-in can be replayed.
+* **`oidc`** verifies the ID token completely before reading a single claim from
+  it: signature against the issuer's JWKS, an **algorithm allowlist**
+  (asymmetric only — never the token's own `alg`), `iss`, `aud`, `exp`/`iat` as
+  required claims, and the `nonce` against this browser's handshake. Then the
+  PKCE verifier is presented on the code exchange. Each has a specific attack
+  behind it: a token minted by the same issuer for a different client is valid
+  and correctly signed, so without an audience check anyone holding one can sign
+  in here; `alg: none` and HS256-with-the-public-key both work against a verifier
+  that trusts the token's header; and without a nonce an assertion captured from
+  any other sign-in can be replayed.
+* **`oauth`** has no signed assertion to verify, and the trust argument is
+  different rather than weaker: the console exchanges a PKCE-protected code for
+  an access token at the configured token endpoint over a verified TLS
+  connection, then spends that token on one read of the configured userinfo
+  endpoint. A 200 there is the *provider* resolving that token to a person; a
+  token this console was fed rather than issued gets 401. The one specific cost
+  is that **the identity is only as good as the TLS verification of that call** —
+  with a signed ID token a compromised channel still cannot forge an assertion,
+  and here it can. `OAUTH_VERIFY_TLS=false` is therefore not an inconvenience
+  switch on this provider.
+* **`openshift`** is the same shape with a stronger party: the access token was
+  minted by the cluster's own OAuth server and it is the **cluster** that
+  resolves it, at `GET /apis/user.openshift.io/v1/users/~`. The token is spent
+  once and dropped, so the console stores no cluster credential. The subject is
+  `metadata.uid`, not the name.
+
+#### `POST /api/auth/saml/acs`
+
+The Assertion Consumer Service. The body is `application/x-www-form-urlencoded`
+per the HTTP-POST binding, and only `SAMLResponse` is read — `RelayState` is
+neither read nor honoured, because the identity provider echoes it and an
+attacker who can make the IdP POST can choose it. The destination after sign-in
+comes from the sealed cookie, where nobody outside this console can have set it.
+
+**Everything the console reads comes out of the subtree the signature check
+returned, and nothing is ever read from the document as posted.** That is the
+whole defence against XML Signature Wrapping, in which the attacker leaves a
+genuinely signed assertion where the verifier looks and puts a forged one where
+the reader looks — both halves true at once, so the signature verifies and the
+identity is the attacker's. It is a property of the code's shape rather than a
+check, because "verify, then re-read the document" is what a check-based
+implementation degrades into.
+
+Verified, in this order: the signature (over the `Response` or over the
+`Assertion` — both shapes are in the wild) against a configured certificate, of
+which several may be listed so a signing-key rotation is a config change rather
+than an outage; the `Issuer` against `SAML_IDP_ENTITY_ID`, without which a
+certificate this console trusts could sign for any issuer; the `Audience`
+against this console's entity ID, which is the SAML spelling of `aud`;
+`InResponseTo` against the sealed `AuthnRequest` id; `Recipient` and
+`Destination` against the ACS URL; the condition and subject-confirmation
+windows, with `SAML_CLOCK_SKEW_SECONDS` of leeway and **no expiry treated as a
+refusal**; and the presence of an `AuthnStatement`, because an assertion carrying
+only attributes is a statement *about* somebody rather than a statement that they
+just authenticated.
+
+Three refusals are named rather than folded into "invalid", because the
+administrator's next action differs for each: an **encrypted assertion** (this
+console holds no decryption key and will not read the envelope instead), an
+**unsolicited IdP-initiated response** (no `InResponseTo`, so nothing binds it to
+a browser and anyone could replay it into anyone else's), and a **plain-HTTP
+deployment** (`AUTH_COOKIE_SECURE` unset, so the handshake cookie can never come
+back).
+
+Replay is bounded by the handshake rather than by an assertion-id store: the
+sealed cookie is deleted the moment the ACS runs and is unreadable after ten
+minutes regardless. A one-time-use store would be strictly stronger and needs a
+table this flow deliberately does not have.
+
+#### `GET /api/auth/saml/metadata`
+
+This console's SP metadata — `entityID`, the ACS URL, the binding — served only
+when SAML is enabled, so it can never describe an endpoint that would refuse the
+assertion it invites. It advertises no certificate, because the console has
+none: it does not sign its `AuthnRequest` and cannot decrypt an assertion, and
+advertising a key it does not hold is how an IdP ends up encrypting to nobody.
+
+#### Every callback, after verification
 
 Success sets the session cookie and 302s to `next`. Failure 302s to `next`
 carrying `?auth_error=<§1.3 code>&auth_reason=<slug>`. It cannot answer with a
@@ -1474,7 +1623,7 @@ login page words the slug; an unrecognised slug is rendered verbatim rather than
 replaced with something generic.
 
 **Nothing is written to the audit trail before the handshake is verified**, and
-this route is public, so that rule is load-bearing rather than tidy. Every path
+these routes are public, so that rule is load-bearing rather than tidy. Every path
 reachable before the sealed cookie is checked is reachable by anyone who can
 reach the console, and an audit write on one of them is an unauthenticated
 INSERT into the one table in this schema with no upper bound on rows — a loop
@@ -1488,14 +1637,16 @@ state mismatch, a rejected assertion, a refused account.
 
 #### Account binding
 
-A federated identity is bound to the provider's `sub` claim, stored as
-`users.external_id`. Two refusals, both `permission_denied`, both refusals rather
-than merges:
+A federated identity is bound to the provider's stable subject, stored as
+`users.external_id` — `sub` for OIDC, `OAUTH_SUBJECT_FIELD` for OAuth,
+`metadata.uid` for OpenShift, the `NameID` for SAML. Two refusals, both
+`permission_denied`, both refusals rather than merges:
 
 * **A username already owned by another auth source.** If `alice` is a local
   account with a password, an SSO assertion naming `alice` must not adopt it —
   otherwise anyone who can make an issuer assert a username inherits whatever
-  that username already had.
+  that username already had. This holds *between* providers too: a username
+  belonging to an `oidc` account is refused to the `saml` one.
 * **A username already bound to a different subject.** The subject is the
   provider's stable identity; the username is a label it can reuse. A mismatch is
   either a recycled name or a second issuer asserting the same one.
@@ -1509,12 +1660,15 @@ watching.
 
 #### Group mapping, and the two opposite rules
 
-`OIDC_ADMIN_GROUP` maps its members to `admin`; every other resolved membership
-maps to `user`. `OIDC_ALLOWED_GROUPS`, when set, restricts who may sign in at all.
+Each provider's `*_ADMIN_GROUP` maps its members to `admin`; every other resolved
+membership maps to `user`. Each `*_ALLOWED_GROUPS`, when set, restricts who may
+sign in at all.
 
-The groups claim can be **absent** rather than empty, and the two are not the
-same fact. Most issuers omit it entirely unless the scope was requested *and* the
-client is configured to emit it, so absent is the common state during setup.
+Membership can be **absent** rather than empty — a claim not in a token, a field
+not in a userinfo document, a `groups` key not in a `User` object, an attribute
+not released by a SAML IdP — and the two are not the same fact. Most providers
+omit it entirely unless it was asked for, so absent is the common state during
+setup.
 
 * **Role mapping fails open**: an absent claim leaves the account's stored role
   unchanged. Writing the default there would demote an administrator every time
@@ -1530,6 +1684,24 @@ client is configured to emit it, so absent is the common state during setup.
 
 The same tri-state governs LDAP: `memberOf` absent from an entry leaves the
 stored role alone.
+
+#### Which sessions may act as a cluster identity
+
+`oidc` and `openshift` only — see `docs/adr-0007-impersonation.md`. The line is
+not "did an external system authenticate them", which four of the six sign-in
+methods satisfy. It is: **would the API server have derived this same username
+and group list had the operator presented their own credential to it?** A
+Kubernetes API server can be pointed at the same OIDC issuer; an OpenShift
+cluster *is* the party that produced the name. A bare OAuth 2.0 userinfo field
+and a SAML `NameID` are names this console chose the shape of, and putting one in
+`Impersonate-User` is the invention ADR-0007 refuses. An operator who needs
+impersonation behind a SAML IdP puts an OIDC broker in front of it and configures
+that as the issuer for both the console and the API server.
+
+Every provider's own username and groups are still captured on the session,
+including the two that may not impersonate: which sources qualify is ADR-0007's
+decision to revisit, and it cannot be revisited for a session that never carried
+the values.
 
 ### 12.5 Sign-in rate limiting
 
@@ -1565,8 +1737,8 @@ Administrator-only. `GET` returns the standard list envelope; `POST` creates a
 local user; `PUT /{id}` updates profile, role, state, or a local password;
 `DELETE /{id}` deactivates the account and revokes all sessions. Password hashes
 never appear in responses. The current user and final active administrator
-cannot be deactivated. LDAP and OIDC passwords and roles are provider-managed and
-are refreshed at login **when the provider reports group membership** — when it
+cannot be deactivated. Every non-local auth source has provider-managed passwords
+and roles, refreshed at login **when the provider reports group membership** — when it
 does not, the stored role is left alone rather than reset (§12.4). The `admin` role gates this
 user-administration surface; both `admin` and `user` identities retain the
 console's normal cluster capabilities, still constrained by preflight and the

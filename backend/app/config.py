@@ -540,6 +540,276 @@ class Settings(BaseSettings):
         description="Text on the login page's SSO button.",
     )
 
+    # -- Generic OAuth 2.0 single sign-on ---------------------------------
+    #
+    # An OAuth 2.0 authorization server that is *not* an OpenID Connect
+    # provider: GitHub, GitLab, Gitea, Bitbucket, a bare Keycloak client with
+    # OIDC turned off. It issues an access token and no ID token, publishes no
+    # JWKS and usually no discovery document, so identity comes from a userinfo
+    # endpoint read with the freshly-minted token rather than from a signature
+    # this console can check. See app.identity.oauth for why that is a different
+    # trust argument rather than a weaker version of the same one.
+    oauth_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("OAUTH_ENABLED", "oauth_enabled"),
+        description=(
+            "Offer generic OAuth 2.0 single sign-on. Requires AUTH_ENABLED plus "
+            "OAUTH_AUTHORIZATION_URL, OAUTH_TOKEN_URL, OAUTH_USERINFO_URL and "
+            "OAUTH_CLIENT_ID; without all of them the login page shows no "
+            "button, because a button that cannot work reads as a broken "
+            "console rather than an unconfigured one."
+        ),
+    )
+    oauth_authorization_url: str = Field(
+        default="",
+        max_length=2048,
+        description=(
+            "Where the browser is sent to begin the flow. Configured rather than "
+            "discovered: a bare OAuth 2.0 server is not required to publish "
+            "metadata anywhere, and RFC 8414 is served by a minority of them."
+        ),
+    )
+    oauth_token_url: str = Field(default="", max_length=2048)
+    oauth_userinfo_url: str = Field(
+        default="",
+        max_length=2048,
+        description=(
+            "The endpoint read with the access token to learn who signed in. "
+            "Required: without it the token is an opaque string that asserts "
+            "nothing, and a console that issued a session from it would be "
+            "signing people in on the strength of a successful HTTP call."
+        ),
+    )
+    oauth_client_id: str = Field(default="", max_length=512)
+    oauth_client_secret: SecretStr = Field(
+        default=SecretStr(""),
+        description=(
+            "Optional. Omit for a public client, where PKCE alone protects the "
+            "code exchange. Most OAuth 2.0 servers that are not OIDC providers "
+            "require it."
+        ),
+    )
+    oauth_scopes: str = Field(
+        default="",
+        max_length=512,
+        description=(
+            "Space-separated scopes. Empty sends none, which is what several "
+            "servers want; 'openid profile email' is an OIDC vocabulary and is "
+            "rejected as unknown by some of the servers this provider exists "
+            "for, so it is deliberately not the default."
+        ),
+    )
+    oauth_redirect_url: str = Field(
+        default="",
+        max_length=2048,
+        description=(
+            "The absolute callback URL registered at the provider. Empty derives "
+            "it from the forwarded host — right behind one well-configured "
+            "ingress and wrong behind anything that rewrites Host."
+        ),
+    )
+    oauth_subject_field: str = Field(
+        default="sub",
+        max_length=128,
+        description=(
+            "Userinfo field holding the provider's stable identifier for the "
+            "person. It is what the account is bound to, so a provider that "
+            "names it something else — GitHub's 'id', GitLab's 'id' — must say "
+            "so here or a renamed account becomes a different person. Dotted "
+            "paths ('data.viewer.id') address a nested field."
+        ),
+    )
+    oauth_username_field: str = Field(default="preferred_username", max_length=128)
+    oauth_email_field: str = Field(default="email", max_length=128)
+    oauth_display_name_field: str = Field(default="name", max_length=128)
+    oauth_groups_field: str = Field(
+        default="groups",
+        max_length=128,
+        description=(
+            "Field carrying group membership. A field the userinfo document does "
+            "not contain is treated as 'not reported' rather than as 'no "
+            "groups': the first leaves an existing role alone, the second would "
+            "demote."
+        ),
+    )
+    oauth_admin_group: str = Field(default="", max_length=512)
+    oauth_allowed_groups: str = Field(
+        default="",
+        max_length=2048,
+        description=(
+            "Comma-separated groups permitted to use the console at all. When it "
+            "is set and the userinfo document carries no groups field, sign-in "
+            "is REFUSED — an allowlist must fail closed."
+        ),
+    )
+    oauth_verify_tls: bool = Field(default=True)
+    oauth_ca_certificate_file: str = Field(default="", max_length=2048)
+    oauth_timeout_seconds: float = Field(default=10.0, gt=0, le=60)
+    oauth_button_label: str = Field(default="OAuth 2.0", max_length=64)
+
+    # -- OpenShift built-in OAuth single sign-on --------------------------
+    #
+    # The cluster's own OAuth server, fronting whatever identity providers the
+    # cluster administrator configured. Not the OIDC provider and not the
+    # generic OAuth one: metadata is RFC 8414 on the API server, the scopes are
+    # OpenShift's own vocabulary, and identity comes from the cluster's
+    # `users/~` virtual endpoint. See app.identity.openshift.
+    openshift_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("OPENSHIFT_ENABLED", "openshift_enabled"),
+        description=(
+            "Offer sign-in through the cluster's built-in OAuth server. Requires "
+            "AUTH_ENABLED plus OPENSHIFT_API_URL and OPENSHIFT_CLIENT_ID."
+        ),
+    )
+    openshift_api_url: str = Field(
+        default="",
+        max_length=2048,
+        description=(
+            "The cluster API server, e.g. https://api.cluster.example.com:6443. "
+            "Both the authorization-server metadata and the users/~ read are "
+            "taken from it, so the flow cannot be half-configured across two "
+            "clusters."
+        ),
+    )
+    openshift_client_id: str = Field(
+        default="",
+        max_length=512,
+        description=(
+            "The OAuthClient resource name, or 'system:serviceaccount:<ns>:<sa>' "
+            "for a ServiceAccount acting as an OAuth client."
+        ),
+    )
+    openshift_client_secret: SecretStr = Field(default=SecretStr(""))
+    openshift_scopes: str = Field(
+        default="user:info",
+        max_length=512,
+        description=(
+            "OpenShift's own scope vocabulary. 'user:info' is the least "
+            "privileged scope that can read users/~ and grants access to nothing "
+            "else in the cluster — a token minted for a console login cannot "
+            "list pods or read secrets. 'openid profile email' is an OIDC "
+            "vocabulary and OpenShift rejects it as unknown."
+        ),
+    )
+    openshift_redirect_url: str = Field(default="", max_length=2048)
+    openshift_admin_group: str = Field(default="", max_length=512)
+    openshift_allowed_groups: str = Field(
+        default="",
+        max_length=2048,
+        description=(
+            "Comma-separated groups permitted to use the console at all. Note "
+            "that OpenShift attaches system:authenticated and "
+            "system:authenticated:oauth to every OAuth login, so listing either "
+            "admits every account the cluster authenticates."
+        ),
+    )
+    openshift_verify_tls: bool = Field(
+        default=True,
+        description=(
+            "Verify the API server's TLS certificate. A cluster with a "
+            "self-signed serving certificate needs OPENSHIFT_CA_CERTIFICATE_FILE "
+            "rather than this turned off: the identity this flow returns is only "
+            "worth what the channel it arrived on is."
+        ),
+    )
+    openshift_ca_certificate_file: str = Field(default="", max_length=2048)
+    openshift_timeout_seconds: float = Field(default=10.0, gt=0, le=60)
+    openshift_button_label: str = Field(default="OpenShift", max_length=64)
+
+    # -- SAML 2.0 single sign-on ------------------------------------------
+    #
+    # SP-initiated Redirect/POST, one identity provider per deployment. The
+    # assertion is verified against a configured certificate and read back out
+    # of the signature's own verified subtree — see app.identity.saml for why
+    # reading it from anywhere else is the attack this whole flow turns on.
+    saml_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("SAML_ENABLED", "saml_enabled"),
+        description=(
+            "Offer SAML 2.0 single sign-on. Requires AUTH_ENABLED, "
+            "SAML_IDP_SSO_URL, SAML_IDP_CERTIFICATE and AUTH_COOKIE_SECURE — the "
+            "last because the assertion arrives on a cross-site POST, which "
+            "carries no SameSite=Lax cookie, so the handshake cookie has to be "
+            "SameSite=None and a browser discards that without Secure. A "
+            "plain-HTTP deployment therefore cannot complete a SAML sign-in, and "
+            "the button is withheld rather than shown broken."
+        ),
+    )
+    saml_idp_entity_id: str = Field(
+        default="",
+        max_length=2048,
+        description=(
+            "The identity provider's entityID. Checked against the assertion's "
+            "Issuer: without it any certificate this console trusts could sign "
+            "an assertion for any issuer."
+        ),
+    )
+    saml_idp_sso_url: str = Field(
+        default="",
+        max_length=2048,
+        description="The IdP's HTTP-Redirect single sign-on endpoint.",
+    )
+    saml_idp_certificate: str = Field(
+        default="",
+        max_length=32_768,
+        description=(
+            "The IdP's signing certificate: PEM, or the bare base64 body as it "
+            "appears in IdP metadata. Several may be concatenated, which is what "
+            "makes a signing-key rotation a config change rather than an outage."
+        ),
+    )
+    saml_sp_entity_id: str = Field(
+        default="",
+        max_length=2048,
+        description=(
+            "This console's entityID, as registered at the IdP. Empty uses "
+            "SAML_ACS_URL, which is the common convention."
+        ),
+    )
+    saml_acs_url: str = Field(
+        default="",
+        max_length=2048,
+        description=(
+            "The absolute Assertion Consumer Service URL registered at the IdP. "
+            "Empty derives it from the forwarded host. It is checked against the "
+            "assertion's Recipient and Destination, so a derived value that does "
+            "not match what was registered fails the sign-in rather than "
+            "quietly accepting an assertion addressed elsewhere."
+        ),
+    )
+    saml_username_attribute: str = Field(
+        default="",
+        max_length=256,
+        description=(
+            "Assertion attribute holding the username. Empty uses the Subject's "
+            "NameID, which every IdP sends."
+        ),
+    )
+    saml_email_attribute: str = Field(default="email", max_length=256)
+    saml_display_name_attribute: str = Field(default="displayName", max_length=256)
+    saml_groups_attribute: str = Field(
+        default="groups",
+        max_length=256,
+        description=(
+            "Attribute carrying group membership. An attribute the assertion "
+            "does not carry is 'not reported', not 'no groups'."
+        ),
+    )
+    saml_admin_group: str = Field(default="", max_length=512)
+    saml_allowed_groups: str = Field(default="", max_length=2048)
+    saml_clock_skew_seconds: int = Field(
+        default=60,
+        ge=0,
+        le=600,
+        description=(
+            "Leeway on NotBefore/NotOnOrAfter. SAML condition windows are often "
+            "five minutes wide, so a console whose clock is a minute behind its "
+            "IdP rejects every assertion and the symptom reads as a broken IdP."
+        ),
+    )
+    saml_button_label: str = Field(default="SAML single sign-on", max_length=64)
+
     # -- Kubernetes transport --------------------------------------------
     # There were no deadlines on the k8boss client at first, and a black-holed
     # connection (an API server behind a firewall that drops rather than resets,

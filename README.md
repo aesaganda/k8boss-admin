@@ -173,7 +173,148 @@ An SSO identity is bound to the issuer's `sub` claim on first login. It cannot
 take over a local account with the same username, and a different `sub`
 presenting an already-bound username is refused rather than merged — otherwise
 anyone who can make an issuer assert a username inherits whatever that username
-already had.
+already had. The same binding, and the same two refusals, apply to the three
+providers below.
+
+### Enable a plain OAuth 2.0 provider
+
+For an authorization server that is **not** an OpenID Connect provider — GitHub,
+GitLab, Gitea, Bitbucket, a Keycloak client with the OIDC protocol switched off.
+It issues an access token and no ID token, so identity comes from a userinfo
+endpoint the console reads with that token rather than from a signature.
+
+```bash
+AUTH_ENABLED=true
+OAUTH_ENABLED=true
+OAUTH_AUTHORIZATION_URL=https://gitlab.example.com/oauth/authorize
+OAUTH_TOKEN_URL=https://gitlab.example.com/oauth/token
+OAUTH_USERINFO_URL=https://gitlab.example.com/api/v4/user
+OAUTH_CLIENT_ID=replace-with-the-application-id
+OAUTH_CLIENT_SECRET=replace-with-the-application-secret
+OAUTH_REDIRECT_URL=https://console.example.com/api/auth/oauth/callback
+OAUTH_SCOPES=read_user
+OAUTH_SUBJECT_FIELD=id
+OAUTH_USERNAME_FIELD=username
+OAUTH_BUTTON_LABEL=GitLab
+AUTH_COOKIE_SECURE=true
+```
+
+Three things are worth getting right at setup time:
+
+* **Name the subject field.** `OAUTH_SUBJECT_FIELD` is the provider's stable
+  identifier for a person, and it is what the console account is bound to.
+  GitHub and GitLab both call it `id`; a bare Keycloak client still calls it
+  `sub`. Point it at a field the userinfo document does not contain and every
+  sign-in is refused — deliberately, because falling back to the username would
+  hand the second holder of a recycled name whatever the first one had. Dotted
+  paths (`data.viewer.id`) address a nested field.
+* **The endpoints are configured, not discovered.** A bare OAuth 2.0 server is
+  not required to publish metadata anywhere. Nothing stops you pointing the
+  authorization URL at one deployment and the token URL at another, and the
+  console cannot tell.
+* **`OAUTH_VERIFY_TLS=false` is not an inconvenience switch on this provider.**
+  With no signed assertion, the verified TLS connection to the userinfo endpoint
+  is the *entire* reason to believe the identity. Use
+  `OAUTH_CA_CERTIFICATE_FILE` for a private CA.
+
+An OAuth 2.0 session cannot act as a cluster identity (ADR-0007) — see
+`OPENSHIFT_ENABLED` below for the provider that can.
+
+### Enable OpenShift sign-in
+
+Lets operators sign in with the identity they already use for `oc login`, through
+the cluster's own OAuth server. Register the console as an `OAuthClient`:
+
+```yaml
+apiVersion: oauth.openshift.io/v1
+kind: OAuthClient
+metadata:
+  name: k8boss-admin
+secret: replace-with-a-generated-secret
+redirectURIs:
+  - https://console.example.com/api/auth/openshift/callback
+grantMethod: prompt
+```
+
+```bash
+AUTH_ENABLED=true
+OPENSHIFT_ENABLED=true
+OPENSHIFT_API_URL=https://api.cluster.example.com:6443
+OPENSHIFT_CLIENT_ID=k8boss-admin
+OPENSHIFT_CLIENT_SECRET=replace-with-a-generated-secret
+OPENSHIFT_REDIRECT_URL=https://console.example.com/api/auth/openshift/callback
+OPENSHIFT_ADMIN_GROUP=platform-admins
+AUTH_COOKIE_SECURE=true
+```
+
+`OPENSHIFT_API_URL` is the **API server**, not the web console route: the
+authorization endpoint, the token endpoint and the `users/~` read are all taken
+from it. A 404 at start-up almost always means this points at the console route.
+
+Identity comes from `GET /apis/user.openshift.io/v1/users/~`, read once with the
+freshly issued access token, which is then dropped. The console stores no cluster
+credential and a console logout has nothing cluster-side to revoke.
+
+Two notes on groups. OpenShift attaches `system:authenticated` and
+`system:authenticated:oauth` to every OAuth login, so listing either in
+`OPENSHIFT_ALLOWED_GROUPS` admits every account the cluster authenticates. They
+are passed through unfiltered on purpose, because genuinely useful cluster groups
+like `system:cluster-admins` cannot be kept without them.
+
+This is the one provider besides OIDC whose sessions may act as a cluster
+identity under ADR-0007, and it is the strongest case for it: the username and
+groups are the cluster's own record, read from the cluster.
+
+### Enable SAML 2.0 sign-in
+
+For ADFS, Shibboleth, PingFederate, or an Okta/Entra application registered as
+SAML rather than OIDC. Point your identity provider at
+`https://<your-console-host>/api/auth/saml/acs`, or hand it
+`https://<your-console-host>/api/auth/saml/metadata`, which publishes the same
+thing in the form its setup form expects.
+
+```bash
+AUTH_ENABLED=true
+AUTH_COOKIE_SECURE=true          # required, see below
+SAML_ENABLED=true
+SAML_IDP_ENTITY_ID=https://sso.example.com/idp/shibboleth
+SAML_IDP_SSO_URL=https://sso.example.com/idp/profile/SAML2/Redirect/SSO
+SAML_IDP_CERTIFICATE="MIID...the base64 from <ds:X509Certificate>..."
+SAML_SP_ENTITY_ID=https://console.example.com/saml
+SAML_ACS_URL=https://console.example.com/api/auth/saml/acs
+SAML_GROUPS_ATTRIBUTE=groups
+SAML_ADMIN_GROUP=k8boss-admins
+```
+
+**SAML needs HTTPS and `AUTH_COOKIE_SECURE=true`, and the button is withheld
+without them.** The assertion arrives on a cross-site form POST, which carries no
+`SameSite=Lax` cookie, so the handshake cookie has to be `SameSite=None` — and
+every current browser discards a `SameSite=None` cookie that is not also
+`Secure`. On plain HTTP the cookie never comes back and every sign-in fails at
+"the sign-in did not match", which reads as a broken identity provider.
+
+Four more things to know:
+
+* **The certificate can be the bare base64 body** copied straight out of
+  `<ds:X509Certificate>` in the IdP's metadata — no PEM wrapping needed. Several
+  may be concatenated, which is what makes an IdP signing-key rotation a config
+  change rather than an outage.
+* **Only SP-initiated sign-on is accepted.** An unsolicited (IdP-initiated)
+  response carries no `InResponseTo`, so nothing binds it to a browser, and
+  accepting one means accepting an assertion anyone can replay into anyone
+  else's session. Start from the console's login page, not from the IdP's
+  application portal.
+* **Turn assertion encryption off for this service provider.** The console holds
+  no decryption key and refuses an `EncryptedAssertion` by name rather than
+  falling back to reading the envelope. The assertion is still signed and still
+  travels inside TLS.
+* **The console does not sign its `AuthnRequest`.** An IdP configured to require
+  a signed request will refuse the handshake with its own error.
+
+A SAML session cannot act as a cluster identity (ADR-0007): a NameID is a name in
+a vocabulary no API server consumes. If you need impersonation behind a SAML IdP,
+put an OIDC broker (Dex, Keycloak) in front of it and configure that as the
+issuer for both the console and the API server's `--oidc-issuer-url`.
 
 ### Register a cluster
 
@@ -919,6 +1060,37 @@ means read-only.
 | `OIDC_TIMEOUT_SECONDS` | `10` | Deadline for discovery, JWKS and token-endpoint calls |
 | `OIDC_CLOCK_SKEW_SECONDS` | `60` | Leeway on `exp`/`iat`. Without any, a console thirty seconds behind its issuer rejects every freshly minted token and the symptom reads as a broken identity provider |
 | `OIDC_BUTTON_LABEL` | `Single sign-on` | Text on the login page's SSO button |
+| `OAUTH_ENABLED` | `false` | Offers generic OAuth 2.0 single sign-on, for an authorization server that is not an OpenID Connect provider. Needs `AUTH_ENABLED` plus the authorization, token and userinfo URLs and a client id |
+| `OAUTH_AUTHORIZATION_URL` / `OAUTH_TOKEN_URL` | *(empty)* | Configured individually, because a bare OAuth 2.0 server is not required to publish metadata anywhere. Nothing stops these pointing at two different deployments and the console cannot tell |
+| `OAUTH_USERINFO_URL` | *(empty)* | The endpoint read with the access token to learn who signed in. Required: without it the flow ends holding an opaque string, and issuing a session from that is signing people in on the strength of a successful HTTP call |
+| `OAUTH_CLIENT_ID` / `OAUTH_CLIENT_SECRET` | *(empty)* | Application credentials. The secret is optional (PKCE alone protects the exchange) but most servers this provider exists for require it |
+| `OAUTH_SCOPES` | *(empty)* | Space-separated. Empty sends none, which is what several servers want; `openid profile email` is an OIDC vocabulary that some of them reject as unknown |
+| `OAUTH_REDIRECT_URL` | *(empty)* | The absolute callback URL registered at the provider. Empty derives it from the forwarded host |
+| `OAUTH_SUBJECT_FIELD` | `sub` | Userinfo field holding the provider's stable identifier — GitHub and GitLab both call it `id`. It is what the account is bound to, so an absent field **refuses** the sign-in rather than falling back to the username, which would hand the second holder of a recycled name whatever the first one had. Dotted paths (`data.viewer.id`) address a nested field |
+| `OAUTH_USERNAME_FIELD` / `OAUTH_EMAIL_FIELD` / `OAUTH_DISPLAY_NAME_FIELD` | `preferred_username` / `email` / `name` | Fields mapped onto the console identity |
+| `OAUTH_GROUPS_FIELD` | `groups` | Field carrying group membership. Absent means "not reported", which leaves an existing role alone; present and empty means "in no groups", which applies the default |
+| `OAUTH_ADMIN_GROUP` / `OAUTH_ALLOWED_GROUPS` | *(empty)* | As the `OIDC_` pair, including the allowlist failing closed when membership is not reported |
+| `OAUTH_VERIFY_TLS` / `OAUTH_CA_CERTIFICATE_FILE` | `true` / *(empty)* | **Load-bearing on this provider.** With no signed assertion, the verified TLS connection to the userinfo endpoint is the entire reason to believe the identity — turning it off means an attacker on the path can choose who signs in |
+| `OAUTH_TIMEOUT_SECONDS` / `OAUTH_BUTTON_LABEL` | `10` / `OAuth 2.0` | Deadline for provider calls; text on the login button |
+| `OPENSHIFT_ENABLED` | `false` | Offers sign-in through the cluster's built-in OAuth server, with the identity used for `oc login`. Needs `AUTH_ENABLED` plus an API server URL and a client id. Sessions from it may act as a cluster identity under ADR-0007 |
+| `OPENSHIFT_API_URL` | *(empty)* | The cluster **API server**, e.g. `https://api.cluster.example.com:6443` — not the web console route. Both the RFC 8414 authorization-server metadata and the `users/~` read come from it, so the flow cannot be half-configured across two clusters |
+| `OPENSHIFT_CLIENT_ID` / `OPENSHIFT_CLIENT_SECRET` | *(empty)* | The `OAuthClient` resource name (or `system:serviceaccount:<ns>:<sa>`) and its secret |
+| `OPENSHIFT_SCOPES` | `user:info` | OpenShift's own scope vocabulary. `user:info` is the least-privileged scope that can read `users/~` and grants access to nothing else — a token minted for a console login cannot list pods. `openid profile email` is rejected as unknown |
+| `OPENSHIFT_REDIRECT_URL` | *(empty)* | The absolute callback URL in the `OAuthClient`'s `redirectURIs` |
+| `OPENSHIFT_ADMIN_GROUP` / `OPENSHIFT_ALLOWED_GROUPS` | *(empty)* | Cluster groups mapped to the `admin` role, and permitted to sign in at all. Note that OpenShift attaches `system:authenticated` and `system:authenticated:oauth` to every OAuth login, so listing either in the allowlist admits every account the cluster authenticates |
+| `OPENSHIFT_VERIFY_TLS` / `OPENSHIFT_CA_CERTIFICATE_FILE` | `true` / *(empty)* | Verify the API server's certificate. A self-signed serving certificate needs the CA file rather than this turned off: the identity this flow returns is only worth what the channel it arrived on is |
+| `OPENSHIFT_TIMEOUT_SECONDS` / `OPENSHIFT_BUTTON_LABEL` | `10` / `OpenShift` | Deadline for cluster calls; text on the login button |
+| `SAML_ENABLED` | `false` | Offers SAML 2.0 single sign-on. Needs `AUTH_ENABLED`, an IdP SSO URL, a certificate — **and `AUTH_COOKIE_SECURE`**, because the assertion arrives on a cross-site POST that carries no `SameSite=Lax` cookie, so the handshake cookie must be `SameSite=None`, which browsers discard without `Secure`. A plain-HTTP deployment cannot complete a SAML sign-in and the button is withheld rather than shown broken |
+| `SAML_IDP_ENTITY_ID` | *(empty)* | The IdP's `entityID`, checked against the assertion's `Issuer`. Without it, any certificate this console trusts could sign an assertion for any issuer — on a shared IdP platform, the difference between one tenant and all of them |
+| `SAML_IDP_SSO_URL` | *(empty)* | The IdP's HTTP-Redirect single sign-on endpoint |
+| `SAML_IDP_CERTIFICATE` | *(empty)* | The IdP's signing certificate: PEM, or the bare base64 body as it appears in `<ds:X509Certificate>`. Several may be concatenated, which makes a signing-key rotation a config change rather than an outage |
+| `SAML_SP_ENTITY_ID` | *(empty)* | This console's `entityID`, checked against the assertion's `Audience`. Empty uses the ACS URL. An assertion the same IdP minted for a *different* service provider is genuine and correctly signed, and this is the check that refuses it |
+| `SAML_ACS_URL` | *(empty)* | The absolute Assertion Consumer Service URL registered at the IdP, checked against the assertion's `Recipient` and `Destination`. Empty derives it from the forwarded host. `GET /api/auth/saml/metadata` publishes it in the form the IdP's setup form expects |
+| `SAML_USERNAME_ATTRIBUTE` | *(empty)* | Attribute holding the username. Empty uses the Subject's `NameID`, which every IdP sends |
+| `SAML_EMAIL_ATTRIBUTE` / `SAML_DISPLAY_NAME_ATTRIBUTE` / `SAML_GROUPS_ATTRIBUTE` | `email` / `displayName` / `groups` | Attributes mapped onto the console identity. Matched against both `Name` and `FriendlyName`, because ADFS emits URN names with no friendly name and Shibboleth emits both |
+| `SAML_ADMIN_GROUP` / `SAML_ALLOWED_GROUPS` | *(empty)* | As the `OIDC_` pair, including the allowlist failing closed when no group attribute is released |
+| `SAML_CLOCK_SKEW_SECONDS` | `60` | Leeway on `NotBefore`/`NotOnOrAfter`. SAML condition windows are often five minutes wide, so a console a minute behind its IdP rejects every assertion and the symptom reads as a broken IdP |
+| `SAML_BUTTON_LABEL` | `SAML single sign-on` | Text on the login page's button |
 | `DATABASE_URL` | `sqlite:///./k8boss_admin.db` | SQLAlchemy URL. SQLite for dev, PostgreSQL in cluster. Holds the console's own state only |
 | `ENCRYPTION_KEY` | *(empty)* | Secret used to derive the Fernet key protecting stored cluster tokens. Empty means a key is generated **once** and persisted beside the database. Never let this be regenerated per boot: every stored token becomes undecryptable and the symptom is every cluster failing to connect after an unrelated restart |
 | `ENCRYPTION_KEY_FILE` | *(empty)* | Override for that generated key's path. Empty means "next to the SQLite database", or `./k8boss_admin.key` when the database is not SQLite |

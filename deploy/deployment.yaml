@@ -243,6 +243,146 @@ spec:
                   key: admin-group
                   optional: true
 
+            # ── The other three single sign-on providers ─────────────────────
+            # A curated subset, like everything else in this file: the switch
+            # and the values a flow cannot start without. Every other knob
+            # (claim and attribute names, allowlists, timeouts, button labels)
+            # is in app/config.py with a documented default and is patched onto
+            # this Deployment when a deployment needs it. See README.md for the
+            # full table and docs/api-contract.md §12.4 for what each provider
+            # verifies.
+
+            # Generic OAuth 2.0 — a server that issues an access token and no
+            # ID token (GitHub, GitLab, a non-OIDC Keycloak client). Identity
+            # comes from the userinfo endpoint, so OAUTH_USERINFO_URL is
+            # required and OAUTH_SUBJECT_FIELD must name the provider's own
+            # stable identifier: GitHub and GitLab both call it `id`, and
+            # binding to a recycled username instead is how the second holder
+            # of a name inherits the first one's role.
+            - name: OAUTH_ENABLED
+              value: "false"
+            - name: OAUTH_AUTHORIZATION_URL
+              valueFrom:
+                secretKeyRef:
+                  name: k8boss-admin-oauth
+                  key: authorization-url
+                  optional: true
+            - name: OAUTH_TOKEN_URL
+              valueFrom:
+                secretKeyRef:
+                  name: k8boss-admin-oauth
+                  key: token-url
+                  optional: true
+            - name: OAUTH_USERINFO_URL
+              valueFrom:
+                secretKeyRef:
+                  name: k8boss-admin-oauth
+                  key: userinfo-url
+                  optional: true
+            - name: OAUTH_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: k8boss-admin-oauth
+                  key: client-id
+                  optional: true
+            - name: OAUTH_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: k8boss-admin-oauth
+                  key: client-secret
+                  optional: true
+            - name: OAUTH_REDIRECT_URL
+              valueFrom:
+                secretKeyRef:
+                  name: k8boss-admin-oauth
+                  key: redirect-url
+                  optional: true
+
+            # OpenShift's built-in OAuth server — sign in with the identity
+            # already used for `oc login`. OPENSHIFT_API_URL is the API server,
+            # not the web console route: the authorization endpoint, the token
+            # endpoint and the users/~ read are all taken from it, and pointing
+            # it at the console route fails as a 404 on the metadata document.
+            #
+            # This is the one provider besides OIDC whose sessions may act as a
+            # cluster identity under ADR-0007, because the username and groups
+            # are the cluster's own record of them.
+            - name: OPENSHIFT_ENABLED
+              value: "false"
+            - name: OPENSHIFT_API_URL
+              valueFrom:
+                secretKeyRef:
+                  name: k8boss-admin-openshift
+                  key: api-url
+                  optional: true
+            - name: OPENSHIFT_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: k8boss-admin-openshift
+                  key: client-id
+                  optional: true
+            - name: OPENSHIFT_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: k8boss-admin-openshift
+                  key: client-secret
+                  optional: true
+            - name: OPENSHIFT_REDIRECT_URL
+              valueFrom:
+                secretKeyRef:
+                  name: k8boss-admin-openshift
+                  key: redirect-url
+                  optional: true
+
+            # SAML 2.0. It additionally needs AUTH_COOKIE_SECURE=true and TLS
+            # in front: the assertion arrives on a cross-site POST, which
+            # carries no SameSite=Lax cookie, so the handshake cookie has to be
+            # SameSite=None — and browsers discard that without Secure. Without
+            # it the button is withheld rather than shown broken, so a SAML
+            # deployment that looks configured and offers nothing is almost
+            # always this.
+            #
+            # Register the ACS at the identity provider as
+            #   https://<console-host>/api/auth/saml/acs
+            # or point its setup form at /api/auth/saml/metadata, which
+            # publishes the same thing.
+            - name: SAML_ENABLED
+              value: "false"
+            - name: SAML_IDP_ENTITY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: k8boss-admin-saml
+                  key: idp-entity-id
+                  optional: true
+            - name: SAML_IDP_SSO_URL
+              valueFrom:
+                secretKeyRef:
+                  name: k8boss-admin-saml
+                  key: idp-sso-url
+                  optional: true
+            # The IdP's signing certificate. PEM, or the bare base64 body as it
+            # appears in <ds:X509Certificate>. Several may be concatenated,
+            # which is what makes a signing-key rotation a Secret update rather
+            # than an outage.
+            - name: SAML_IDP_CERTIFICATE
+              valueFrom:
+                secretKeyRef:
+                  name: k8boss-admin-saml
+                  key: idp-certificate
+                  optional: true
+            - name: SAML_SP_ENTITY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: k8boss-admin-saml
+                  key: sp-entity-id
+                  optional: true
+            - name: SAML_ACS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: k8boss-admin-saml
+                  key: acs-url
+                  optional: true
+
             # ── Sign-in rate limiting ───────────────────────────────────────
             # Each attempt reserves a row before the password is checked, so
             # the limit holds across replicas, survives a restart, and cannot be
