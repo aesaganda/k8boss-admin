@@ -49,12 +49,18 @@
  * the operator presses — because a selector is immutable after creation, and an
  * edit nobody saw is the one nobody reviews.
  *
- * **It cannot keep comments.** A form edit re-serialises the parsed document,
- * and a parsed document has no comments in it: `yaml.dump` writes what the YAML
- * *meant*, not what it said. So the dialog counts the comment lines before the
- * first form edit and says so, rather than letting an operator discover it
- * afterwards. The template comments worth keeping are restated as help text on
- * the fields they were attached to, which is where they were useful anyway.
+ * **It edits the object, not the text.** A form edit re-serialises the parsed
+ * document, and three things in a manifest live in the text rather than in the
+ * object it parses to: comments, which nothing carries across a parse, and
+ * anchors and merge keys, which a parse resolves — so a rewrite spells out what
+ * they stood for. The first is a loss and the other two are an expansion, they
+ * are reported as the different things they are (`rewriteLosses`), and both are
+ * said before the first form edit rather than discovered afterwards in the
+ * diff. The template comments worth keeping are restated as help text on the
+ * fields they were attached to, which is where they were useful anyway. A
+ * document whose anchor refers to the block containing it cannot be written
+ * back at all, and `containsCycle` is how the form declines it instead of
+ * hanging.
  *
  * No JSX lives here, deliberately: Vite only transforms JSX in `.jsx`, and this
  * file is also the one place a test can reach the model without mounting
