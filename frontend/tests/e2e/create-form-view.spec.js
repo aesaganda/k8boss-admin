@@ -597,6 +597,47 @@ spec:
     await expect(page.getByTestId('create-section-daemonset')).toContainText('no replica count');
   });
 
+  test('a StatefulSet with no governing service warns rather than claiming a refusal', async ({
+    page,
+  }) => {
+    // Recent Kubernetes accepts a StatefulSet without `spec.serviceName` and
+    // older versions refuse it, and this console cannot tell which it is
+    // talking to from the document — so this is a warning, the field carries no
+    // required marker, and the help under it says the same thing the warning
+    // does. The three drifted apart once already: the check was corrected to a
+    // warning while the help went on calling the field required, which put a
+    // refusal and a "recent Kubernetes accepts this" on the same screen.
+    await openForm(
+      page,
+      `apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: example
+  namespace: prod
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: example
+  template:
+    metadata:
+      labels:
+        app: example
+    spec:
+      containers:
+        - name: example
+          image: nginx
+`,
+    );
+
+    await expect(page.getByTestId('create-issues-error')).toHaveCount(0);
+    await expect(page.getByTestId('create-issues-warning')).toContainText('No governing service');
+
+    const group = page.getByTestId('create-section-statefulset');
+    await expect(group).not.toContainText('It is a required field');
+    await expect(group).toContainText('Recent Kubernetes accepts a StatefulSet without one');
+  });
+
   test('a Job with no restartPolicy is caught locally, and the select says what is missing', async ({
     page,
   }) => {

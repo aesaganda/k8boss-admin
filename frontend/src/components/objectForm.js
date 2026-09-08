@@ -755,7 +755,7 @@ export const FORM_MODELS = [
             label: 'Governing service',
             control: 'text',
             path: ['spec', 'serviceName'],
-            help: 'The headless Service that gives each pod its DNS name. It is a required field, and this console does not create it — the pods get stable names either way, but nothing resolves them until that Service exists.',
+            help: 'The headless Service that gives each pod its DNS name. This console does not create it — the pods get stable names either way, and nothing resolves them until that Service exists. Recent Kubernetes accepts a StatefulSet without one; older versions refuse it outright.',
           },
           selectorField(['spec', 'selector', 'matchLabels']),
           {
