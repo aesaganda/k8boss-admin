@@ -47,7 +47,7 @@
 # names the exact missing grant. Both are diagnosable. What is NOT diagnosable is
 # a console that writes because a default did it quietly.
 #
-# Four features carry a THIRD gate of their own, off by default, because RBAC
+# Five features carry a THIRD gate of their own, off by default, because RBAC
 # cannot express what makes each one different from an ordinary write:
 #
 #   ADMIN_NODE_DEBUG_ENABLED     §5.5 — `create pods` is identical for an nginx
@@ -69,6 +69,14 @@
 #                                asks for — with OLM's permissions, not this
 #                                ServiceAccount's, so no rule in this file
 #                                bounds it.
+#   ADMIN_OLM_INSTALL_ENABLED    §33 — the console installing Operator Lifecycle
+#                                Manager itself. Separate from the gate above
+#                                because they are different sizes: that one
+#                                writes into an API the cluster already serves,
+#                                and this one creates the API — eight CRDs, two
+#                                controllers, and a ClusterRole granting every
+#                                verb on every resource including `escalate`.
+#                                See adr-0008-shipped-olm.md.
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -815,6 +823,46 @@ rules:
   - apiGroups: ["operators.coreos.com"]
     resources: ["subscriptions"]
     verbs: ["create"]
+
+  # §33 installing Operator Lifecycle Manager itself. THE LARGEST GRANT IN THIS
+  # FILE by consequence, and it is not the rules below — it is what the rules
+  # below let the console CREATE.
+  #
+  # Read this before applying. The ClusterRole these rules create is upstream's
+  # `system:controller:operator-lifecycle-manager`, and it grants every verb on
+  # every resource in every API group, INCLUDING `escalate` and `bind`. That is
+  # cluster-admin plus the ability to grant cluster-admin. It is inherent to OLM
+  # rather than a choice this project made — OLM installs operators that ask for
+  # arbitrary permissions, so it has to hold them — and it is exactly the object
+  # §33 shows in the diff before creating.
+  #
+  # These rules do not, on their own, let the console create it. That needs
+  # `escalate` and `bind` from the §14 block above, because the API server
+  # refuses to let an identity create a role granting more than it holds. A
+  # deployment that deleted the §14 block and adds these gets a preflight that
+  # says yes and an install that fails at the ClusterRole with a 403 — which §33
+  # rewrites into a hint naming escalation prevention rather than a verb the
+  # review just confirmed.
+  #
+  # DELETE THESE RULES to keep the console out of installing a cluster's
+  # operator control plane. What degrades, and it is narrow: the portal's
+  # "OLM is not installed" panel reports the install as denied with the reason,
+  # the plan and its manifests stay readable (a pure render, no cluster
+  # touched), and §16 keeps working exactly as before on every cluster that
+  # already runs OLM. Nothing else in this console reads or writes these
+  # resources for any other feature.
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["create", "update", "patch"]
+  # No `delete`, deliberately, and it is the same reasoning as §16's missing
+  # delete verb one block up. Deleting a CRD deletes every custom resource made
+  # from it across every namespace, with no second confirmation — so an
+  # "Uninstall OLM" button would take out every operator's Subscription and
+  # ClusterServiceVersion on the cluster. §33 installs and does not uninstall;
+  # removing OLM is §4's, object by object, each with its own diff.
+  - apiGroups: ["operators.coreos.com"]
+    resources: ["olmconfigs", "operatorgroups", "catalogsources", "clusterserviceversions"]
+    verbs: ["create", "update", "patch"]
 
   # ADR-0007 — acting as the signed-in operator. NOT APPLIED: the rule is
   # written out and commented out, and uncommenting it is the whole opt-in on

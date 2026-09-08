@@ -113,6 +113,35 @@ spec:
             - name: ADMIN_PORTAL_INSTALL_ENABLED
               value: "false"
 
+            # §33. OFF, and separate from the gate above on purpose: that one
+            # writes one Subscription into an API the cluster already serves,
+            # and this one CREATES that API. An install applies eight
+            # cluster-scoped CustomResourceDefinitions, two controllers, and a
+            # ClusterRole granting every verb on every resource in every API
+            # group — including `escalate` and `bind` — which is the widest
+            # grant this console can create anywhere. It is inherent to OLM
+            # rather than chosen here: OLM installs operators that ask for
+            # arbitrary permissions, so it has to hold them.
+            #
+            # The console's own ServiceAccount cannot create that ClusterRole
+            # unless it holds `escalate` and `bind` itself; deploy/rbac.yaml
+            # ships that role UNBOUND. Turning this switch on is therefore two
+            # decisions, and the second one is in rbac.yaml. The plan and its
+            # diff stay readable with this off, because deciding whether to
+            # turn it on means reading that ClusterRole first.
+            # See adr-0008-shipped-olm.md.
+            - name: ADMIN_OLM_INSTALL_ENABLED
+              value: "false"
+
+            # How long an install waits for those eight CRDs to report
+            # Established before giving up and reporting what it did. One
+            # bounded wait inside one request — not a reconcile loop — and
+            # generous because establishment is normally sub-second: the cost of
+            # waiting too long is a slow request, and the cost of not waiting
+            # long enough is eighteen misleading 404s.
+            - name: ADMIN_OLM_ESTABLISH_TIMEOUT_SECONDS
+              value: "90"
+
             # §15. OFF, and this gate is about what the feature REMOVES rather
             # than what it creates. A CLI pod is an ordinary pod; the shell into
             # it is not an ordinary write. Everything typed there bypasses the

@@ -23,6 +23,7 @@ from fastapi import APIRouter, Query
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.api.bodies import MutationBody
+from app.admin import olm as olm_admin
 from app.admin import portal as portal_admin
 from app.services import portal as portal_service
 
@@ -49,6 +50,42 @@ class SubscribeRequest(BaseModel):
     startingCSV: str | None = Field(None, min_length=1, max_length=253)  # noqa: N815
 
 
+class OLMInstallRequest(BaseModel):
+    """The one choice an OLM install offers. See :mod:`app.admin.olm_bundle`.
+
+    One field, because every other value in upstream's manifests produces an OLM
+    that does not work if changed — the namespaces are named literally by OLM's
+    own Deployments and CSV. A body carrying anything else is ignored rather
+    than rejected: §33 has no other configuration to misspell.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    communityCatalog: bool = Field(  # noqa: N815
+        False,
+        description=(
+            "Also install upstream's operatorhubio-catalog CatalogSource, which "
+            "pulls quay.io/operatorhubio/catalog:latest and re-polls it hourly. "
+            "Off by default: installing it is the decision to have the cluster "
+            "trust a community catalog at an unpinned tag, and it is an "
+            "acknowledged consequence rather than a checkbox."
+        ),
+    )
+
+
+class OLMInstallWriteRequest(MutationBody, OLMInstallRequest):
+    """The plan's body plus the two fields that make it a write."""
+
+    acknowledgeConsequences: list[str] = Field(  # noqa: N815
+        default_factory=list,
+        description=(
+            "Every consequence code the plan returned. Named rather than a "
+            "boolean, like §16's: a caller that acknowledged one list and then "
+            "turned the community catalog on has to read the new one."
+        ),
+    )
+
+
 class SubscribeWriteRequest(MutationBody, SubscribeRequest):
     """The plan's body plus the two fields that make it a write."""
 
@@ -63,9 +100,22 @@ class SubscribeWriteRequest(MutationBody, SubscribeRequest):
 
 
 def _gate() -> dict[str, Any]:
-    """The §16 feature gate, in the ``enabled``/``enabledDetail`` shape §14 uses."""
+    """The §16 feature gate, in the ``enabled``/``enabledDetail`` shape §14 uses.
+
+    ``olmInstall`` rides along for the same reason ``enabled`` does: the portal's
+    empty state on a cluster with no OLM is where §33's install is offered, and a
+    page that had to ask a second endpoint whether that button exists would paint
+    the offer before knowing. It is the *gate*, not the cluster's state — whether
+    OLM is actually installed is ``GET /api/portal/olm``, which is a live read
+    the page makes only when it has an empty portal to explain.
+    """
     state = portal_admin.enabled_state()
-    return {"enabled": state["enabled"], "enabledDetail": state["detail"]}
+    olm = olm_admin.enabled_state()
+    return {
+        "enabled": state["enabled"],
+        "enabledDetail": state["detail"],
+        "olmInstall": {"enabled": olm["enabled"], "detail": olm["detail"]},
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -137,6 +187,54 @@ def create_portal_subscription(request: SubscribeWriteRequest) -> dict[str, Any]
     for this create, which is a different thing and must not be overwritten.
     """
     return portal_admin.subscribe(
+        request.model_dump(by_alias=True),
+        dry_run=request.dry_run,
+        acknowledge_consequences=request.acknowledgeConsequences,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Installing OLM itself (§33)
+# --------------------------------------------------------------------------- #
+
+@router.get("/portal/olm")
+def get_olm_status() -> dict[str, Any]:
+    """§33 — whether this cluster runs Operator Lifecycle Manager. A live read.
+
+    Two separate tri-states, and a UI must not collapse them. ``installed`` says
+    OLM's objects are on the cluster; ``ready`` says the package server is
+    answering, which is what makes §16's portal show anything. ``installed``
+    true with ``ready`` false is the ordinary state for a minute after an
+    install — and the permanent state on a cluster where OLM cannot schedule.
+    """
+    return olm_admin.status()
+
+
+@router.post("/portal/olm/plan")
+def get_olm_plan(request: OLMInstallRequest) -> dict[str, Any]:
+    """§33 — the manifests an install would apply, and what they cost.
+
+    Ungated deliberately, like §14's and §16's plans: it reads no cluster and
+    writes nothing, and an operator deciding whether to set
+    ``ADMIN_OLM_INSTALL_ENABLED`` has to be able to read the ClusterRole that
+    grants OLM every verb on every resource before they decide. Records no audit
+    row, because nothing happens.
+    """
+    return olm_admin.plan(request.model_dump(by_alias=True))
+
+
+@router.post("/portal/olm")
+def install_olm(request: OLMInstallWriteRequest) -> dict[str, Any]:
+    """§33 — install Operator Lifecycle Manager, through the ordinary funnel.
+
+    ``installed: true`` means twenty-six objects were accepted by the API
+    server. It is not a claim that OLM is running: the Deployments still have to
+    become Ready and OLM still has to reconcile the packageserver CSV before
+    ``packages.operators.coreos.com`` exists. ``ready`` is null here for that
+    reason and the response says where it is answered — ``GET /api/portal/olm``,
+    which is a live read.
+    """
+    return olm_admin.install(
         request.model_dump(by_alias=True),
         dry_run=request.dry_run,
         acknowledge_consequences=request.acknowledgeConsequences,

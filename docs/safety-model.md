@@ -2115,3 +2115,142 @@ that connects to it. Gating it there would make the section useless on every
 deployment that leaves the gate off — which is all of them — while protecting
 nothing. RBAC still decides: a caller who cannot read the Secret gets an
 `unavailable[]` entry and `state: unknown`.
+
+---
+
+## 24. Installing OLM (§33) — the second bundle, and the wait
+
+§14 put a proxy on somebody's cluster. §33 puts the cluster's **operator control
+plane** there, and the difference in size is the whole reason it has its own gate
+rather than riding on §16's.
+
+`docs/adr-0008-shipped-olm.md` records the decision and the argument against it.
+This section is what the safety machinery does with it.
+
+### 24.1 The thing to read before anything else
+
+Upstream's `olm.yaml` contains this, and the console creates it:
+
+```yaml
+kind: ClusterRole
+metadata:
+  name: system:controller:operator-lifecycle-manager
+rules:
+  - apiGroups: ['*']
+    resources: ['*']
+    verbs: [watch, list, get, create, update, patch, delete, deletecollection, escalate, bind]
+```
+
+That is cluster-admin plus the ability to grant cluster-admin. ADR-0004 called
+cluster-wide Secret reads "the largest RBAC grant this product has ever asked
+for"; this is larger by a wide margin, and `escalate` means OLM can grant
+permissions nobody gave it.
+
+It is inherent to OLM rather than chosen here — OLM installs operators that ask
+for arbitrary permissions, so it has to hold them. That is an explanation, not a
+mitigation. What actually mitigates it is small and worth listing because it is
+all there is: the object is in the diff before it is created; the consequence
+quotes the rule verbatim rather than calling it "broad permissions"; the feature
+is off by default; and the plan is readable with the gate off, so the decision to
+open the gate is made with the object on screen.
+
+### 24.2 Two gates, and neither withholds the dry run
+
+`ADMIN_ALLOW_MUTATIONS` and `ADMIN_OLM_INSTALL_ENABLED`, handed to `mutate()` as
+a `FeatureGate` and not checked by the feature. Neither withholds the preview,
+which is the same call §14 and §16 make and the opposite of §5.5's node debug
+pods.
+
+The reason is sharper here than anywhere else in this model. §5.5 withholds its
+projection because the projection *is* the sensitive thing — a working recipe for
+a privileged pod. §33's projection is a pinned copy of a public upstream release
+that anyone can download, and it contains the ClusterRole above. Withholding it
+would mean the decision to grant OLM `*` on `*` gets made without the object in
+front of the person making it, which is the exact inversion of what the gate is
+for.
+
+### 24.3 The adoption refusal, made stricter than §14's
+
+Every object carries `app.kubernetes.io/managed-by: k8boss-admin`. An install
+that finds any of the twenty-six already present without it refuses — before
+writing anything, on a dry run as much as on a real one.
+
+Two differences from §14, both because the blast radius is larger:
+
+* **It names every conflict, not the first.** A cluster already running OLM
+  collides on most of the twenty-six at once, and reporting them one per attempt
+  would have an operator re-run the install a dozen times to learn a fact that
+  was knowable on the first read.
+* **The failure it prevents is not "a takeover", it is an outage.** Writing
+  0.35.0's Deployments over a running 0.30 restarts the cluster's entire operator
+  control plane, and every operator OLM manages with it.
+
+The refusal is audited by hand, because it fires before the first `mutate()` and
+the funnel — which records everything else — is never reached.
+
+### 24.4 The wait, and why it is not a control loop
+
+Between the phases the install waits for the eight CRDs to report `Established`.
+It is the only place in this codebase that blocks on a cluster, so it is worth
+being exact: **one bounded wait inside one request**, what `kubectl wait` does,
+bounded by `ADMIN_OLM_ESTABLISH_TIMEOUT_SECONDS` and then abandoned. It holds no
+state, survives nothing, retries nothing and corrects no drift.
+
+Three properties are load-bearing:
+
+* **A CRD read that failed is `None`, not "not established yet".** Counting it as
+  pending would spend the whole timeout on a cluster answering perfectly well
+  about everything else; counting it as established would send phase two at an
+  API that is not ready.
+* **The timeout stops the install.** Phase two is reported as skipped with the
+  timeout's own sentence, and the CRDs that really were created are reported as
+  applied. "Re-run the install" is safe and the message says so: the objects that
+  exist are this console's and are re-applied, not refused.
+* **Discovery is invalidated only on success.** The console caches what a cluster
+  serves for up to a minute, and phase two addresses five kinds that were not in
+  that cache when the request started. Dropping the cache after a *timeout* would
+  advertise APIs that are not established — the same wrong answer one layer down.
+
+### 24.5 `installed` is not `working`, and the response says which it means
+
+Twenty-six accepted objects is not a running OLM. The Deployments have to
+schedule, and the `packageserver` ClusterServiceVersion has to be reconciled by
+OLM before `packages.operators.coreos.com` exists — until then §16's portal reads
+the same empty state it read before the install, **and it is right to**.
+
+So `installed` means "every object was accepted", `ready` is `null` on the
+install response with a sentence naming the live read that answers it, and
+`GET /api/portal/olm` reports the two separately as tri-states. A green banner
+over a package server that has not registered would be this project's defect
+standard aimed at the thing the console had just done — the §14 lesson
+(`installed: true` over a router admitting nothing) with a cluster's operator
+control plane in place of a proxy.
+
+### 24.6 The honest limit: preflight cannot see this one coming, and here it never can
+
+§14 documented escalation prevention as a failure preflight cannot predict: a
+`SelfSubjectAccessReview` on `create clusterroles` answers yes, and the API server
+then refuses at admission because the caller does not hold what it is granting.
+
+For §14 that fires when the console lacks cluster-wide Secret reads. For §33's
+ClusterRole it fires unless the console's identity holds **everything**, so on any
+deployment that has narrowed `deploy/rbac.yaml` it fires always. §0.2's promise —
+a denial naming the missing permission — cannot be kept from the review here.
+
+What the code does instead is deliberately narrow and identical to §14's: the
+status mapping stands (`rbac_denied`, by status code), and **only the hint** is
+rewritten, to name escalation prevention and the `escalate`/`bind` grants rather
+than sending the operator to grant `create clusterroles` — the one verb the
+review has just confirmed they hold. Matching on the API server's message string
+is forbidden everywhere else in this codebase; it is confined to the hint so that
+a miss degrades to the ordinary hint rather than to a wrong code.
+
+### 24.7 What this section does not claim
+
+It does not claim the community catalog is safe, which is why installing it is
+opt-in and acknowledged by name. It does not claim OLM can be removed from here —
+it cannot, and §33.8 says what removal actually takes. It does not claim to
+upgrade an OLM already running, and it refuses to write over one. And it makes no
+claim at all about what OLM subsequently grants an operator: that is §12.5's
+honest limit, unchanged, and §33 makes it reachable on more clusters rather than
+narrower on any.

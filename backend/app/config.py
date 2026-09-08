@@ -296,6 +296,50 @@ class Settings(BaseSettings):
         ),
     )
 
+    # -- installing Operator Lifecycle Manager (§33) -----------------------
+    olm_install_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "ADMIN_OLM_INSTALL_ENABLED", "olm_install_enabled"
+        ),
+        description=(
+            "Allows this console to install Operator Lifecycle Manager itself "
+            "(§33) onto a cluster that does not run it — the second and last "
+            "bundle this console ships, on the terms "
+            "docs/adr-0008-shipped-olm.md records. Its own gate on top of "
+            "admin_allow_mutations, separate from portal_install_enabled, "
+            "because the two are different sizes of decision: subscribing "
+            "writes one object into an API the cluster already serves, while "
+            "this creates the API — eight CustomResourceDefinitions, two "
+            "controllers, and a ClusterRole granting every verb on every "
+            "resource in the cluster including escalate and bind, which is the "
+            "widest grant this product has ever created. A deployment may "
+            "reasonably want the portal without wanting the console to be able "
+            "to install a cluster's operator control plane. Off does not hide "
+            "it: the plan, the manifests and the diff all still render, "
+            "because reading what would be created is a read, and deciding "
+            "whether to turn this on requires it."
+        ),
+    )
+    olm_establish_timeout_seconds: float = Field(
+        default=90.0,
+        validation_alias=AliasChoices(
+            "ADMIN_OLM_ESTABLISH_TIMEOUT_SECONDS", "olm_establish_timeout_seconds"
+        ),
+        ge=1.0,
+        le=600.0,
+        description=(
+            "How long an install waits for the eight CustomResourceDefinitions "
+            "it just created to report Established before giving up (§33). Not "
+            "a reconcile loop: one bounded wait inside one request, after which "
+            "the install stops and reports what it did rather than writing "
+            "phase two into APIs that do not exist yet. The default is generous "
+            "— establishment is normally sub-second — because the cost of "
+            "waiting too long is a slow request and the cost of not waiting "
+            "long enough is eighteen misleading 404s."
+        ),
+    )
+
     # -- console authentication ------------------------------------------
     auth_enabled: bool = Field(
         default=False,
