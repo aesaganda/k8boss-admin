@@ -124,16 +124,6 @@ export function ImportYamlDialog({ isOpen, title = 'Import YAML', initialText = 
     return seeded.valid && formModelFor(seeded.parsed?.apiVersion, seeded.parsed?.kind) ? 'form' : 'yaml';
   });
 
-  // Bumped when something rewrites the document from outside the control that
-  // owns it: the selector repair, and adding or removing a container. See
-  // `ObjectForm`'s docstring — the mapping and lines editors hold the
-  // half-typed shapes a document cannot, and remounting is how they are told to
-  // re-read. The container case is the sharp one: the rows are index-keyed, so
-  // deleting one hands every later container a key that already has a mounted
-  // subtree, and its Command box would go on showing the deleted container's
-  // command until the next keystroke wrote it onto the survivor.
-  const [formKey, setFormKey] = useState(0);
-
   // One fetch per opening. Not `useAsync` (that hook is page-scoped, keyed for
   // cross-navigation caching this one-shot dialog does not need) — a plain
   // effect with a `live` guard against the unmount-mid-fetch race is the whole
@@ -290,9 +280,28 @@ export function ImportYamlDialog({ isOpen, title = 'Import YAML', initialText = 
             ? `Will create ${entry.kind} (${entry.apiVersion}) ${
                 entry.namespaced ? `in namespace "${targetNamespace ?? '(none selected)'}"` : '— cluster-scoped'
               }`
-            : 'Where this is created is read from the document\'s own apiVersion and kind, once it parses as one.'
+            : catalog.loading
+              ? 'Reading what this cluster serves…'
+              : catalog.error
+                // Not "once it parses as one": the document may be perfect and
+                // this console still could not look up where to send it. Naming
+                // the wrong thing sends an operator to re-read a manifest that
+                // was never the problem.
+                ? 'The API catalog could not be read, so where this would be created is not something this console can say.'
+                : 'Where this is created is read from the document\'s own apiVersion and kind, once it parses as one.'
         }
-      />
+      >
+        {/* Which of the two namespaces won, said out loud. `_resolve_namespace`
+            prefers the document and falls back to the masthead, and the whole
+            reason this alert exists is that a create in the wrong namespace is
+            invisible in a diff that has no `before` to compare against. */}
+        {entry?.namespaced &&
+          (docNamespace
+            ? `From this document's own metadata.namespace.`
+            : namespaceFromMasthead
+              ? `From the masthead selector — this document sets no metadata.namespace of its own.`
+              : `This document sets no metadata.namespace and no namespace is selected above.`)}
+      </Alert>
 
       <div className="admin-confirm__views">
         <span className="admin-confirm__views-label" id="create-view-label">
@@ -399,15 +408,10 @@ export function ImportYamlDialog({ isOpen, title = 'Import YAML', initialText = 
 
       {view === 'form' && model ? (
         <ObjectForm
-          key={formKey}
           document={parsed}
           model={model}
           unrepresentedPaths={unrepresentedPaths}
           onChange={(next) => setText(toYaml(next))}
-          onReplace={(next) => {
-            setText(toYaml(next));
-            setFormKey((n) => n + 1);
-          }}
         />
       ) : (
         <YamlEditor

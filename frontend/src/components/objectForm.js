@@ -142,6 +142,12 @@ export function unsetIn(object, path) {
     return base;
   }
   const pruned = unsetIn(base[head], rest);
+  // Nothing below was there to remove, so nothing above it is surplus either.
+  // Without this, unsetting an absent path prunes the block that would have
+  // contained it: `unsetIn(policy, ['spec','podSelector','matchLabels'])` on a
+  // document whose `podSelector` is `{}` deletes the podSelector — a field the
+  // default-deny template writes on purpose — for a key that was never there.
+  if (pruned === base[head]) return object;
   const isEmptyMapping = isMapping(pruned) && Object.keys(pruned).length === 0;
   const isEmptyArray = Array.isArray(pruned) && pruned.length === 0;
   if (pruned === undefined || isEmptyMapping || isEmptyArray) delete base[head];
@@ -743,7 +749,6 @@ export const FORM_MODELS = [
             label: 'Governing service',
             control: 'text',
             path: ['spec', 'serviceName'],
-            required: true,
             help: 'The headless Service that gives each pod its DNS name. It is a required field, and this console does not create it — the pods get stable names either way, but nothing resolves them until that Service exists.',
           },
           selectorField(['spec', 'selector', 'matchLabels']),
@@ -1054,7 +1059,7 @@ export const FORM_MODELS = [
               { value: 'Ingress', label: 'Ingress — inbound traffic' },
               { value: 'Egress', label: 'Egress — outbound traffic' },
             ],
-            help: 'A type listed here with no matching rules denies that direction entirely. Leaving it out is the opposite: the policy declares no section for that direction, so it does not restrict it at all — and the two look almost identical in YAML. Cleared entirely, the key is removed rather than written as an empty list, because the API server then applies its own defaulting and the read side can still tell a declared list from a derived one.',
+            help: 'A type listed here with no matching rules denies that direction entirely. Leaving it out is the opposite: the policy declares no section for that direction, so it does not restrict it at all — and the two look almost identical in YAML. Cleared entirely, the key is removed rather than written as an empty list; the two are the same to the API server, which fills in Ingress either way, and the shorter one is what the document would have said.',
           },
         ],
       },
@@ -1281,7 +1286,15 @@ export function localIssues(document, model) {
     const mapping = getIn(document, path);
     if (!isMapping(mapping)) continue;
     for (const [key, value] of Object.entries(mapping)) {
-      if (typeof value !== 'string') {
+      if (value === null) {
+        // `a:` with nothing after it. The API server decodes a null into the
+        // empty string and accepts it, so this is a warning about what was
+        // probably meant rather than a claim that the write will fail.
+        add(
+          'warning',
+          `${where}.${key} has no value. The API server reads that as the empty string, which is a legal label value — write "" if that is what you meant.`,
+        );
+      } else if (typeof value !== 'string') {
         add(
           'error',
           `${where}.${key} is ${typeof value === 'object' ? 'not a string' : `the ${typeof value} ${JSON.stringify(value)}`}. Label and annotation values must be strings — quote it.`,
@@ -1329,6 +1342,7 @@ export function localIssues(document, model) {
       const names = [];
       const portNames = [];
       containers.forEach((container, index) => {
+        const portNamesHere = [];
         const containerName = isMapping(container) ? container.name : null;
         const image = isMapping(container) ? container.image : null;
         if (!containerName) add('error', `Container ${index + 1} has no name.`);
@@ -1352,19 +1366,37 @@ export function localIssues(document, model) {
               `Port ${portIndex + 1} on container ${containerName || index + 1} needs a containerPort between 1 and 65535.`,
             );
           }
-          if (isMapping(port) && port.name) portNames.push(String(port.name));
+          if (isMapping(port) && port.name) {
+            portNames.push(String(port.name));
+            portNamesHere.push(String(port.name));
+          }
+        }
+        for (const duplicate of new Set(
+          portNamesHere.filter((value, i) => portNamesHere.indexOf(value) !== i),
+        )) {
+          add(
+            'error',
+            `Container ${containerName || index + 1} has two ports named "${duplicate}". The API server checks port names within a container.`,
+          );
         }
       });
       const duplicates = names.filter((value, index) => names.indexOf(value) !== index);
       for (const duplicate of new Set(duplicates)) {
         add('error', `Two containers are both named "${duplicate}". Names must be unique within a pod.`);
       }
-      // Port names are unique across the whole pod, not per container: a
-      // Service or a NetworkPolicy referring to one by name has no way to say
-      // which container it meant.
+      // Across containers this is a hazard rather than a refusal, and the two
+      // are not interchangeable. The API server checks port names *within* a
+      // container, so it accepts the same name twice in one pod — but a Service
+      // `targetPort` or a NetworkPolicy port referring to that name resolves
+      // against the pod and has no way to say which container was meant.
+      // Reporting it as a refusal would be this console contradicting the dry
+      // run on the same screen.
       const duplicatePorts = portNames.filter((value, index) => portNames.indexOf(value) !== index);
       for (const duplicate of new Set(duplicatePorts)) {
-        add('error', `Two ports in this pod are both named "${duplicate}". Port names are unique across the pod.`);
+        add(
+          'warning',
+          `Two containers in this pod both have a port named "${duplicate}". The API server accepts that; a Service or NetworkPolicy naming that port does not get to say which container it meant.`,
+        );
       }
     }
 
@@ -1395,7 +1427,14 @@ export function localIssues(document, model) {
   }
 
   if (model.kind === 'StatefulSet' && !getIn(document, ['spec', 'serviceName'])) {
-    add('error', 'No governing service. `spec.serviceName` is required on a StatefulSet.');
+    // A warning, not a refusal: recent Kubernetes accepts a StatefulSet with no
+    // `serviceName`, older versions reject it, and this console cannot tell
+    // which it is talking to from the document. What is true either way is what
+    // the operator actually needs to know.
+    add(
+      'warning',
+      'No governing service. `spec.serviceName` names the headless Service that gives each pod its DNS name — the pods get stable names either way, and nothing resolves them until that Service exists. Older Kubernetes versions refuse a StatefulSet without it outright.',
+    );
   }
 
   if (model.kind === 'Deployment') {
@@ -1440,10 +1479,20 @@ export function localIssues(document, model) {
     const type = getIn(document, ['spec', 'updateStrategy', 'type']);
     const rolling = getIn(document, ['spec', 'updateStrategy', 'rollingUpdate']);
     if (type === 'OnDelete' && isMapping(rolling) && Object.keys(rolling).length > 0) {
-      add(
-        'error',
-        '`spec.updateStrategy.rollingUpdate` is set alongside the OnDelete strategy. The API server only accepts it with RollingUpdate.',
-      );
+      // The same shape, two different answers, and they are not interchangeable:
+      // StatefulSet validation forbids `rollingUpdate` under OnDelete, DaemonSet
+      // validation says nothing about it and the controller ignores it.
+      if (model.kind === 'StatefulSet') {
+        add(
+          'error',
+          '`spec.updateStrategy.rollingUpdate` is set alongside the OnDelete strategy. A StatefulSet only accepts it with RollingUpdate.',
+        );
+      } else {
+        add(
+          'warning',
+          '`spec.updateStrategy.rollingUpdate` is set alongside the OnDelete strategy. A DaemonSet accepts it and then ignores it — nothing rolls until a pod is deleted by hand.',
+        );
+      }
     }
   }
 
@@ -1460,18 +1509,25 @@ export function localIssues(document, model) {
         );
       }
     }
-    // Two ways to say the same thing, and saying both is refused rather than
-    // resolved. A schedule carrying its own zone prefix alongside `spec.timeZone`
-    // is rejected outright, which is better than either of them quietly winning.
-    if (
-      typeof schedule === 'string' &&
-      getIn(document, ['spec', 'timeZone']) &&
-      /^\s*(TZ|CRON_TZ)=/.test(schedule)
-    ) {
-      add(
-        'error',
-        'The schedule carries its own TZ=/CRON_TZ= prefix and `spec.timeZone` is set as well. The API server accepts one or the other, not both.',
-      );
+    // The schedule's own zone prefix. Which of the two sentences applies is a
+    // fact about the cluster's version, not about the document — the prefix was
+    // deprecated and is refused outright by recent Kubernetes, while every
+    // version has refused it alongside `spec.timeZone`. Only the second is
+    // stated as a refusal, because a console asserting a version rule it cannot
+    // check would eventually be telling somebody their working manifest is
+    // invalid.
+    if (typeof schedule === 'string' && /^\s*(TZ|CRON_TZ)=/.test(schedule)) {
+      if (getIn(document, ['spec', 'timeZone'])) {
+        add(
+          'error',
+          'The schedule carries its own TZ=/CRON_TZ= prefix and `spec.timeZone` is set as well. No version of Kubernetes accepts both.',
+        );
+      } else {
+        add(
+          'warning',
+          'The schedule carries a TZ=/CRON_TZ= prefix. That spelling is deprecated and recent Kubernetes refuses it on create — `spec.timeZone` is the field for it.',
+        );
+      }
     }
   }
 

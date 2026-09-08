@@ -232,6 +232,41 @@ test.describe('the create dialog form view', () => {
     expect(await yamlText(page)).toContain('labels: production');
   });
 
+  test('adding the first row of an empty block does not delete the block', async ({ page }) => {
+    // A row with no key yet is not a key, so the editor publishes an empty
+    // mapping — and unsetting on that would delete `spec.podSelector`, which
+    // the default-deny template writes on purpose, at the moment the operator
+    // pressed Add.
+    await mockApi(page, { preflight: ALLOW_ALL });
+    await page.goto('/network');
+    await page.getByRole('tab', { name: 'Network Policies' }).click();
+    await page.getByRole('button', { name: 'New network policy…' }).click();
+    await expect(page.getByTestId('create-form')).toBeVisible();
+
+    await page.getByTestId('create-podSelector-add').click();
+    // The row itself is not in the document — a row with no key is not a key —
+    // so switching views discards it. What must survive is the block it was
+    // added to.
+    expect(await yamlText(page)).toContain('podSelector: {}');
+
+    await page.getByTestId('create-view-form').check();
+    await page.getByTestId('create-podSelector-add').click();
+    await page.getByTestId('create-podSelector-key-0').fill('app');
+    await page.getByTestId('create-podSelector-value-0').fill('checkout');
+    expect(await yamlText(page)).toContain('app: checkout');
+  });
+
+  test('the alert says which of the two namespaces won', async ({ page }) => {
+    // A create in the wrong namespace is invisible in a diff with no `before`
+    // to compare against, which is the whole reason this alert exists.
+    await openImport(page, DEPLOYMENT);
+    await expect(page.getByTestId('import-yaml-target')).toContainText('in namespace "prod"');
+    await expect(page.getByTestId('import-yaml-target')).toContainText("document's own metadata.namespace");
+
+    await page.getByTestId('yaml-editor-input').fill(DEPLOYMENT.replace('  namespace: prod\n', ''));
+    await expect(page.getByTestId('import-yaml-target')).toContainText('no namespace is selected above');
+  });
+
   test('a selector that cannot match its own pods is reported, and repaired only on request', async ({
     page,
   }) => {
