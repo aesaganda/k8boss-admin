@@ -62,10 +62,13 @@
  * waiting for. Nothing ever switches the view on the operator: a paste that
  * makes a form possible enables the control and does not press it.
  *
- * **Re-serialising drops comments, and that is said before it happens.** A form
- * edit writes `yaml.dump` of the parsed object, and a parsed object has no
- * comments in it. The count is on screen while it is still true, rather than
- * discovered afterwards in the diff.
+ * **Re-serialising rewrites the text, and that is said before it happens.** A
+ * form edit writes `yaml.dump` of the parsed object, and three things live in
+ * the text rather than in the object: comments, which no parse carries; anchors
+ * and merge keys, which a parse resolves. The first is lost and the other two
+ * are expanded — different enough to be reported differently — and both are on
+ * screen while that is still actionable, rather than discovered afterwards in
+ * the diff.
  */
 import { useEffect, useMemo, useState } from 'react';
 import { Alert, Radio, Tooltip } from '@patternfly/react-core';
@@ -73,7 +76,7 @@ import MutationDialog from './MutationDialog';
 import ObjectForm from './ObjectForm';
 import YamlEditor, { validateYaml } from './YamlEditor';
 import {
-  commentLineCount,
+  rewriteLosses,
   formModelFor,
   formatPath,
   localIssues,
@@ -186,7 +189,10 @@ export function ImportYamlDialog({ isOpen, title = 'Import YAML', initialText = 
     () => (model ? unrepresented(parsed, model).map(formatPath) : []),
     [parsed, model],
   );
-  const comments = useMemo(() => (view === 'form' ? commentLineCount(text) : 0), [view, text]);
+  const losses = useMemo(
+    () => (view === 'form' ? rewriteLosses(text) : { comments: 0, anchors: 0, merges: 0 }),
+    [view, text],
+  );
 
   // Rule 11.4 on the view switch itself: Form view stays visible and says what
   // it is waiting for, rather than appearing only for the kinds that have one —
@@ -338,16 +344,36 @@ export function ImportYamlDialog({ isOpen, title = 'Import YAML', initialText = 
         );
       })}
 
-      {view === 'form' && comments > 0 && (
+      {view === 'form' && (losses.comments > 0 || losses.anchors > 0 || losses.merges > 0) && (
         <Alert
           isInline
           variant="warning"
           className="admin-confirm__alert"
-          data-testid="create-comments-warning"
-          title={`Editing here will drop ${comments} comment ${comments === 1 ? 'line' : 'lines'}`}
+          data-testid="create-rewrite-warning"
+          title="Editing here rewrites this document from what it parses as"
         >
-          The form edits the object this text parses as, and a parsed object has no comments in it — so the
-          first change made here rewrites the document without them. Switch to YAML view to keep them.
+          <ul className="admin-confirm__warnings">
+            {losses.comments > 0 && (
+              <li>
+                {losses.comments} comment {losses.comments === 1 ? 'line' : 'lines'} would be dropped. Nothing
+                carries a comment across a parse, so the first change made here loses them.
+              </li>
+            )}
+            {losses.anchors > 0 && (
+              <li>
+                {losses.anchors} {losses.anchors === 1 ? 'line carries a YAML anchor or alias' : 'lines carry YAML anchors or aliases'}. They
+                are resolved by the parser rather than lost, so the rewrite writes out what they stood for:
+                the object is the same, the sharing is not.
+              </li>
+            )}
+            {losses.merges > 0 && (
+              <li>
+                {losses.merges} merge {losses.merges === 1 ? 'key' : 'keys'} (<code>&lt;&lt;</code>) would be
+                spelled out for the same reason.
+              </li>
+            )}
+          </ul>
+          Switch to YAML view to keep the document exactly as written.
         </Alert>
       )}
 

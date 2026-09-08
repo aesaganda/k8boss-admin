@@ -797,11 +797,15 @@ show survives an edit made in the form" is actually established, the same way th
 no-vendor-annotation rule above is enforced by a test rather than stated as
 policy. And there is **no hand-edit lock**, because there is nothing to lock: the
 two views edit one string of text, the form is rebuilt from it every time it is
-opened, and the write sends that text whichever view produced it. What the form
-*cannot* preserve is the text's comments — `yaml.dump` writes what the document
-means, not what it said — so the dialog counts the comment lines and says so
-while that is still actionable, rather than leaving it to be discovered in the
-diff.
+opened, and the write sends that text whichever view produced it.
+
+What survives a form edit is the *object*, and three things in a manifest live in
+the text rather than in the object: comments, which nothing carries across a
+parse; and anchors and merge keys, which the parser resolves, so a rewrite spells
+out what they stood for. The first is a loss and the other two are an expansion,
+and the dialog says which is which, counted, before the first form edit — the
+only moment any of it is still actionable. Calling an expanded anchor "dropped"
+would be its own wrong answer.
 
 ### 11.4 `routes/custom-host` — the denial preflight would otherwise misname
 

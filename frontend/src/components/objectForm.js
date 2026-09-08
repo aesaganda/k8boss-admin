@@ -239,20 +239,34 @@ export function toYaml(document) {
 }
 
 /**
- * How many lines of `text` carry a comment.
+ * What the text says that the parsed object does not, counted.
  *
- * Counted with the editor's own tokenizer rather than a regex for `#`, because
- * `image: registry:5000/app#latest` and `note: "# not a comment"` both contain
- * one and neither is a comment. This number goes on screen before the first
- * form edit, which is the only moment it is still actionable.
+ * A form edit writes `toYaml` of the parsed document, and three things in a
+ * manifest live in the *text* rather than in the object it parses to. Comments
+ * are the one that is genuinely lost — nothing carries them across a parse.
+ * Anchors and merge keys are not lost but *expanded*: the parser resolves them,
+ * so the rewrite spells out what they stood for, and the object is unchanged
+ * while the document that produced it is no longer the one the operator wrote.
+ * All three are worth saying before the first form edit, which is the only
+ * moment any of it is still actionable.
+ *
+ * Counted with the editor's own tokenizer rather than with regexes, because
+ * `image: registry:5000/app#latest` holds a `#` that is not a comment and
+ * `note: "&prod"` holds an `&` that is not an anchor. The tokenizer already
+ * tells the two apart — it has to, to colour them — and a second, sloppier
+ * implementation here would warn about documents that lose nothing and stay
+ * quiet on ones that do.
  */
-export function commentLineCount(text) {
-  if (!text || !text.includes('#')) return 0;
-  let count = 0;
+export function rewriteLosses(text) {
+  const empty = { comments: 0, anchors: 0, merges: 0 };
+  if (!text) return empty;
+  const losses = { ...empty };
   for (const line of tokenizeYaml(text)) {
-    if (line.some((token) => token.kind === 'comment')) count += 1;
+    if (line.some((token) => token.kind === 'comment')) losses.comments += 1;
+    if (line.some((token) => token.kind === 'meta' && /^[&*]/.test(token.text))) losses.anchors += 1;
+    if (line.some((token) => token.kind === 'key' && token.text === '<<')) losses.merges += 1;
   }
-  return count;
+  return losses;
 }
 
 /**

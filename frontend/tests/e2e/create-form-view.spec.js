@@ -210,7 +210,7 @@ test.describe('the create dialog form view', () => {
     await page.getByRole('button', { name: 'New network policy…' }).click();
 
     await expect(page.getByTestId('create-form')).toBeVisible();
-    await expect(page.getByTestId('create-comments-warning')).toContainText('drop 3 comment lines');
+    await expect(page.getByTestId('create-rewrite-warning')).toContainText('3 comment lines would be dropped');
 
     // What those comments said is on the form as help text and as the two
     // statements below, which is why losing them costs nothing an operator was
@@ -221,7 +221,48 @@ test.describe('the create dialog form view', () => {
     // And the warning clears once the rewrite has happened, rather than
     // standing there describing something already done.
     await page.getByTestId('create-name').fill('deny-all');
-    await expect(page.getByTestId('create-comments-warning')).toHaveCount(0);
+    await expect(page.getByTestId('create-rewrite-warning')).toHaveCount(0);
+  });
+
+  test('an anchor is reported as expanded, not as lost', async ({ page }) => {
+    // The other half of what lives in the text rather than in the object. An
+    // anchor is resolved by the parser, so the rewrite spells out what it stood
+    // for — the object is identical and the document is not, and calling that
+    // "dropped" would be as wrong as saying nothing.
+    await openForm(
+      page,
+      `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: example
+  namespace: prod
+  labels: &labels
+    app: example
+spec:
+  replicas: 1
+  selector:
+    matchLabels: *labels
+  template:
+    metadata:
+      labels: *labels
+    spec:
+      containers:
+        - name: example
+          image: nginx
+`,
+    );
+
+    const warning = page.getByTestId('create-rewrite-warning');
+    await expect(warning).toContainText('anchors or aliases');
+    await expect(warning).not.toContainText('comment');
+
+    // And the expansion is exactly that: three copies of what the anchor held,
+    // and a document that still means the same thing.
+    await page.getByTestId('create-name').fill('checkout');
+    const text = await yamlText(page);
+    expect(text.match(/app: example/g)).toHaveLength(3);
+    expect(text).not.toContain('&labels');
+    expect(text).not.toContain('*labels');
   });
 
   test('what the form produced is what is sent, and only the confirm claims a write', async ({ page }) => {
