@@ -76,10 +76,11 @@ import MutationDialog from './MutationDialog';
 import ObjectForm from './ObjectForm';
 import YamlEditor, { validateYaml } from './YamlEditor';
 import {
-  rewriteLosses,
+  containsCycle,
   formModelFor,
   formatPath,
   localIssues,
+  rewriteLosses,
   toYaml,
   unrepresented,
 } from './objectForm';
@@ -123,10 +124,14 @@ export function ImportYamlDialog({ isOpen, title = 'Import YAML', initialText = 
     return seeded.valid && formModelFor(seeded.parsed?.apiVersion, seeded.parsed?.kind) ? 'form' : 'yaml';
   });
 
-  // Bumped only when something rewrites the document from outside the control
-  // that owns it — today just the selector repair. See `ObjectForm`'s docstring:
-  // the mapping and lines editors hold the half-typed shapes a document cannot,
-  // and remounting is how they are told to re-read.
+  // Bumped when something rewrites the document from outside the control that
+  // owns it: the selector repair, and adding or removing a container. See
+  // `ObjectForm`'s docstring — the mapping and lines editors hold the
+  // half-typed shapes a document cannot, and remounting is how they are told to
+  // re-read. The container case is the sharp one: the rows are index-keyed, so
+  // deleting one hands every later container a key that already has a mounted
+  // subtree, and its Command box would go on showing the deleted container's
+  // command until the next keystroke wrote it onto the survivor.
   const [formKey, setFormKey] = useState(0);
 
   // One fetch per opening. Not `useAsync` (that hook is page-scoped, keyed for
@@ -206,7 +211,15 @@ export function ImportYamlDialog({ isOpen, title = 'Import YAML', initialText = 
         ? 'The document has no `kind`, so this console cannot tell which form to show.'
         : !model
           ? `This console has no form for ${kind}. It has one for Pods, the six workload kinds, and NetworkPolicies; everything else is created from YAML.`
-          : null;
+          : containsCycle(parsed)
+            // A YAML anchor that refers to the node containing it parses into a
+            // genuinely cyclic object, and `toYaml` expands shared nodes rather
+            // than re-emitting the anchor — so the form could read this document
+            // and never write it back. Refused up front and named, rather than
+            // discovered as a stack overflow during a render that takes the
+            // dialog and everything typed into it with it.
+            ? 'This document has a YAML anchor that refers to the block containing it. The form would have to write it back out expanded, which never finishes, so it is edited in YAML view only.'
+            : null;
 
   const catalogPartial = catalog.unavailable.length > 0;
   const previewBlocked = catalog.loading

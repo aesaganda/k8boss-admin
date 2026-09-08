@@ -188,17 +188,42 @@ export function formatPath(path) {
  * be reportable as one, so it counts as a leaf rather than vanishing for having
  * nothing inside it.
  */
-export function leafPaths(object, prefix = []) {
+export function leafPaths(object, prefix = [], ancestors = new Set()) {
+  // A YAML anchor can refer to the node that contains it, and js-yaml resolves
+  // that into a genuinely cyclic object rather than refusing it. Without this
+  // set the walk never returns, and because `unrepresented()` runs inside a
+  // render the operator loses the dialog and everything typed into it to an
+  // error boundary that can name neither the document nor the anchor.
+  if (ancestors.has(object)) return [prefix];
+  const nested = new Set(ancestors);
+  if (object && typeof object === 'object') nested.add(object);
   if (Array.isArray(object)) {
     if (object.length === 0) return [prefix];
-    return object.flatMap((item, index) => leafPaths(item, [...prefix, index]));
+    return object.flatMap((item, index) => leafPaths(item, [...prefix, index], nested));
   }
   if (isMapping(object)) {
     const keys = Object.keys(object);
     if (keys.length === 0) return [prefix];
-    return keys.flatMap((key) => leafPaths(object[key], [...prefix, key]));
+    return keys.flatMap((key) => leafPaths(object[key], [...prefix, key], nested));
   }
   return [prefix];
+}
+
+/**
+ * Does this document contain a node that contains itself?
+ *
+ * `toYaml` cannot serialise one — `noRefs` expands shared nodes rather than
+ * re-emitting the anchor, so a cycle expands forever — which means the form
+ * cannot write such a document back and must not offer to. The YAML view is
+ * unaffected: the text is the text, and the dry run will have its own opinion.
+ */
+export function containsCycle(value, ancestors = new Set()) {
+  if (!value || typeof value !== 'object') return false;
+  if (ancestors.has(value)) return true;
+  const nested = new Set(ancestors);
+  nested.add(value);
+  const children = Array.isArray(value) ? value : isMapping(value) ? Object.values(value) : [];
+  return children.some((child) => containsCycle(child, nested));
 }
 
 /**
@@ -212,6 +237,42 @@ export function leafPaths(object, prefix = []) {
 function patternCovers(pattern, path, subtree) {
   if (subtree ? path.length < pattern.length : path.length !== pattern.length) return false;
   return pattern.every((segment, i) => (segment === '*' ? typeof path[i] === 'number' : segment === path[i]));
+}
+
+/**
+ * What each control needs to find at its path, and what to call what it found.
+ *
+ * A document can hold any shape anywhere — `labels: production` where a block of
+ * keys belongs, `command: run` where a list does. Two things read this table and
+ * they have to agree: the renderer, which disables a control that cannot show
+ * what is there, and `unrepresented()`, which must then stop counting that
+ * field as represented. A control that is inert and a field that is called
+ * covered is the one combination where the form hides something while saying it
+ * hides nothing.
+ */
+export const CONTROL_SHAPES = {
+  keyValue: { ok: (value) => isMapping(value), wants: 'a set of key/value pairs' },
+  stringLines: { ok: (value) => Array.isArray(value), wants: 'a list' },
+  checkboxSet: { ok: (value) => Array.isArray(value), wants: 'a list' },
+  containers: { ok: (value) => Array.isArray(value), wants: 'a list' },
+};
+
+/** The shape a control expects; scalars are the default. */
+export function shapeFor(control) {
+  return CONTROL_SHAPES[control] ?? { ok: (v) => !isMapping(v) && !Array.isArray(v), wants: 'a single value' };
+}
+
+/** A value described as an operator would read it in the YAML. */
+export function describeShape(value) {
+  if (Array.isArray(value)) return 'a list';
+  if (isMapping(value)) return 'a block of keys';
+  if (value instanceof Date) return 'a timestamp';
+  return `the ${typeof value} ${JSON.stringify(value)}`;
+}
+
+/** Is `prefix` a strict prefix of `pattern`? */
+function startsWithPath(pattern, prefix) {
+  return pattern.length > prefix.length && prefix.every((segment, i) => pattern[i] === segment);
 }
 
 /* ── The document, as text ──────────────────────────────────────────────── */
@@ -1043,13 +1104,33 @@ export function unrepresented(document, model) {
     { path: ['apiVersion'] },
     { path: ['kind'] },
     { path: ['metadata', 'namespace'] },
-    ...modelFields(model).flatMap((field) =>
-      field.coverage ?? [{ path: field.path, subtree: Boolean(field.subtree) }],
-    ),
+    ...modelFields(model).flatMap((field) => {
+      // A field whose value is the wrong shape for its control has an inert
+      // control (see `CONTROL_SHAPES`), so it is not represented however many
+      // patterns point at it. `metadata.labels` written as a list is the case
+      // that matters: it is the classic paste error, and it is what sends
+      // somebody to this dialog in the first place.
+      const value = getIn(document, field.path);
+      if (value != null && !shapeFor(field.control).ok(value)) return [];
+      return field.coverage ?? [{ path: field.path, subtree: Boolean(field.subtree) }];
+    }),
   ];
-  return leafPaths(document).filter(
-    (path) => !patterns.some((pattern) => patternCovers(pattern.path, path, Boolean(pattern.subtree))),
-  );
+
+  const covered = (path) => patterns.some((pattern) => patternCovers(pattern.path, path, Boolean(pattern.subtree)));
+
+  return leafPaths(document).filter((path) => {
+    if (covered(path)) return false;
+    // An empty block or list is a leaf with nothing in it to hide, and a
+    // control that writes *inside* it owns it: a NetworkPolicy's
+    // `podSelector: {}` is exactly what the pod-selector control shows as no
+    // rows, and listing it as a field the form does not touch — on the very
+    // first policy anybody creates — is wrong in both directions at once.
+    const value = getIn(document, path);
+    const isEmptyContainer =
+      (isMapping(value) && Object.keys(value).length === 0) || (Array.isArray(value) && value.length === 0);
+    if (isEmptyContainer && patterns.some((pattern) => startsWithPath(pattern.path, path))) return false;
+    return true;
+  });
 }
 
 /* ── Local checks ───────────────────────────────────────────────────────── */
@@ -1183,12 +1264,20 @@ export function localIssues(document, model) {
   // server refuses the whole object with an unmarshalling error that names no
   // field. The form's own editor only ever writes strings, so this is here for
   // what was pasted.
-  for (const [where, path] of [
-    ['metadata.labels', ['metadata', 'labels']],
-    ['metadata.annotations', ['metadata', 'annotations']],
-    ...(model.podLabelsPath ? [[formatPath(model.podLabelsPath), model.podLabelsPath]] : []),
-    ...(model.selectorPath ? [[formatPath(model.selectorPath), model.selectorPath]] : []),
-  ]) {
+  // Deduplicated by path: on a Pod, `podLabelsPath` *is* `metadata.labels` —
+  // the same field reached two ways — and reporting it twice tells an operator
+  // counting errors before a create that a second field is wrong too.
+  const labelPaths = new Map(
+    [
+      ['metadata', 'labels'],
+      ['metadata', 'annotations'],
+      model.podLabelsPath,
+      model.selectorPath,
+    ]
+      .filter(Boolean)
+      .map((path) => [formatPath(path), path]),
+  );
+  for (const [where, path] of labelPaths) {
     const mapping = getIn(document, path);
     if (!isMapping(mapping)) continue;
     for (const [key, value] of Object.entries(mapping)) {

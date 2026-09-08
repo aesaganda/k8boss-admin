@@ -280,6 +280,87 @@ test.describe('the create dialog form view', () => {
     await expect(page.getByTestId('create-unrepresented')).toContainText('spec.selector.matchExpressions');
   });
 
+  test('removing a container does not leave its command in the surviving row', async ({ page }) => {
+    // The container rows are index-keyed and their Command box holds its own
+    // text, so without a remount the survivor goes on showing the deleted
+    // container's command — and the next keystroke writes it onto the survivor.
+    await openForm(
+      page,
+      DEPLOYMENT.replace(
+        '        - name: example\n          image: docker.io/nginxinc/nginx-unprivileged:1.30-alpine\n',
+        `        - name: sidecar
+          image: busybox
+          command:
+            - /bin/sh
+            - "-c"
+            - tail -f /dev/null
+        - name: app
+          image: docker.io/nginxinc/nginx-unprivileged:1.30-alpine
+          command:
+            - nginx
+            - "-g"
+            - daemon off;
+`,
+      ),
+    );
+
+    await expect(page.getByTestId('create-container-command-0')).toHaveValue(/tail -f/);
+    await page.getByTestId('create-container-remove-0').click();
+
+    await expect(page.getByTestId('create-container-name-0')).toHaveValue('app');
+    await expect(page.getByTestId('create-container-command-0')).toHaveValue(/nginx/);
+    await expect(page.getByTestId('create-container-command-0')).not.toHaveValue(/tail -f/);
+
+    // And a keystroke in that box writes the surviving container's command,
+    // not the deleted one's.
+    await page.getByTestId('create-container-image-0').fill('nginx:1.30');
+    const text = await yamlText(page);
+    expect(text).toContain('nginx');
+    expect(text).not.toContain('tail -f');
+  });
+
+  test('with no pod labels the repair runs the other way rather than emptying the selector', async ({
+    page,
+  }) => {
+    // "Copy the pod labels into the selector" with no pod labels copies nothing
+    // — and a selector is immutable once the object exists, so a button that
+    // deleted it would not be undoable.
+    await openForm(
+      page,
+      DEPLOYMENT.replace('    metadata:\n      labels:\n        app: example\n', '    metadata: {}\n'),
+    );
+
+    await expect(page.getByTestId('create-selector-repair')).toHaveCount(0);
+    await page.getByTestId('create-selector-repair-labels').click();
+
+    const text = await yamlText(page);
+    expect(text).toContain('app: example');
+    expect(text).not.toContain('matchLabels: {}');
+  });
+
+  test('a self-referential anchor is refused by the form rather than crashing it', async ({ page }) => {
+    // js-yaml resolves this into a genuinely cyclic object; walking it or
+    // dumping it never returns. Named up front, in YAML view, with the document
+    // still in the box.
+    await openImport(
+      page,
+      `apiVersion: apps/v1
+kind: Deployment
+metadata: &meta
+  name: example
+  namespace: prod
+  annotations:
+    self: *meta
+spec:
+  replicas: 1
+`,
+    );
+
+    await expect(page.getByTestId('create-view-form')).toBeDisabled();
+    await expect(page.getByTestId('create-view-form-reason')).toContainText('refers to the block containing it');
+    await expect(page.getByTestId('yaml-editor-input')).toHaveValue(/self: \*meta/);
+  });
+
   test('the comments a form edit would destroy are counted before it happens', async ({ page }) => {
     await mockApi(page, { preflight: ALLOW_ALL });
     await page.goto('/network');
@@ -294,6 +375,12 @@ test.describe('the create dialog form view', () => {
     // reading. Both are the sentences the policy page uses.
     await expect(page.getByTestId('create-issues-info')).toContainText('every pod in the namespace');
     await expect(page.getByTestId('create-issues-info')).toContainText('denies all inbound traffic');
+
+    // And `podSelector: {}` — an empty block the pod-selector control owns — is
+    // not listed as a field the form does not touch. On the first policy
+    // anybody creates, that would be wrong about its single most consequential
+    // field.
+    await expect(page.getByTestId('create-unrepresented-none')).toBeVisible();
 
     // And the warning clears once the rewrite has happened, rather than
     // standing there describing something already done.

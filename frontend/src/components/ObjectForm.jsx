@@ -22,14 +22,22 @@
  * Rule 11.2 is usually about rendering a `null` we could not read — this is the
  * same rule one layer up, on the way back out.
  *
- * **Two controls keep local state, and both say why.** A mapping editor (labels,
- * a selector) and a lines editor (a command, dropped capabilities) both have
- * intermediate states the document cannot hold: a row whose key is still being
- * typed is not a key, and a trailing newline is not an argument. They keep the
- * half-typed shape locally and publish only what parses. The form is remounted
- * — by `key` — whenever the document changes from outside it, which is the one
- * case where their local state would be describing something that is no longer
- * there.
+ * **Three controls keep local state, and all of them say why.** A mapping editor
+ * (labels, a selector), a lines editor (a command, dropped capabilities) and a
+ * number box all have intermediate states the document cannot hold: a row whose
+ * key is still being typed is not a key, a trailing newline is not an argument,
+ * and "3." is not a number. They keep the half-typed shape locally and publish
+ * only what parses.
+ *
+ * That makes `onReplace` load-bearing rather than a convenience. It is
+ * `onChange` plus "the controls holding local state are now describing a
+ * document that no longer exists", and the parent answers it by remounting the
+ * form. Two edits need it: the selector repair, which rewrites a mapping from
+ * outside its own editor, and adding or removing a container — the rows are
+ * index-keyed, so deleting one hands every later container a key that already
+ * has a mounted subtree, and without the remount the survivor's Command box
+ * goes on showing the deleted container's command and writes it back on the
+ * next keystroke.
  */
 import { useState } from 'react';
 import {
@@ -55,6 +63,7 @@ import { SectionHeader } from './ui';
 import {
   CONTROLS,
   PULL_POLICIES,
+  describeShape,
   formatPath,
   getIn,
   integerOrUndefined,
@@ -62,6 +71,7 @@ import {
   isMapping,
   scalarBlocker,
   setIn,
+  shapeFor,
   unsetIn,
 } from './objectForm';
 
@@ -85,9 +95,25 @@ function Reasoned({ reason, children }) {
 
 /* ── Mapping editor ─────────────────────────────────────────────────────── */
 
+/**
+ * A mapping as editable rows, keeping what cannot be edited.
+ *
+ * A value YAML did not parse as a string — `version: 1`, an unquoted date — is
+ * carried as `original` and never re-stringified. `String(aDate)` is
+ * locale- and timezone-dependent, so an operator who edited one annotation
+ * would ship a second one they never looked at, spelled differently depending
+ * on which machine the console was open on. The row shows what is there and
+ * says why it is not editable here, exactly as an `env` entry with a
+ * `valueFrom` does.
+ */
 function toRows(mapping) {
   if (!isMapping(mapping)) return [];
-  return Object.entries(mapping).map(([key, value]) => ({ key, value: value == null ? '' : String(value) }));
+  return Object.entries(mapping).map(([key, value]) => ({
+    key,
+    value: typeof value === 'string' ? value : '',
+    original: value,
+    literal: value != null && typeof value !== 'string',
+  }));
 }
 
 /**
@@ -102,7 +128,7 @@ function fromRows(rows) {
   const mapping = {};
   for (const row of rows) {
     const key = row.key.trim();
-    if (key) mapping[key] = row.value;
+    if (key) mapping[key] = row.literal ? row.original : row.value;
   }
   return mapping;
 }
@@ -155,16 +181,24 @@ function KeyValueRows({ value, onChange, idPrefix, noun, isDisabled }) {
             />
           </GridItem>
           <GridItem span={5}>
-            <TextInput
-              aria-label={`${noun} ${index + 1} value`}
-              data-testid={`${idPrefix}-value-${index}`}
-              value={row.value}
-              isDisabled={isDisabled}
-              placeholder="value"
-              onChange={(_e, next) =>
-                publish(rows.map((item, i) => (i === index ? { ...item, value: next } : item)))
+            <Reasoned
+              reason={
+                row.literal
+                  ? `This value is ${describeShape(row.original)} in the document rather than text, so it is kept exactly as written. The API server requires a string here; quote it in YAML view.`
+                  : null
               }
-            />
+            >
+              <TextInput
+                aria-label={`${noun} ${index + 1} value`}
+                data-testid={`${idPrefix}-value-${index}`}
+                value={row.literal ? describeShape(row.original) : row.value}
+                isDisabled={isDisabled || row.literal}
+                placeholder="value"
+                onChange={(_e, next) =>
+                  publish(rows.map((item, i) => (i === index ? { ...item, value: next } : item)))
+                }
+              />
+            </Reasoned>
           </GridItem>
           <GridItem span={2}>
             <Button
@@ -421,10 +455,17 @@ function QuantityInput({ id, document: doc, onDocument, path, label, placeholder
   );
 }
 
-function ContainersEditor({ document: doc, onDocument, path, isDisabled }) {
+function ContainersEditor({ document: doc, onDocument, onReplace, path, isDisabled }) {
   const containers = getIn(doc, path);
   const rows = Array.isArray(containers) ? containers : [];
-  const write = (next) => onDocument(next.length ? setIn(doc, path, next) : unsetIn(doc, path));
+  // Adding or removing a container is `onReplace`, not `onDocument`: the rows
+  // are index-keyed, so deleting one hands every later container a key that
+  // already has a mounted subtree, and the Command, Arguments and capability
+  // boxes in it hold their own text. Without the remount the survivor's row
+  // goes on showing the deleted container's command — and the next keystroke
+  // in that box writes it onto the survivor, replacing a manifest nobody wrote
+  // with one that looks fine in the diff.
+  const write = (next) => onReplace(next.length ? setIn(doc, path, next) : unsetIn(doc, path));
 
   return (
     <>
@@ -768,33 +809,6 @@ function Help({ text }) {
   );
 }
 
-/**
- * What each control needs to find at its path, and what to call what it found.
- *
- * A document can hold any shape anywhere — `labels: production` instead of a
- * mapping, `policyTypes: Ingress` instead of a list. Rendering a mapping editor
- * over a string shows an empty editor, and the first row added would overwrite
- * the string with something else entirely: the screen would say the field is
- * empty while the document says it is not, and the operator would approve a
- * diff for the difference between them. So a control that cannot show what is
- * there says so and stays out of the way, exactly like `scalarBlocker`'s case
- * one level up.
- */
-const CONTROL_SHAPES = {
-  keyValue: { ok: (value) => isMapping(value), wants: 'a set of key/value pairs' },
-  stringLines: { ok: (value) => Array.isArray(value), wants: 'a list' },
-  checkboxSet: { ok: (value) => Array.isArray(value), wants: 'a list' },
-  containers: { ok: (value) => Array.isArray(value), wants: 'a list' },
-};
-
-/** A value described as an operator would read it in the YAML. */
-function describeShape(value) {
-  if (Array.isArray(value)) return 'a list';
-  if (isMapping(value)) return 'a block of keys';
-  if (value instanceof Date) return 'a timestamp';
-  return `the ${typeof value} ${JSON.stringify(value)}`;
-}
-
 function Field({ field, model, document: doc, onDocument, onReplace, isDisabled }) {
   const id = `create-${field.id}`;
   const value = getIn(doc, field.path);
@@ -804,7 +818,7 @@ function Field({ field, model, document: doc, onDocument, onReplace, isDisabled 
   // it — rather than a form that appears to work and silently drops what was
   // written there.
   const blocker = scalarBlocker(doc, field.path);
-  const shape = CONTROL_SHAPES[field.control] ?? { ok: (v) => !isMapping(v) && !Array.isArray(v), wants: 'a single value' };
+  const shape = shapeFor(field.control);
   const blockedReason = blocker
     ? `"${formatPath(blocker)}" in this document holds a single value rather than a block, so this control cannot write inside it. Edit it in YAML view.`
     : value != null && !shape.ok(value)
@@ -969,7 +983,13 @@ function Field({ field, model, document: doc, onDocument, onReplace, isDisabled 
 
     case 'containers':
       control = (
-        <ContainersEditor document={doc} onDocument={onDocument} path={field.path} isDisabled={inert} />
+        <ContainersEditor
+          document={doc}
+          onDocument={onDocument}
+          onReplace={onReplace}
+          path={field.path}
+          isDisabled={inert}
+        />
       );
       break;
 
@@ -997,11 +1017,33 @@ function Field({ field, model, document: doc, onDocument, onReplace, isDisabled 
   // looks finished. The repair is offered as a button rather than done
   // automatically, because a selector is immutable after creation and an edit
   // nobody saw is an edit nobody reviewed.
+  const podLabels = field.id === 'selector' && model.podLabelsPath ? getIn(doc, model.podLabelsPath) : null;
   const selectorMismatch =
     field.id === 'selector' &&
     model.podLabelsPath &&
     isMapping(value) &&
+    Object.keys(value).length > 0 &&
     Object.entries(value).some(([key, entry]) => String(getIn(doc, [...model.podLabelsPath, key])) !== String(entry));
+
+  // Which way the repair runs depends on which side has something in it. With
+  // no pod labels at all, "copy the pod labels into the selector" copies
+  // nothing — `{...undefined}` is `{}` — so a button that said it was copying
+  // labels would instead delete the selector the operator wrote, in a field
+  // that is immutable once the object exists. The useful move there is the
+  // other direction, and it is offered as what it is.
+  const repair = !selectorMismatch
+    ? null
+    : isMapping(podLabels) && Object.keys(podLabels).length > 0
+      ? {
+          label: 'Copy the pod labels into the selector',
+          testid: 'create-selector-repair',
+          next: () => setIn(doc, field.path, { ...podLabels }),
+        }
+      : {
+          label: 'Copy the selector into the pod labels',
+          testid: 'create-selector-repair-labels',
+          next: () => setIn(doc, model.podLabelsPath, { ...value }),
+        };
 
   return (
     <FormGroup
@@ -1011,15 +1053,15 @@ function Field({ field, model, document: doc, onDocument, onReplace, isDisabled 
       style={{ marginBlockStart: 'var(--admin-gap-sm, 0.5rem)' }}
     >
       <Reasoned reason={blockedReason}>{control}</Reasoned>
-      {selectorMismatch && (
+      {repair && (
         <div style={{ marginBlockStart: '0.5rem' }}>
           <Button
             variant="secondary"
-            data-testid="create-selector-repair"
+            data-testid={repair.testid}
             isDisabled={isDisabled}
-            onClick={() => onReplace(setIn(doc, field.path, { ...getIn(doc, model.podLabelsPath) }))}
+            onClick={() => onReplace(repair.next())}
           >
-            Copy the pod labels into the selector
+            {repair.label}
           </Button>
         </div>
       )}
