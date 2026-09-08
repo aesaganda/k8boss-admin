@@ -296,7 +296,7 @@ test.describe('single sign-on', () => {
 
     // A button that leads to an error reads as a broken console. No button reads
     // as "SSO is not set up here", which is true and actionable.
-    await expect(page.getByTestId('login-sso')).toHaveCount(0);
+    await expect(page.getByTestId('login-sso-oidc')).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'Sign in' })).toBeVisible();
   });
 
@@ -306,7 +306,50 @@ test.describe('single sign-on', () => {
     });
     await page.goto('/');
 
-    await expect(page.getByTestId('login-sso')).toContainText('Acme SSO');
+    await expect(page.getByTestId('login-sso-oidc')).toContainText('Acme SSO');
+  });
+
+  test('every configured provider gets its own button, with its own name on it', async ({ page }) => {
+    // Four kinds of single sign-on can be configured at once, and a deployment
+    // offering two of them has to be able to say which is which: "Single
+    // sign-on" twice is a choice nobody can make.
+    await mockApi(page, {
+      auth: {
+        authenticated: false,
+        ssoProviders: [
+          { name: 'oidc', label: 'Keycloak', startPath: '/api/auth/oidc/start' },
+          { name: 'openshift', label: 'OpenShift', startPath: '/api/auth/openshift/start' },
+          { name: 'saml', label: 'Corporate SAML', startPath: '/api/auth/saml/start' },
+        ],
+      },
+    });
+    await page.goto('/');
+
+    await expect(page.getByTestId('login-sso-oidc')).toContainText('Keycloak');
+    await expect(page.getByTestId('login-sso-openshift')).toContainText('OpenShift');
+    await expect(page.getByTestId('login-sso-saml')).toContainText('Corporate SAML');
+    // A provider that is not configured has no button at all.
+    await expect(page.getByTestId('login-sso-oauth')).toHaveCount(0);
+  });
+
+  test('each button starts its own provider, not the first one', async ({ page }) => {
+    await mockApi(page, {
+      auth: {
+        authenticated: false,
+        ssoProviders: [
+          { name: 'oidc', label: 'Keycloak', startPath: '/api/auth/oidc/start' },
+          { name: 'openshift', label: 'OpenShift', startPath: '/api/auth/openshift/start' },
+        ],
+      },
+    });
+    await page.route('**/api/auth/*/start*', (route) =>
+      route.fulfill({ status: 200, contentType: 'text/html', body: '<html><body>idp</body></html>' }),
+    );
+
+    await page.goto('/nodes');
+    await page.getByTestId('login-sso-openshift').click();
+
+    await expect(page).toHaveURL(/\/api\/auth\/openshift\/start\?next=%2Fnodes/);
   });
 
   test('starting SSO leaves the SPA for the provider and carries the return path', async ({ page }) => {
@@ -319,7 +362,7 @@ test.describe('single sign-on', () => {
     );
 
     await page.goto('/workloads');
-    await page.getByTestId('login-sso').click();
+    await page.getByTestId('login-sso-oidc').click();
 
     await expect(page).toHaveURL(/\/api\/auth\/oidc\/start\?next=%2Fworkloads/);
   });

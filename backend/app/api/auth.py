@@ -38,7 +38,7 @@ from app.config import settings
 from app.database import get_db
 from app.errors import AdminError, Invalid, InvalidCredentials, NotFound
 from app.identity import handshake as handshake_service
-from app.identity import oidc, throttle
+from app.identity import oidc, saml, sso, throttle
 from app.identity.dependencies import current_session, require_admin
 from app.identity.service import (
     FEDERATED_SOURCES,
@@ -203,27 +203,43 @@ def auth_config() -> dict:
     """Public discovery. What the login page needs to render, and nothing more.
 
     Deliberately unauthenticated, so the SPA can decide what to show on first
-    paint. It therefore says only *which* methods exist — never the issuer URL,
-    the client id, the configured groups or anything else that would let an
-    unauthenticated caller enumerate how this deployment is wired.
+    paint. It therefore says only *which* methods exist — never an issuer URL, a
+    client id, an API server address, the configured groups or anything else that
+    would let an unauthenticated caller enumerate how this deployment is wired.
+
+    ``oidcEnabled`` and ``oidc`` are the OpenID Connect entries of
+    ``ssoProviders``, repeated. They are retained rather than folded in because a
+    browser holding an older build of the SPA reads them, and dropping them would
+    take that deployment's sign-in button away at the moment the backend was
+    upgraded — a console nobody can log in to, produced by a release that changed
+    no behaviour.
     """
-    sso_available = oidc.enabled() and settings.auth_enabled
+    available = sso.enabled_providers()
+    entries = [
+        {
+            "name": provider.NAME,
+            "label": provider.label(),
+            "startPath": f"/api/auth/{provider.NAME}/start",
+        }
+        for provider in available
+    ]
+    oidc_entry = next(
+        (entry for entry in entries if entry["name"] == oidc.NAME), None
+    )
     return {
         "enabled": settings.auth_enabled,
         "localEnabled": True,
         "ldapEnabled": settings.ldap_enabled,
-        "oidcEnabled": sso_available,
+        "oidcEnabled": oidc_entry is not None,
         "methods": [
             "local",
             *(("ldap",) if settings.ldap_enabled else ()),
-            *(("oidc",) if sso_available else ()),
+            *(entry["name"] for entry in entries),
         ],
+        "ssoProviders": entries,
         "oidc": (
-            {
-                "label": settings.oidc_button_label,
-                "startPath": "/api/auth/oidc/start",
-            }
-            if sso_available
+            {"label": oidc_entry["label"], "startPath": oidc_entry["startPath"]}
+            if oidc_entry
             else None
         ),
     }
@@ -328,31 +344,66 @@ def logout(request: Request) -> Response:
 
 
 # --------------------------------------------------------------------------- #
-# OpenID Connect single sign-on (§12.4)
+# Single sign-on (§12.4) — one pair of routes for four providers
 # --------------------------------------------------------------------------- #
 #
-# Two browser-navigation endpoints, which is what makes them different from
-# every other route in this API: the caller is a redirect, not `fetch()`, so a
-# §1.3 error envelope would be rendered as raw JSON in the address bar instead of
-# being read by the SPA. Failures therefore redirect back to the console with a
-# query string the login page renders, and the codes in it are drawn from the
-# same §1.3 vocabulary so there is one set of names rather than two.
+# Browser-navigation endpoints, which is what makes them different from every
+# other route in this API: the caller is a redirect or a form POST, not
+# `fetch()`, so a §1.3 error envelope would be rendered as raw JSON in the
+# address bar instead of being read by the SPA. Failures therefore redirect back
+# to the console with a query string the login page renders, and the codes in it
+# are drawn from the same §1.3 vocabulary so there is one set of names rather
+# than two.
+#
+# **One `/start` and one callback per binding, not one pair per provider.**
+# OpenID Connect, generic OAuth 2.0, OpenShift and SAML differ in how an
+# assertion is obtained and in what makes it trustworthy — all of which lives in
+# `app/identity/*.py` — and differ in nothing that happens afterwards. Four
+# hand-written route pairs would be four copies of the throttle, the audit calls,
+# the account provisioning and the failure redirect, and the first one to lose a
+# copy would be invisible from outside: same status, same shape, no failing test,
+# and a hole in the audit trail found later by somebody asking who signed in.
 
 
-def _redirect_uri(request: Request) -> str:
-    """The callback URL to send the issuer, and to send it again on exchange.
+#: Largest body accepted at the SAML assertion consumer service. A SAML response
+#: is a few kilobytes once base64-encoded; a megabyte of it is somebody probing
+#: what the parser does, and the answer should be "refuses it" rather than "finds
+#: out". Checked against Content-Length first so an oversized body is refused
+#: before it is read.
+_MAX_ACS_BODY_BYTES = 1024 * 1024
 
-    OAuth requires the ``redirect_uri`` on the token exchange to be byte-identical
-    to the one on the authorization request, so it is computed once, sealed into
-    the handshake cookie, and read back — rather than recomputed at the callback,
-    where a different forwarded header would produce a different string and an
-    ``invalid_grant`` that reads as a credential problem.
 
-    Configured explicitly when ``OIDC_REDIRECT_URL`` is set. Otherwise derived
-    from the forwarded host, which is correct behind one well-configured ingress
-    and wrong behind anything that rewrites Host — hence the setting.
+def _provider_or_404(name: str):
+    """The provider module for a URL segment, or a 404.
+
+    A 404 rather than a validation error, and it is checked before anything else
+    happens: the failure redirect interpolates the provider name, so an
+    unvalidated one would be reflected into a URL this console sends a browser to.
     """
-    configured = settings.oidc_redirect_url.strip()
+    module = sso.get(name)
+    if module is None:
+        raise NotFound(
+            f"There is no {name!r} single sign-on provider.",
+            context={"resource": "auth", "name": name},
+        )
+    return module
+
+
+def _callback_url(request: Request, provider) -> str:
+    """The callback URL to send the provider, and to send it again on exchange.
+
+    OAuth requires the ``redirect_uri`` on the token exchange to be
+    byte-identical to the one on the authorization request, and SAML checks the
+    ``Recipient`` in the assertion against the ACS URL — so it is computed once,
+    sealed into the handshake cookie, and read back, rather than recomputed at
+    the callback where a different forwarded header would produce a different
+    string and an ``invalid_grant`` that reads as a credential problem.
+
+    Configured explicitly when the provider's redirect setting is set. Otherwise
+    derived from the forwarded host, which is correct behind one well-configured
+    ingress and wrong behind anything that rewrites Host — hence the setting.
+    """
+    configured = provider.configured_callback_url()
     if configured:
         return configured
     proto = request.headers.get("x-forwarded-proto") or request.url.scheme
@@ -361,7 +412,7 @@ def _redirect_uri(request: Request) -> str:
         or request.headers.get("host")
         or request.url.netloc
     )
-    return f"{proto}://{host}/api/auth/oidc/callback"
+    return f"{proto}://{host}/api/auth/{provider.NAME}/{provider.CALLBACK_SUFFIX}"
 
 
 def _sso_failure(next_path: str, code: str, reason: str) -> RedirectResponse:
@@ -386,73 +437,70 @@ def _sso_failure(next_path: str, code: str, reason: str) -> RedirectResponse:
     return RedirectResponse(url=f"{path}?{urlencode(params)}", status_code=302)
 
 
-@router.get("/oidc/start")
-def oidc_start(request: Request, next: str = "/") -> RedirectResponse:
-    """Begin the Authorization Code + PKCE handshake: redirect to the issuer.
+@router.get("/{provider}/start")
+def sso_start(provider: str, request: Request, next: str = "/") -> RedirectResponse:
+    """Begin a handshake: redirect to the identity provider.
 
-    The four secrets this sign-in needs on the way back — state, nonce, PKCE
-    verifier and the exact redirect URI — go into one sealed, short-lived,
-    ``SameSite=Lax`` cookie. See :mod:`app.identity.handshake`.
+    Everything the sign-in needs on the way back — a state or request id, a nonce
+    and PKCE verifier where the flow has them, and the exact callback URL — goes
+    into one sealed, short-lived cookie named for this provider. See
+    :mod:`app.identity.handshake`, including why SAML's cannot share the others'
+    ``SameSite``.
     """
+    module = _provider_or_404(provider)
     next_path = handshake_service.safe_next_path(next)
     if not settings.auth_enabled:
         raise Invalid("Application authentication is not enabled on this deployment.")
-    oidc.require_enabled()
+    module.require_enabled()
 
-    state = secrets.token_urlsafe(24)
-    nonce = secrets.token_urlsafe(24)
-    verifier, challenge = oidc.generate_pkce()
-    redirect_uri = _redirect_uri(request)
-
+    callback_url = _callback_url(request, module)
     try:
-        target = oidc.authorization_url(
-            redirect_uri=redirect_uri, state=state, nonce=nonce,
-            code_challenge=challenge,
-        )
+        started = module.begin(callback_url=callback_url, next_path=next_path)
     except AdminError as error:
+        # Reaching the provider can fail here for the two flows that discover
+        # their endpoints (OIDC, OpenShift). Recorded, because a run of these is
+        # worth seeing, and redirected rather than raised because the caller is
+        # a browser navigation.
         _audit_signin(
-            outcome="failed", username="(sso)", method="oidc",
+            outcome="failed", username="(sso)", method=module.NAME,
             detail="Single sign-on could not be started.",
             error=f"{error.code}: {error.message}",
         )
         return _sso_failure(next_path, error.code, "provider_unreachable")
 
-    response = RedirectResponse(url=target, status_code=302)
+    response = RedirectResponse(url=started.url, status_code=302)
     response.set_cookie(
-        handshake_service.COOKIE_NAME,
-        handshake_service.seal(
-            handshake_service.Handshake(
-                state=state, nonce=nonce, code_verifier=verifier,
-                redirect_uri=redirect_uri, next_path=next_path,
-            )
-        ),
-        **handshake_service.cookie_attributes(),
+        handshake_service.cookie_name(module.NAME),
+        handshake_service.seal(started.handshake),
+        **handshake_service.cookie_attributes(module.NAME),
     )
     return response
 
 
-@router.get("/oidc/callback")
-def oidc_callback(
+def _complete_sso(
+    *,
+    module,
     request: Request,
-    code: str | None = None,
-    state: str | None = None,
-    error: str | None = None,
-    db: Session = Depends(get_db),
+    params: dict,
+    provider_error: str | None,
+    db: Session,
 ) -> RedirectResponse:
-    """Complete the handshake: verify the assertion, provision, issue a session.
+    """The half of every single sign-on that is the same for all four providers.
 
-    Nothing in the ID token is read before it has been verified against the
-    issuer's published keys — signature, issuer, audience, expiry and the nonce
-    from this browser's own handshake. See :mod:`app.identity.oidc` for what each
-    of those checks prevents.
+    Verification is the provider's; everything from "is this response ours" to
+    "issue the session" is here, once. ``params`` is the callback's query string
+    for the redirect providers and its form body for SAML — the only shape
+    difference between the two bindings, and the reason it is passed in rather
+    than read off the request.
     """
-    sealed = request.cookies.get(handshake_service.COOKIE_NAME)
-    pending = handshake_service.unseal(sealed)
+    sealed = request.cookies.get(handshake_service.cookie_name(module.NAME))
+    pending = handshake_service.unseal(sealed, provider=module.NAME)
     next_path = pending.next_path if pending else "/"
 
     def _clear(response: RedirectResponse) -> RedirectResponse:
         response.delete_cookie(
-            handshake_service.COOKIE_NAME, path=handshake_service.COOKIE_PATH
+            handshake_service.cookie_name(module.NAME),
+            path=handshake_service.cookie_path(module.NAME),
         )
         return response
 
@@ -469,7 +517,7 @@ def oidc_callback(
     # not a failed sign-in. It is a stray request, and recording it as a refused
     # authentication would also put rows in the trail that no operator's action
     # produced — noise in the table that is supposed to be evidence.
-    if not oidc.enabled():
+    if not module.enabled():
         return _clear(_sso_failure(next_path, "invalid", "sso_not_configured"))
     if pending is None:
         return _clear(
@@ -477,50 +525,43 @@ def oidc_callback(
         )
 
     # ── Past here the handshake is ours, so a failure is a real event. ───────
-    if error:
-        # The issuer refused a sign-in we started — a declined consent screen, a
-        # user not assigned to the application. Recorded because a run of these
+    if provider_error:
+        # The provider refused a sign-in we started — a declined consent screen,
+        # a user not assigned to the application. Recorded because a run of these
         # against one console is worth being able to see. Bounded, because the
         # value is attacker-influenced and lands in a column.
         _audit_signin(
-            outcome="denied", username="(sso)", method="oidc",
+            outcome="denied", username="(sso)", method=module.NAME,
             detail="The identity provider refused the sign-in.",
-            error=str(error)[:200],
+            error=str(provider_error)[:200],
         )
         return _clear(_sso_failure(next_path, "permission_denied", "provider_refused"))
 
-    if not code or not state or not secrets.compare_digest(state, pending.state):
-        # A mismatched state is what a forged callback looks like, so it is a
-        # refusal rather than a retry prompt, and it is recorded.
-        _audit_signin(
-            outcome="denied", username="(sso)", method="oidc",
-            detail="The single sign-on callback did not match a handshake this "
-                   "console started.",
-        )
-        return _clear(_sso_failure(next_path, "invalid", "state_mismatch"))
+    if module.BINDING == "query":
+        # `state` is checked here rather than inside the provider because it is a
+        # property of the handshake, not of the assertion: the same comparison for
+        # all three redirect flows, against the same sealed value. SAML's
+        # equivalent — `InResponseTo` — is checked inside the *signed* assertion
+        # instead, because a value read from the unsigned wrapper would be one the
+        # attacker chose.
+        state = params.get("state") or ""
+        if not params.get("code") or not secrets.compare_digest(state, pending.state):
+            _audit_signin(
+                outcome="denied", username="(sso)", method=module.NAME,
+                detail="The single sign-on callback did not match a handshake this "
+                       "console started.",
+            )
+            return _clear(_sso_failure(next_path, "invalid", "state_mismatch"))
 
     try:
-        tokens = oidc.exchange_code(
-            code=code,
-            code_verifier=pending.code_verifier,
-            redirect_uri=pending.redirect_uri,
-        )
-        id_token = tokens.get("id_token")
-        if not id_token:
-            raise InvalidCredentials(
-                "The identity provider returned no ID token, so it asserted "
-                "nothing about who signed in.",
-            )
-        claims = oidc.verify_id_token(id_token, nonce=pending.nonce)
-        identity = oidc.identity_from_claims(claims)
-        oidc.check_group_allowlist(identity)
+        identity = module.complete(handshake=pending, params=params)
     except AdminError as failure:
         # 5xx-shaped failures are the provider's; 4xx-shaped ones are a refusal.
         # Kept apart in the trail because they send an operator to different
         # places, and because only a refusal should ever look like an attack.
         outcome = "failed" if failure.http_status >= 500 else "denied"
         _audit_signin(
-            outcome=outcome, username="(sso)", method="oidc",
+            outcome=outcome, username="(sso)", method=module.NAME,
             detail="Single sign-on assertion was not accepted.",
             error=f"{failure.code}: {failure.message}",
         )
@@ -529,38 +570,146 @@ def oidc_callback(
     try:
         user = provision_federated_user(
             db,
-            source="oidc",
+            source=module.NAME,
             username=identity.username,
             external_id=identity.subject,
             display_name=identity.display_name,
             email=identity.email,
             groups=identity.groups,
-            admin_group=settings.oidc_admin_group,
+            admin_group=module.admin_group(),
         )
     except AdminError as failure:
         _audit_signin(
             outcome="denied", username=_normalized_or_raw(identity.username),
-            method="oidc",
+            method=module.NAME,
             detail="A verified single sign-on identity was refused a console account.",
             error=f"{failure.code}: {failure.message}",
         )
         return _clear(_sso_failure(next_path, failure.code, "account_refused"))
 
-    # ADR-0007: the issuer's own username and groups ride onto the session here
+    # ADR-0007: the provider's own username and groups ride onto the session here
     # and nowhere else. This is the only place in the tree holding a verified
     # assertion, and a session that did not capture it at this moment can never
     # reconstruct it — which is why `decide` refuses an older session by name
-    # rather than guessing a username from the console's account row.
+    # rather than guessing a username from the console's account row. They are
+    # captured for every provider, not only the two whose sessions may
+    # impersonate: which sources qualify is ADR-0007's decision to change, and it
+    # cannot be revisited for a session that never carried the values.
     raw_token, session = create_session(
         db, user, idp_username=identity.username, idp_groups=identity.groups,
     )
     _audit_signin(
-        outcome="applied", username=user.username, method="oidc",
-        detail=f"Signed in via single sign-on with the {user.role} role.",
+        outcome="applied", username=user.username, method=module.NAME,
+        detail=f"Signed in via {module.NAME} single sign-on with the "
+               f"{user.role} role.",
     )
     response = RedirectResponse(url=next_path, status_code=302)
     _set_session_cookie(response, raw_token)
     return _clear(response)
+
+
+@router.get("/{provider}/callback")
+def sso_callback(
+    provider: str,
+    request: Request,
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
+    db: Session = Depends(get_db),
+) -> RedirectResponse:
+    """Complete a redirect-binding handshake: verify, provision, issue a session.
+
+    Serves OpenID Connect, generic OAuth 2.0 and OpenShift. SAML is not reachable
+    here — its assertion arrives on a POST and its path segment is ``acs`` — and a
+    request for it is a 404 rather than a redirect, so the path an administrator
+    registered with the identity provider and the path this console answers on
+    cannot silently differ.
+    """
+    module = _provider_or_404(provider)
+    if module.BINDING != "query":
+        raise NotFound(
+            f"The {provider!r} provider does not call back on this path.",
+            hint=f"It uses /api/auth/{provider}/{module.CALLBACK_SUFFIX}.",
+            context={"resource": "auth", "name": provider},
+        )
+    return _complete_sso(
+        module=module,
+        request=request,
+        params={"code": code, "state": state},
+        provider_error=error,
+        db=db,
+    )
+
+
+@router.post("/saml/acs")
+async def saml_acs(
+    request: Request, db: Session = Depends(get_db)
+) -> RedirectResponse:
+    """The SAML Assertion Consumer Service: a cross-site form POST from the IdP.
+
+    **The one unauthenticated POST in this API**, and the middleware's blanket
+    exemption for the sign-in routes was written for GET navigations only, so it
+    is worth saying what protects this one. Not a CSRF token — the request comes
+    from the identity provider's origin, and a console that demanded a token here
+    would be demanding one from a party that has never seen a page of it. What
+    protects it is the assertion: a signature this console checks against a
+    configured certificate, and an ``InResponseTo`` inside that signed subtree
+    which has to equal the ``AuthnRequest`` id sealed in this browser's handshake
+    cookie. A forged POST fails the first; a genuine assertion replayed into
+    somebody else's browser fails the second.
+
+    ``RelayState`` is neither read nor honoured. The spec allows the identity
+    provider to echo it back, which means an attacker who can make the IdP POST
+    can choose it — so the post-sign-in destination is taken from the sealed
+    cookie instead, where nobody outside this console can have set it.
+
+    The body is parsed here rather than through ``request.form()``. The
+    HTTP-POST binding mandates ``application/x-www-form-urlencoded``, so there is
+    no multipart case to handle, and Starlette's form parser needs a dependency
+    this application otherwise has no use for — one more package in an image that
+    holds decryption keys, for a body of two fields. Parsing it directly is also
+    what lets the size be bounded *before* the body is read, which matters on the
+    one unauthenticated POST in this API.
+    """
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > _MAX_ACS_BODY_BYTES:
+        raise Invalid(
+            "The single sign-on response was too large.",
+            context={"provider": saml.NAME},
+        )
+    raw = await request.body()
+    if len(raw) > _MAX_ACS_BODY_BYTES:
+        raise Invalid(
+            "The single sign-on response was too large.",
+            context={"provider": saml.NAME},
+        )
+    fields = dict(parse_qsl(raw.decode("utf-8", "replace"), keep_blank_values=True))
+    return _complete_sso(
+        module=saml,
+        request=request,
+        params={"SAMLResponse": fields.get("SAMLResponse") or ""},
+        provider_error=None,
+        db=db,
+    )
+
+
+@router.get("/saml/metadata")
+def saml_metadata(request: Request) -> Response:
+    """This console's SAML service-provider metadata, for the IdP's setup form.
+
+    Public and secret-free: an entityID, an ACS URL and a binding, all of which
+    an administrator would otherwise transcribe by hand — and a mistyped ACS URL
+    fails later as "the assertion does not match the sign-in this console
+    started", a message that names the symptom and not the cause.
+
+    Served only when SAML is actually enabled, so the document can never describe
+    an endpoint that would refuse the assertion it invites.
+    """
+    saml.require_enabled()
+    return Response(
+        content=saml.metadata_xml(acs_url=_callback_url(request, saml)),
+        media_type="application/samlmetadata+xml",
+    )
 
 
 @router.get("/users")

@@ -39,6 +39,31 @@ ldap3==2.9.1
 # dependency on the path that decides who is signed in.
 pyjwt[crypto]==2.13.0
 
+# SAML 2.0 assertion signature verification, and the XML parser it needs.
+#
+# Hand-rolling XML-DSig was considered and rejected far more firmly than
+# hand-rolling JWT verification was. The failure mode is XML Signature Wrapping:
+# the attacker keeps a genuinely signed assertion where the *verifier* looks and
+# puts a forged one where the *reader* looks, so the signature check passes and
+# the identity is theirs. It has broken nearly every implementation that got it
+# wrong, including several written by people who knew about it, and it turns on
+# canonicalisation and reference-resolution details that are exactly the sort of
+# thing a from-scratch implementation gets subtly wrong and passes its own tests.
+#
+# signxml returns the subtree it verified, which is what makes
+# `app/identity/saml.py` able to read the identity out of the verified bytes
+# rather than out of the document as posted — the one property that defeats that
+# attack class.
+#
+# xmlsec (via python3-saml) is the other option and was not taken: it needs
+# libxmlsec1 and libxml2 headers in the build stage and the shared objects in
+# the runtime image, which is a native dependency chain in a container that
+# holds decryption keys for every registered cluster. signxml is pure Python
+# over lxml, whose manylinux wheels the build stage already knows how to fall
+# back from.
+signxml==5.1.0
+lxml==6.1.3
+
 # Postgres driver. Unpinned minor on purpose: the wheel is platform-specific and
 # the console never touches psycopg2-specific APIs — SQLAlchemy is the only
 # consumer. Dev runs SQLite, production runs Postgres, so anything engine-

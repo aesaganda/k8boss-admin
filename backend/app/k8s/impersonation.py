@@ -31,7 +31,8 @@ The four refusals, each an ADR condition:
   `skip_tls_verify` — a setting that can never be silently in effect. Nothing
   is refused here; the call is made as the ServiceAccount, which is the
   documented behaviour of every other cluster in the deployment.
-* **The session is not OIDC.** A local or LDAP session cannot impersonate,
+* **The session is not from a source the cluster could have derived itself.**
+  See :data:`IMPERSONATION_SOURCES`. A local or LDAP session cannot impersonate,
   because if this console's own password table could cause a request to arrive
   at the API server as `alice`, that table has become an identity provider the
   cluster trusts. Nothing in the API server checks that the name in
@@ -90,6 +91,49 @@ GROUP_HEADER = "Impersonate-Group"
 #: denials for permissions they demonstrably hold. The reliable end of that is a
 #: ClusterRole widened to fix a problem that was never RBAC.
 AUTHENTICATED_GROUP = "system:authenticated"
+
+#: The console sign-in methods whose sessions may act as a cluster identity.
+#:
+#: The console offers six ways in — local, LDAP, OIDC, generic OAuth 2.0,
+#: OpenShift's built-in OAuth server, and SAML — and this is the line between
+#: them, so it is worth stating what the line actually is. It is **not** "did an
+#: external system authenticate them": four of the six qualify on that reading.
+#: It is *ADR-0007's* question: **would the API server have derived this same
+#: username and group list had the operator presented their own credential to
+#: it?** Only then is the console asserting an identity rather than inventing
+#: one, and inventing one is what the ADR refuses.
+#:
+#: * ``oidc`` qualifies because a Kubernetes API server can be pointed at the
+#:   very same issuer with ``--oidc-issuer-url``, and then `Impersonate-User`
+#:   carries the name that issuer's own token would have produced. Whether a
+#:   given deployment did point it there is the operator's to get right, and
+#:   getting it wrong produces denials for an identity nobody holds — visible,
+#:   and not a silent grant.
+#: * ``openshift`` qualifies more strongly than anything else here: the username
+#:   and groups are read from the cluster's own ``User`` object, by the cluster,
+#:   in response to a token the cluster minted. There is no second system whose
+#:   opinion has to line up with the API server's, because there is no second
+#:   system.
+#:
+#: The three excluded sources are excluded for reasons that differ:
+#:
+#: * ``local`` and ``ldap`` — the password table and the directory bind are this
+#:   console's own; see the bullet above.
+#: * ``oauth`` and ``saml`` — the provider genuinely authenticated somebody, and
+#:   asserted it in a vocabulary no API server consumes. A bare OAuth 2.0
+#:   userinfo field and a SAML NameID are names *this console chose the shape
+#:   of*; putting one in `Impersonate-User` and calling it the operator's cluster
+#:   identity is precisely the invention ADR-0007 rejects when it refuses to send
+#:   the console's own opinion about somebody's groups to an API server. An
+#:   operator who needs impersonation behind a SAML IdP has a real answer
+#:   available — put an OIDC broker (Dex, Keycloak) in front of it and configure
+#:   *that* as the issuer for both this console and the API server — which is a
+#:   deployment they can verify, rather than a claim only this console makes.
+#:
+#: Widening this set is an ADR-0007 amendment, not a config change: the whole
+#: value of `decide` refusing rather than falling back is that the refusal is
+#: reviewed in one place.
+IMPERSONATION_SOURCES: frozenset[str] = frozenset({"oidc", "openshift"})
 
 
 @dataclass(frozen=True)
@@ -296,13 +340,18 @@ def decide(cluster: Any, principal: Any) -> Decision:
         )
 
     source = getattr(principal, "auth_source", None)
-    if source != "oidc":
+    if source not in IMPERSONATION_SOURCES:
         raise _refuse(
-            "This cluster acts as the signed-in operator, and only single "
-            f"sign-on sessions can do that — this one is {source or 'unknown'}.",
-            "Sign in through the console's OpenID Connect provider. A local or "
-            "LDAP password cannot be turned into a cluster identity: the cluster "
-            "trusts its own issuer, not this console's user table.",
+            "This cluster acts as the signed-in operator, and only some single "
+            "sign-on methods can supply a cluster identity — this one is "
+            f"{source or 'unknown'}.",
+            "Sign in through the console's OpenID Connect provider, or through "
+            "the cluster's own OpenShift OAuth server. A local or LDAP password "
+            "cannot be turned into a cluster identity — the cluster trusts its "
+            "own issuer, not this console's user table — and a bare OAuth 2.0 "
+            "or SAML provider states an identity in a vocabulary no API server "
+            "consumes, so the name this console would send would be one it "
+            "invented. See docs/adr-0007-impersonation.md.",
             reason="auth_source", auth_source=source,
         )
 
@@ -321,8 +370,9 @@ def decide(cluster: Any, principal: Any) -> Decision:
         raise _refuse(
             "This cluster acts as the signed-in operator, and the identity "
             "provider did not state which groups you are in.",
-            "Configure the provider to send the groups claim named by "
-            "OIDC_GROUPS_CLAIM, and request the scope that carries it. An "
+            "Configure the provider to report group membership — the claim "
+            "named by OIDC_GROUPS_CLAIM with the scope that carries it, or the "
+            "'user:info' scope on an OpenShift OAuth client. An "
             "absent claim is not an empty one: impersonating with no groups "
             "would strip every group-derived permission you hold and report the "
             "result as a permission you lack.",
@@ -348,6 +398,7 @@ def _groups(stated: tuple[str, ...]) -> tuple[str, ...]:
 __all__ = [
     "AUTHENTICATED_GROUP",
     "Decision",
+    "IMPERSONATION_SOURCES",
     "GROUP_HEADER",
     "Impersonation",
     "SERVICE_ACCOUNT_SUBJECT",

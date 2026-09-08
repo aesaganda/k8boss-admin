@@ -123,6 +123,66 @@ services:
       - OIDC_CLOCK_SKEW_SECONDS=${OIDC_CLOCK_SKEW_SECONDS:-60}
       - OIDC_BUTTON_LABEL=${OIDC_BUTTON_LABEL:-Single sign-on}
 
+      # Generic OAuth 2.0 sign-on: an authorization server that issues an access
+      # token and no ID token (GitHub, GitLab, Gitea, a non-OIDC Keycloak
+      # client). Its endpoints are configured individually because a bare OAuth
+      # 2.0 server publishes no discovery document to derive them from.
+      - OAUTH_ENABLED=${OAUTH_ENABLED:-false}
+      - OAUTH_AUTHORIZATION_URL=${OAUTH_AUTHORIZATION_URL:-}
+      - OAUTH_TOKEN_URL=${OAUTH_TOKEN_URL:-}
+      - OAUTH_USERINFO_URL=${OAUTH_USERINFO_URL:-}
+      - OAUTH_CLIENT_ID=${OAUTH_CLIENT_ID:-}
+      - OAUTH_CLIENT_SECRET=${OAUTH_CLIENT_SECRET:-}
+      - OAUTH_SCOPES=${OAUTH_SCOPES:-}
+      - OAUTH_REDIRECT_URL=${OAUTH_REDIRECT_URL:-}
+      - OAUTH_SUBJECT_FIELD=${OAUTH_SUBJECT_FIELD:-sub}
+      - OAUTH_USERNAME_FIELD=${OAUTH_USERNAME_FIELD:-preferred_username}
+      - OAUTH_EMAIL_FIELD=${OAUTH_EMAIL_FIELD:-email}
+      - OAUTH_DISPLAY_NAME_FIELD=${OAUTH_DISPLAY_NAME_FIELD:-name}
+      - OAUTH_GROUPS_FIELD=${OAUTH_GROUPS_FIELD:-groups}
+      - OAUTH_ADMIN_GROUP=${OAUTH_ADMIN_GROUP:-}
+      - OAUTH_ALLOWED_GROUPS=${OAUTH_ALLOWED_GROUPS:-}
+      - OAUTH_VERIFY_TLS=${OAUTH_VERIFY_TLS:-true}
+      - OAUTH_CA_CERTIFICATE_FILE=${OAUTH_CA_CERTIFICATE_FILE:-}
+      - OAUTH_TIMEOUT_SECONDS=${OAUTH_TIMEOUT_SECONDS:-10}
+      - OAUTH_BUTTON_LABEL=${OAUTH_BUTTON_LABEL:-OAuth 2.0}
+
+      # OpenShift's built-in OAuth server: sign in with the identity used for
+      # `oc login`. One URL — the API server — yields the authorization
+      # endpoint, the token endpoint and the users/~ read.
+      - OPENSHIFT_ENABLED=${OPENSHIFT_ENABLED:-false}
+      - OPENSHIFT_API_URL=${OPENSHIFT_API_URL:-}
+      - OPENSHIFT_CLIENT_ID=${OPENSHIFT_CLIENT_ID:-}
+      - OPENSHIFT_CLIENT_SECRET=${OPENSHIFT_CLIENT_SECRET:-}
+      - OPENSHIFT_SCOPES=${OPENSHIFT_SCOPES:-user:info}
+      - OPENSHIFT_REDIRECT_URL=${OPENSHIFT_REDIRECT_URL:-}
+      - OPENSHIFT_ADMIN_GROUP=${OPENSHIFT_ADMIN_GROUP:-}
+      - OPENSHIFT_ALLOWED_GROUPS=${OPENSHIFT_ALLOWED_GROUPS:-}
+      - OPENSHIFT_VERIFY_TLS=${OPENSHIFT_VERIFY_TLS:-true}
+      - OPENSHIFT_CA_CERTIFICATE_FILE=${OPENSHIFT_CA_CERTIFICATE_FILE:-}
+      - OPENSHIFT_TIMEOUT_SECONDS=${OPENSHIFT_TIMEOUT_SECONDS:-10}
+      - OPENSHIFT_BUTTON_LABEL=${OPENSHIFT_BUTTON_LABEL:-OpenShift}
+
+      # SAML 2.0. Note that it also needs AUTH_COOKIE_SECURE=true and a TLS
+      # front end: the assertion arrives on a cross-site POST, so the handshake
+      # cookie has to be SameSite=None, which browsers discard without Secure.
+      # This compose stack serves plain HTTP by default, so SAML is off here
+      # until an operator puts TLS in front of it.
+      - SAML_ENABLED=${SAML_ENABLED:-false}
+      - SAML_IDP_ENTITY_ID=${SAML_IDP_ENTITY_ID:-}
+      - SAML_IDP_SSO_URL=${SAML_IDP_SSO_URL:-}
+      - SAML_IDP_CERTIFICATE=${SAML_IDP_CERTIFICATE:-}
+      - SAML_SP_ENTITY_ID=${SAML_SP_ENTITY_ID:-}
+      - SAML_ACS_URL=${SAML_ACS_URL:-}
+      - SAML_USERNAME_ATTRIBUTE=${SAML_USERNAME_ATTRIBUTE:-}
+      - SAML_EMAIL_ATTRIBUTE=${SAML_EMAIL_ATTRIBUTE:-email}
+      - SAML_DISPLAY_NAME_ATTRIBUTE=${SAML_DISPLAY_NAME_ATTRIBUTE:-displayName}
+      - SAML_GROUPS_ATTRIBUTE=${SAML_GROUPS_ATTRIBUTE:-groups}
+      - SAML_ADMIN_GROUP=${SAML_ADMIN_GROUP:-}
+      - SAML_ALLOWED_GROUPS=${SAML_ALLOWED_GROUPS:-}
+      - SAML_CLOCK_SKEW_SECONDS=${SAML_CLOCK_SKEW_SECONDS:-60}
+      - SAML_BUTTON_LABEL=${SAML_BUTTON_LABEL:-SAML single sign-on}
+
       # ── State ────────────────────────────────────────────────────────────
       # Registered clusters and the audit trail. Cluster CONTENTS are never
       # cached here — every resource the UI shows is read live — so this volume

@@ -78,9 +78,16 @@ def cluster(*, enabled=True):
 
 @pytest.fixture
 def oidc_console(monkeypatch):
-    """A deployment that authenticates operators through OpenID Connect."""
+    """A deployment that authenticates operators through OpenID Connect.
+
+    The issuer and client id are set, not only the switch: a half-configured
+    provider offers no button, so no session from it can ever exist, and
+    `_validate_impersonation` asks whether one *could*.
+    """
     monkeypatch.setattr(settings, "auth_enabled", True)
     monkeypatch.setattr(settings, "oidc_enabled", True)
+    monkeypatch.setattr(settings, "oidc_issuer", "https://idp.example.test")
+    monkeypatch.setattr(settings, "oidc_client_id", "k8boss-admin")
     return settings
 
 
@@ -157,6 +164,52 @@ def test_ldap_only_authentication_is_still_refused(monkeypatch):
 
     monkeypatch.setattr(settings, "auth_enabled", True)
     monkeypatch.setattr(settings, "oidc_enabled", False)
+
+    with pytest.raises(Invalid) as caught:
+        _validate_impersonation(True)
+
+    assert caught.value.context["field"] == "impersonation_enabled"
+
+
+def test_an_openshift_console_may_turn_it_on(monkeypatch):
+    """The other half of `IMPERSONATION_SOURCES`. Refusing here would leave an
+    OpenShift-only deployment unable to enable the feature its sign-in method
+    supports best — the one whose username is the cluster's own record."""
+    from app.api.clusters import _validate_impersonation
+
+    monkeypatch.setattr(settings, "auth_enabled", True)
+    monkeypatch.setattr(settings, "oidc_enabled", False)
+    monkeypatch.setattr(settings, "openshift_enabled", True)
+    monkeypatch.setattr(settings, "openshift_api_url", "https://api.example:6443")
+    monkeypatch.setattr(settings, "openshift_client_id", "k8boss-admin")
+
+    _validate_impersonation(True)  # does not raise
+
+
+@pytest.mark.parametrize("provider", ["oauth", "saml"])
+def test_the_two_providers_that_cannot_impersonate_do_not_satisfy_the_form(
+    monkeypatch, provider
+):
+    """They authenticate somebody, in a vocabulary no API server consumes. A
+    console offering only one of them would produce a cluster that refuses every
+    operator at the request — which is the failure this check exists to move to
+    the setting."""
+    from app.api.clusters import _validate_impersonation
+
+    monkeypatch.setattr(settings, "auth_enabled", True)
+    monkeypatch.setattr(settings, "oidc_enabled", False)
+    monkeypatch.setattr(settings, "openshift_enabled", False)
+    monkeypatch.setattr(settings, "auth_cookie_secure", True)
+    if provider == "oauth":
+        monkeypatch.setattr(settings, "oauth_enabled", True)
+        monkeypatch.setattr(settings, "oauth_authorization_url", "https://p.example/a")
+        monkeypatch.setattr(settings, "oauth_token_url", "https://p.example/t")
+        monkeypatch.setattr(settings, "oauth_userinfo_url", "https://p.example/u")
+        monkeypatch.setattr(settings, "oauth_client_id", "console")
+    else:
+        monkeypatch.setattr(settings, "saml_enabled", True)
+        monkeypatch.setattr(settings, "saml_idp_sso_url", "https://idp.example/sso")
+        monkeypatch.setattr(settings, "saml_idp_certificate", "a-certificate")
 
     with pytest.raises(Invalid) as caught:
         _validate_impersonation(True)

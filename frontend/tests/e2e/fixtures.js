@@ -126,6 +126,7 @@ export const FIXTURES = {
     ldapEnabled: false,
     oidcEnabled: false,
     methods: ['local'],
+    ssoProviders: [],
     oidc: null,
   },
 
@@ -4659,21 +4660,31 @@ export async function mockApi(
       route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
 
     if (path === '/auth/config') {
+      // `ssoProviders` is a list because the console offers four kinds of
+      // single sign-on — OpenID Connect, generic OAuth 2.0, OpenShift and SAML
+      // — each configured independently and each drawing its own button.
+      // `ssoEnabled` in a test's options is shorthand for "OIDC is configured";
+      // `ssoProviders` passes an explicit list.
+      const providers = auth?.ssoProviders
+        ?? (auth?.ssoEnabled
+          ? [{ name: 'oidc', label: auth.ssoLabel || 'Single sign-on', startPath: '/api/auth/oidc/start' }]
+          : []);
       return json(
         auth
           ? {
               enabled: true,
               localEnabled: true,
               ldapEnabled: Boolean(auth.ldapEnabled),
-              oidcEnabled: Boolean(auth.ssoEnabled),
+              oidcEnabled: providers.some((provider) => provider.name === 'oidc'),
               methods: [
                 'local',
                 ...(auth.ldapEnabled ? ['ldap'] : []),
-                ...(auth.ssoEnabled ? ['oidc'] : []),
+                ...providers.map((provider) => provider.name),
               ],
-              oidc: auth.ssoEnabled
-                ? { label: auth.ssoLabel || 'Single sign-on', startPath: '/api/auth/oidc/start' }
-                : null,
+              ssoProviders: providers,
+              // The OIDC entry repeated, as the backend still serves it for an
+              // already-loaded older build of the SPA.
+              oidc: providers.find((provider) => provider.name === 'oidc') ?? null,
             }
           : FIXTURES.authConfig,
       );
