@@ -61,6 +61,48 @@ spec:
           image: docker.io/nginxinc/nginx-unprivileged:1.30-alpine
 `;
 
+/**
+ * The same Deployment with things the form has no control for, at both depths:
+ * two on the object, four inside its container. Both tests below need them, and
+ * the container ones are the half a survival test is most likely to miss.
+ */
+const HAND_WRITTEN = DEPLOYMENT.replace(
+  '  replicas: 1\n',
+  `  replicas: 1
+  revisionHistoryLimit: 3
+`,
+)
+  .replace(
+    '    spec:\n      containers:',
+    `    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: topology.kubernetes.io/zone
+                    operator: In
+                    values:
+                      - eu-west-1a
+      containers:`,
+  )
+  .replace(
+    '          image: docker.io/nginxinc/nginx-unprivileged:1.30-alpine\n',
+    `          image: docker.io/nginxinc/nginx-unprivileged:1.30-alpine
+          workingDir: /srv
+          envFrom:
+            - configMapRef:
+                name: checkout-config
+          volumeMounts:
+            - name: cache
+              mountPath: /var/cache/nginx
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+`,
+  );
+
 /** Open the masthead's dialog with `text` in the editor, in YAML view. */
 async function openImport(page, text, options = {}) {
   await mockApi(page, { preflight: ALLOW_ALL, ...options });
@@ -123,34 +165,48 @@ test.describe('the create dialog form view', () => {
     // The assertion this whole feature exists for. `spec.affinity` and the
     // annotation are things no control here can reach; renaming the object must
     // not be the moment they disappear.
-    const handWritten = DEPLOYMENT.replace(
-      '  replicas: 1\n',
-      `  replicas: 1
-  revisionHistoryLimit: 3
-`,
-    ).replace(
-      '    spec:\n      containers:',
-      `    spec:
-      affinity:
-        nodeAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            nodeSelectorTerms:
-              - matchExpressions:
-                  - key: topology.kubernetes.io/zone
-                    operator: In
-                    values:
-                      - eu-west-1a
-      containers:`,
-    );
-
-    await openForm(page, handWritten);
+    await openForm(page, HAND_WRITTEN);
     await page.getByTestId('create-name').fill('checkout');
 
-    const text = await yamlText(page);
+    let text = await yamlText(page);
     expect(text).toContain('name: checkout');
     expect(text).toContain('topology.kubernetes.io/zone');
     expect(text).toContain('eu-west-1a');
     expect(text).toContain('revisionHistoryLimit: 3');
+
+    // And an edit made *inside* a container, which is the control with per-row
+    // state and a per-row rebuild — the likeliest place for the invariant to
+    // break, and the place an operator actually hand-writes things this form
+    // cannot show.
+    await page.getByTestId('create-view-form').check();
+    await page.getByTestId('create-container-image-0').fill('registry.example:5000/checkout:1.4.2');
+    text = await yamlText(page);
+    expect(text).toContain('registry.example:5000/checkout:1.4.2');
+    expect(text).toContain('volumeMounts');
+    expect(text).toContain('livenessProbe');
+    expect(text).toContain('workingDir: /srv');
+    expect(text).toContain('envFrom');
+  });
+
+  test('a field inside a container that the form does not show is named, not swallowed', async ({
+    page,
+  }) => {
+    // The other direction of the same claim. `CONTAINER_COVERAGE` is described
+    // in objectForm.js as "the *whole* claim this form makes about containers",
+    // and a pattern widened to cover the container wholesale would make this
+    // list say "Nothing" while showing none of these fields — the OpenShift
+    // failure this feature exists to fix, asserted with more confidence than
+    // OpenShift asserts it.
+    await openForm(page, HAND_WRITTEN);
+
+    const list = page.getByTestId('create-unrepresented');
+    await expect(list).toContainText('containers[0].volumeMounts[0].mountPath');
+    await expect(list).toContainText('containers[0].livenessProbe.httpGet.path');
+    await expect(list).toContainText('containers[0].workingDir');
+    await expect(list).toContainText('containers[0].envFrom[0].configMapRef.name');
+    // What it does show is not in the list, or the list is noise nobody reads.
+    await expect(list).not.toContainText('containers[0].image');
+    await expect(list).not.toContainText('containers[0].name');
   });
 
   test('the form names, by path, every field it is not showing', async ({ page }) => {
@@ -277,6 +333,8 @@ test.describe('the create dialog form view', () => {
     // can otherwise only discover from a rejected write.
     await page.getByTestId('create-podLabels-value-0').fill('checkout');
     await expect(page.getByTestId('create-issues-error')).toContainText('selector does not match the pod labels');
+    // Reported, not enforced: the dry run is the authority and stays reachable.
+    await expect(page.getByTestId('mutation-preview')).toBeEnabled();
 
     // Nothing was rewritten behind them: the selector still says what it said.
     expect(await yamlText(page)).toContain('matchLabels:\n      app: example');
@@ -517,7 +575,13 @@ spec:
       },
     });
 
-    await expect(page.getByTestId('partial-banner').first()).toBeVisible();
+    // Scoped to the dialog, and asserting the group by name. Unscoped, this
+    // matched the Overview page's own §11.1 banner behind the modal — so it
+    // passed with the dialog's banner deleted, which is the assertion doing
+    // the opposite of its job.
+    const banner = page.getByTestId('mutation-dialog').getByTestId('partial-banner');
+    await expect(banner).toBeVisible();
+    await expect(banner).toContainText('apps');
     await expect(page.getByTestId('mutation-preview-disabled-reason')).toContainText(
       'Discovery came back incomplete',
     );
@@ -559,5 +623,11 @@ spec:
     // The select shows the document's actual state rather than rendering its
     // first option, which would show a setting the manifest does not contain.
     await expect(page.getByTestId('create-restartPolicy')).toHaveValue('');
+
+    // And the check does not block the dry run. Gating the preview on a local
+    // check would mean an operator whose manifest trips one this console got
+    // wrong could never obtain the API server's own verdict on a document the
+    // API server would accept.
+    await expect(page.getByTestId('mutation-preview')).toBeEnabled();
   });
 });

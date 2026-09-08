@@ -4990,10 +4990,21 @@ export async function mockApi(
           // object is the diff.
           before: '',
           after: body.yaml ?? '',
-          unified: `--- live\n+++ projected\n${(body.yaml ?? '')
-            .split('\n')
-            .map((line) => `+${line}`)
-            .join('\n')}`,
+          // With the hunk header `difflib.unified_diff` always emits, and
+          // without the phantom `+` a trailing newline would add. `DiffView`
+          // derives both line-number gutters from that header and prints none
+          // at all when it is missing — so a mock without one exercises a
+          // rendering path the real endpoint can never produce.
+          unified: (() => {
+            const lines = (body.yaml ?? '').split('\n');
+            if (lines.at(-1) === '') lines.pop();
+            return [
+              '--- live',
+              '+++ projected',
+              `@@ -0,0 +1,${lines.length} @@`,
+              ...lines.map((line) => `+${line}`),
+            ].join('\n');
+          })(),
           changed: true,
         },
         resourceVersion: '5001',
