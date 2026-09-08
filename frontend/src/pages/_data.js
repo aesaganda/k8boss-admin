@@ -605,6 +605,27 @@ export const KIND_LIMITS = {
  * first click is "this creates a container", not an admission rejection about
  * `runAsNonRoot`.
  *
+ * The container is NGINX rather than `pause`, because a starter that actually
+ * serves something is the one an operator can point a Service, an Ingress or a
+ * NetworkPolicy at and see answer. `pause` comes up Running and replies to
+ * nothing, which makes every one of those checks unfalsifiable.
+ *
+ * It is the **unprivileged** NGINX build, and that is not interchangeable with
+ * `nginx` or `httpd`: neither official image sets a `USER`, so both run as
+ * root. Either one is still admitted under the restricted profile — the spec
+ * says `runAsNonRoot: true`, and the spec is all admission reads — and it is
+ * the kubelet that then refuses to start the container,
+ * `CreateContainerConfigError`. That failure lands *after* the write, so the
+ * console truthfully reports the object created, the diff was right, and the
+ * pod never runs anyway. Nothing here is in a position to warn about it, which
+ * is why the starter does not hand anyone that image. The unprivileged
+ * build runs as UID 101 and listens on 8080 rather than 80, which is why the
+ * port is spelled out here: 8080 is the surprise in this image, and a template
+ * that hid it would send someone to write a Service targeting port 80.
+ *
+ * The tag is the 1.30 stable line rather than `latest`, so what an operator
+ * reads in the editor is what the API server is asked to create.
+ *
  * None of these set `metadata.namespace`: `ImportYamlDialog` already falls
  * back to the masthead's selected namespace, and hardcoding one into the
  * template would go stale the moment the operator switched namespaces after
@@ -623,7 +644,9 @@ spec:
       type: RuntimeDefault
   containers:
     - name: example
-      image: registry.k8s.io/pause:3.9
+      image: docker.io/nginxinc/nginx-unprivileged:1.30-alpine
+      ports:
+        - containerPort: 8080
       securityContext:
         allowPrivilegeEscalation: false
         capabilities:
@@ -637,6 +660,12 @@ spec:
 // string-splicing four spaces into the right place for six kinds is exactly
 // the kind of code nobody can eyeball-verify. Six literals are more lines and
 // zero risk of a template that silently reindents itself wrong.
+//
+// The Job and CronJob starters carry the same server, and a server does not
+// exit: run one unedited and the Job stays incomplete until it is deleted.
+// That was equally true of `pause` and is not what a Job is for — the image
+// and a `command` are the two lines to replace, which is the whole reason the
+// dialog seeds an editor rather than a form.
 export const WORKLOAD_TEMPLATES = {
   deployments: `apiVersion: apps/v1
 kind: Deployment
@@ -660,7 +689,9 @@ spec:
           type: RuntimeDefault
       containers:
         - name: example
-          image: registry.k8s.io/pause:3.9
+          image: docker.io/nginxinc/nginx-unprivileged:1.30-alpine
+          ports:
+            - containerPort: 8080
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
@@ -690,7 +721,9 @@ spec:
           type: RuntimeDefault
       containers:
         - name: example
-          image: registry.k8s.io/pause:3.9
+          image: docker.io/nginxinc/nginx-unprivileged:1.30-alpine
+          ports:
+            - containerPort: 8080
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
@@ -718,7 +751,9 @@ spec:
           type: RuntimeDefault
       containers:
         - name: example
-          image: registry.k8s.io/pause:3.9
+          image: docker.io/nginxinc/nginx-unprivileged:1.30-alpine
+          ports:
+            - containerPort: 8080
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
@@ -747,7 +782,9 @@ spec:
           type: RuntimeDefault
       containers:
         - name: example
-          image: registry.k8s.io/pause:3.9
+          image: docker.io/nginxinc/nginx-unprivileged:1.30-alpine
+          ports:
+            - containerPort: 8080
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
@@ -773,7 +810,9 @@ spec:
           type: RuntimeDefault
       containers:
         - name: example
-          image: registry.k8s.io/pause:3.9
+          image: docker.io/nginxinc/nginx-unprivileged:1.30-alpine
+          ports:
+            - containerPort: 8080
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
@@ -802,7 +841,9 @@ spec:
               type: RuntimeDefault
           containers:
             - name: example
-              image: registry.k8s.io/pause:3.9
+              image: docker.io/nginxinc/nginx-unprivileged:1.30-alpine
+              ports:
+                - containerPort: 8080
               securityContext:
                 allowPrivilegeEscalation: false
                 capabilities:
