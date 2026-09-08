@@ -281,29 +281,36 @@ export function ImportYamlDialog({ isOpen, title = 'Import YAML', initialText = 
         }
       />
 
-      <div className="admin-confirm__views" role="radiogroup" aria-label="Configure via">
-        <span className="admin-confirm__views-label">Configure via:</span>
-        <Tooltip content={formUnavailableReason || 'Edit this object field by field'}>
-          <span>
-            <Radio
-              id="create-view-form"
-              name="create-view"
-              label="Form view"
-              data-testid="create-view-form"
-              isChecked={view === 'form'}
-              isDisabled={Boolean(formUnavailableReason)}
-              onChange={() => setView('form')}
-            />
-          </span>
-        </Tooltip>
-        <Radio
-          id="create-view-yaml"
-          name="create-view"
-          label="YAML view"
-          data-testid="create-view-yaml"
-          isChecked={view === 'yaml'}
-          onChange={() => setView('yaml')}
-        />
+      <div className="admin-confirm__views">
+        <span className="admin-confirm__views-label" id="create-view-label">
+          Configure via:
+        </span>
+        {/* The group holds the radios and nothing else, named by the label
+            beside it: a `radiogroup` whose children are not all radios is one
+            an assistive technology has to guess its way through. */}
+        <div className="admin-confirm__views-options" role="radiogroup" aria-labelledby="create-view-label">
+          <Tooltip content={formUnavailableReason || 'Edit this object field by field'}>
+            <span>
+              <Radio
+                id="create-view-form"
+                name="create-view"
+                label="Form view"
+                data-testid="create-view-form"
+                isChecked={view === 'form'}
+                isDisabled={Boolean(formUnavailableReason)}
+                onChange={() => setView('form')}
+              />
+            </span>
+          </Tooltip>
+          <Radio
+            id="create-view-yaml"
+            name="create-view"
+            label="YAML view"
+            data-testid="create-view-yaml"
+            isChecked={view === 'yaml'}
+            onChange={() => setView('yaml')}
+          />
+        </div>
       </div>
 
       {formUnavailableReason && (

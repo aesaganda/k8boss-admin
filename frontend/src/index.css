@@ -1112,6 +1112,13 @@ body.admin-resizing * {
   margin-block-end: var(--admin-gap-sm);
 }
 
+.admin-confirm__views-options {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--admin-gap);
+}
+
 .admin-confirm__views-label {
   font-weight: bold;
 }

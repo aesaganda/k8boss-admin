@@ -183,6 +183,17 @@ test.describe('the create dialog form view', () => {
     expect(await yamlText(page)).toContain('replicas: 0');
   });
 
+  test('a number box holding something that is not a number says so', async ({ page }) => {
+    // `input[type=number]` reads back empty for an unparseable entry while the
+    // box goes on showing it, so without saying this the field would vanish
+    // from the manifest while the operator looked at the figure they typed.
+    await openForm(page, DEPLOYMENT);
+    await page.getByTestId('create-replicas').fill('3.5');
+
+    await expect(page.getByTestId('create-replicas-bad')).toContainText('not a whole number');
+    expect(await yamlText(page)).not.toContain('replicas');
+  });
+
   test('a selector that cannot match its own pods is reported, and repaired only on request', async ({
     page,
   }) => {

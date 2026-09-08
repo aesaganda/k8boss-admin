@@ -663,6 +663,66 @@ function triValue(value) {
 
 /* ── One field ──────────────────────────────────────────────────────────── */
 
+/**
+ * A whole number, or nothing.
+ *
+ * A plain numeric `TextInput`, and deliberately **not** PatternFly's
+ * `NumberInput`, which every other numeric field in this app uses.
+ * `NumberInput` normalises on blur — `event.target.value =
+ * Number(event.target.value).toString()` — so an emptied box fires a change
+ * carrying `"0"` the moment focus leaves it. Everywhere else in this console
+ * that is harmless, because the field is a required count with no absent state.
+ * Here it would turn "I do not want to set replicas" into `replicas: 0` — a
+ * Deployment with no pods, reported by nothing, in a diff that looks exactly
+ * like the one the operator asked for. Rule 11.2 says a number we could not
+ * derive is null and never 0; this is the same rule on the way back out, and it
+ * costs the stepper buttons.
+ *
+ * The other half is everything the box can hold that is not a whole number, and
+ * it arrives in two shapes. Letters read back as an empty `value` with
+ * `validity.badInput` set, while the box goes on showing them; `3.5` reads back
+ * as itself and is simply not an integer. Both would otherwise leave the field
+ * absent from the manifest while the operator looked at the figure they typed —
+ * the screen and the document saying different things, which is the whole
+ * failure this view exists to prevent. Neither is silently rounded: `3.5`
+ * replicas is a question only the person who typed it can answer.
+ */
+function NumberField({ id, field, value, isDisabled, onPut }) {
+  const [badInput, setBadInput] = useState(false);
+  return (
+    <>
+      <TextInput
+        id={id}
+        data-testid={id}
+        type="number"
+        min={field.min}
+        value={typeof value === 'number' ? String(value) : ''}
+        isDisabled={isDisabled}
+        placeholder={field.placeholder}
+        aria-label={field.label}
+        validated={badInput ? 'error' : 'default'}
+        onChange={(event, next) => {
+          const parsed = integerOrUndefined(next);
+          setBadInput(
+            Boolean(event?.currentTarget?.validity?.badInput) || (next.trim() !== '' && parsed === undefined),
+          );
+          onPut(parsed);
+        }}
+      />
+      {badInput && (
+        <FormHelperText>
+          <HelperText>
+            <HelperTextItem variant="error" data-testid={`${id}-bad`}>
+              That is not a whole number, so {formatPath(field.path)} is not set at all. Clear the box or type
+              an integer.
+            </HelperTextItem>
+          </HelperText>
+        </FormHelperText>
+      )}
+    </>
+  );
+}
+
 function Help({ text }) {
   if (!text) return null;
   return (
@@ -706,31 +766,7 @@ function Field({ field, model, document: doc, onDocument, onReplace, isDisabled 
       break;
 
     case 'number':
-      // A plain numeric `TextInput`, and deliberately **not** PatternFly's
-      // `NumberInput`, which every other numeric field in this app uses.
-      // `NumberInput` normalises on blur — `event.target.value =
-      // Number(event.target.value).toString()` — so an emptied box fires a
-      // change carrying `"0"` the moment focus leaves it. Everywhere else in
-      // this console that is harmless, because the field is a required count
-      // with no absent state. Here it would turn "I do not want to set
-      // replicas" into `replicas: 0` — a Deployment with no pods, reported by
-      // nothing, in a diff that looks exactly like the one the operator asked
-      // for. Rule 11.2 says a number we could not derive is null and never 0;
-      // this is the same rule on the way back out, and it costs the stepper
-      // buttons.
-      control = (
-        <TextInput
-          id={id}
-          data-testid={id}
-          type="number"
-          min={field.min}
-          value={typeof value === 'number' ? String(value) : ''}
-          isDisabled={inert}
-          placeholder={field.placeholder}
-          aria-label={field.label}
-          onChange={(_e, next) => put(integerOrUndefined(next))}
-        />
-      );
+      control = <NumberField id={id} field={field} value={value} isDisabled={inert} onPut={put} />;
       break;
 
     case 'intOrString':
