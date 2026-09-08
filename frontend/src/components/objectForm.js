@@ -368,6 +368,39 @@ const CONTAINER_COVERAGE = [
   { path: ['securityContext', 'capabilities', 'add'], subtree: true },
 ];
 
+/**
+ * The container controls this file promises `ObjectForm.jsx` will render.
+ *
+ * Named here rather than left implicit because `CONTAINER_COVERAGE` above is a
+ * claim about the renderer made in a different file, and the two have to be
+ * checked against each other by something. `create-form-view.spec.js` asserts
+ * every id below is on screen and editable, so a control deleted from the
+ * container editor fails a test instead of quietly moving its field into the
+ * set the form hides while saying it hides nothing — which is the one way the
+ * "not shown" list can lie.
+ */
+export function containerControlTestIds(index) {
+  return [
+    `create-container-name-${index}`,
+    `create-container-image-${index}`,
+    `create-container-pull-${index}`,
+    `create-container-command-${index}`,
+    `create-container-args-${index}`,
+    // The two sub-editors are proved by their add buttons: those are present
+    // whether or not the container has any ports or variables yet, which is
+    // what makes them the thing to assert.
+    `create-container-${index}-port-add`,
+    `create-container-${index}-env-add`,
+    `create-container-requests-cpu-${index}`,
+    `create-container-requests-memory-${index}`,
+    `create-container-limits-cpu-${index}`,
+    `create-container-limits-memory-${index}`,
+    `create-container-ape-${index}`,
+    `create-container-drop-${index}`,
+    `create-container-capadd-${index}`,
+  ];
+}
+
 /* ── Section builders ───────────────────────────────────────────────────── */
 
 /** Name, labels and annotations — the same three on every kind. */
@@ -1056,6 +1089,39 @@ function selectorIsEmpty(selector) {
   return !hasLabels && !hasExpressions;
 }
 
+/**
+ * Does one `matchExpressions` term hold for these labels?
+ *
+ * `null` means "this console does not know" — an operator this Kubernetes does
+ * not have yet, or a malformed term — and a `null` never produces a finding. A
+ * check that guessed here would refuse a manifest the API server accepts, which
+ * on a screen whose errors are headed "the API server will refuse this" is the
+ * expensive direction to be wrong in.
+ *
+ * The absent-key cases follow `apimachinery`'s own `Requirement.Matches`, where
+ * `NotIn` and `DoesNotExist` are **satisfied** by an object that lacks the key
+ * entirely. Reading them the other way is the classic misreading of this API.
+ */
+function expressionSatisfiedBy(expression, labels) {
+  const key = expression?.key;
+  if (typeof key !== 'string') return null;
+  const present = isMapping(labels) && Object.prototype.hasOwnProperty.call(labels, key);
+  const value = present ? String(labels[key]) : null;
+  const values = Array.isArray(expression?.values) ? expression.values.map(String) : [];
+  switch (expression?.operator) {
+    case 'In':
+      return present && values.includes(value);
+    case 'NotIn':
+      return !present || !values.includes(value);
+    case 'Exists':
+      return present;
+    case 'DoesNotExist':
+      return !present;
+    default:
+      return null;
+  }
+}
+
 /** `a` is a sub-mapping of `b`, comparing values as the API server does. */
 function isSubsetOf(a, b) {
   if (!isMapping(a)) return true;
@@ -1136,15 +1202,33 @@ export function localIssues(document, model) {
   }
 
   if (model.selectorPath) {
-    const selector = getIn(document, model.selectorPath);
+    // The form's control edits `matchLabels`, but the API server's rule is
+    // about the whole LabelSelector: a selector carrying only
+    // `matchExpressions` is legal and is accepted. Reading only the control's
+    // own path would call that one "empty" — a flat, confident, false claim
+    // about somebody's manifest, contradicted by the dry run on the same
+    // screen. `selectorPath` is the control's path; its parent is the selector.
+    const selectorRoot = model.selectorPath.slice(0, -1);
+    const selector = getIn(document, selectorRoot);
+    const matchLabels = getIn(document, model.selectorPath);
     const podLabels = getIn(document, model.podLabelsPath);
-    if (!isMapping(selector) || Object.keys(selector).length === 0) {
+    if (selectorIsEmpty(selector)) {
       add('error', 'The selector is empty. A workload selector must match at least one label.');
-    } else if (!isSubsetOf(selector, podLabels)) {
-      add(
-        'error',
-        'The selector does not match the pod labels. The API server refuses a workload whose selector cannot select its own pod template — nothing is created, so this is not a state you can end up running in.',
-      );
+    } else {
+      if (isMapping(matchLabels) && !isSubsetOf(matchLabels, podLabels)) {
+        add(
+          'error',
+          'The selector does not match the pod labels. The API server refuses a workload whose selector cannot select its own pod template — nothing is created, so this is not a state you can end up running in.',
+        );
+      }
+      for (const expression of Array.isArray(selector?.matchExpressions) ? selector.matchExpressions : []) {
+        if (expressionSatisfiedBy(expression, podLabels) === false) {
+          add(
+            'error',
+            `The selector term "${expression?.key ?? '?'} ${expression?.operator ?? '?'}" is not satisfied by the pod labels, so the selector cannot select its own pod template and the API server refuses the object.`,
+          );
+        }
+      }
     }
   }
 

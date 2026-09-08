@@ -784,7 +784,14 @@ the create dialog is the second implementation: every control is a lens into the
 parsed object, a form edit is one path write that copies the rest of the document
 through, and the list of paths the form does not show is *computed* from the
 document and the model rather than written down — so it cannot go stale, and a
-control removed from the model puts its path straight back on screen.
+control removed from a model puts its path straight back on screen.
+
+One input to that list is not derived: a container's coverage is a table in
+`objectForm.js` describing a renderer in `ObjectForm.jsx`, and a control deleted
+without its pattern would move that field silently into the set the form hides
+while saying it hides nothing — the one way this list can lie. The two are
+checked against each other by a test, which is the same answer this document
+gives above for the vendor-annotation rule: enforced rather than asserted.
 
 Two differences from the Route form matter to anyone reviewing it. There is **no
 render endpoint**: an exposure is compiled server-side because one form field

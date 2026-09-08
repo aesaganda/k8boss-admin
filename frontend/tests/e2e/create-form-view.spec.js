@@ -22,6 +22,7 @@
  */
 import { expect, test } from '@playwright/test';
 
+import { containerControlTestIds } from '../../src/components/objectForm.js';
 import { FIXTURES, mockApi } from './fixtures.js';
 
 /** Answer every §9 check as allowed, so RBAC is not what is under test. */
@@ -169,6 +170,26 @@ test.describe('the create dialog form view', () => {
     await expect(page.getByTestId('create-unrepresented-none')).toBeVisible();
   });
 
+  test('every container field the model counts as covered has a control on screen', async ({ page }) => {
+    // `CONTAINER_COVERAGE` is a claim made in objectForm.js about a renderer in
+    // another file, and it is the one input to the "not shown" list that is
+    // written down rather than derived. If a control is deleted and its pattern
+    // is not, its field moves silently into the set the form hides while saying
+    // it hides nothing — so the two are checked against each other here.
+    await openForm(page, DEPLOYMENT);
+    for (const testid of containerControlTestIds(0)) {
+      await expect(page.getByTestId(testid)).toBeVisible();
+    }
+
+    // And a second container carries its own set rather than sharing the
+    // first's ids — two inputs with one id makes a label point at whichever the
+    // browser found first.
+    await page.getByTestId('create-add-container').click();
+    for (const testid of containerControlTestIds(1)) {
+      await expect(page.getByTestId(testid)).toHaveCount(1);
+    }
+  });
+
   test('clearing a number removes the key rather than writing zero', async ({ page }) => {
     // Rule 11.2 on the way out. `replicas: 0` is a Deployment with no pods and
     // no error anywhere on screen; absent is a Deployment with one.
@@ -229,6 +250,34 @@ test.describe('the create dialog form view', () => {
     await page.getByTestId('create-selector-repair').click();
     await expect(page.getByTestId('create-issues-error')).toHaveCount(0);
     expect(await yamlText(page)).toContain('app: checkout');
+  });
+
+  test('a selector written as matchExpressions is not called empty', async ({ page }) => {
+    // The form's control edits matchLabels, but the API server's rule is about
+    // the whole LabelSelector — a matchExpressions-only selector is legal and
+    // accepted. Calling it "empty" under a heading that says the API server
+    // will refuse the document is a flat, confident, false claim, contradicted
+    // by the dry run on the same screen.
+    const expressions = DEPLOYMENT.replace(
+      '  selector:\n    matchLabels:\n      app: example\n',
+      `  selector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values:
+          - example
+`,
+    );
+    await openForm(page, expressions);
+    await expect(page.getByTestId('create-issues-error')).toHaveCount(0);
+
+    // The term is still checked against the pod labels — it just has to be read
+    // correctly to be checked at all.
+    await page.getByTestId('create-podLabels-value-0').fill('checkout');
+    await expect(page.getByTestId('create-issues-error')).toContainText('is not satisfied by the pod labels');
+
+    // And the part of the selector no control shows is named rather than hidden.
+    await expect(page.getByTestId('create-unrepresented')).toContainText('spec.selector.matchExpressions');
   });
 
   test('the comments a form edit would destroy are counted before it happens', async ({ page }) => {

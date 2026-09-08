@@ -398,10 +398,16 @@ function EnvRows({ env, base, document: doc, onDocument, idPrefix, isDisabled })
   );
 }
 
-/** A quantity: CPU or memory, request or limit. Blank removes the key. */
-function QuantityInput({ document: doc, onDocument, path, label, placeholder, isDisabled }) {
+/**
+ * A quantity: CPU or memory, request or limit. Blank removes the key.
+ *
+ * The id is passed in rather than derived from the path's last segments: two
+ * containers have the same three, and two inputs sharing a DOM id makes a label
+ * point at whichever the browser found first — so an operator setting the
+ * second container's memory limit could be typing into the first one's.
+ */
+function QuantityInput({ id, document: doc, onDocument, path, label, placeholder, isDisabled }) {
   const value = getIn(doc, path);
-  const id = `create-${path.slice(-3).join('-')}`;
   return (
     <TextInput
       id={id}
@@ -533,6 +539,7 @@ function ContainersEditor({ document: doc, onDocument, path, isDisabled }) {
               <Grid hasGutter>
                 <GridItem span={3}>
                   <QuantityInput
+                    id={`create-container-requests-cpu-${index}`}
                     document={doc}
                     onDocument={onDocument}
                     path={at('resources', 'requests', 'cpu')}
@@ -543,6 +550,7 @@ function ContainersEditor({ document: doc, onDocument, path, isDisabled }) {
                 </GridItem>
                 <GridItem span={3}>
                   <QuantityInput
+                    id={`create-container-requests-memory-${index}`}
                     document={doc}
                     onDocument={onDocument}
                     path={at('resources', 'requests', 'memory')}
@@ -553,6 +561,7 @@ function ContainersEditor({ document: doc, onDocument, path, isDisabled }) {
                 </GridItem>
                 <GridItem span={3}>
                   <QuantityInput
+                    id={`create-container-limits-cpu-${index}`}
                     document={doc}
                     onDocument={onDocument}
                     path={at('resources', 'limits', 'cpu')}
@@ -563,6 +572,7 @@ function ContainersEditor({ document: doc, onDocument, path, isDisabled }) {
                 </GridItem>
                 <GridItem span={3}>
                   <QuantityInput
+                    id={`create-container-limits-memory-${index}`}
                     document={doc}
                     onDocument={onDocument}
                     path={at('resources', 'limits', 'memory')}
@@ -604,7 +614,7 @@ function ContainersEditor({ document: doc, onDocument, path, isDisabled }) {
                   </FormSelect>
                 </FormGroup>
               </GridItem>
-              <GridItem span={6}>
+              <GridItem span={3}>
                 <FormGroup label="Dropped capabilities" fieldId={`create-container-drop-${index}`}>
                   <StringLines
                     id={`create-container-drop-${index}`}
@@ -622,6 +632,30 @@ function ContainersEditor({ document: doc, onDocument, path, isDisabled }) {
                   />
                 </FormGroup>
               </GridItem>
+              <GridItem span={3}>
+                {/* Added capabilities are the one container field where a value
+                    nobody saw is a privilege grant — NET_ADMIN, SYS_ADMIN,
+                    SYS_PTRACE. `CONTAINER_COVERAGE` counts this path as
+                    represented, so without this control the form would hide it
+                    while telling the operator, in as many words, that it hides
+                    nothing. */}
+                <FormGroup label="Added capabilities" fieldId={`create-container-capadd-${index}`}>
+                  <StringLines
+                    id={`create-container-capadd-${index}`}
+                    ariaLabel={`Container ${index + 1} added capabilities`}
+                    placeholder="One per line. The restricted profile allows NET_BIND_SERVICE and nothing else."
+                    value={getIn(doc, at('securityContext', 'capabilities', 'add'))}
+                    isDisabled={isDisabled}
+                    onChange={(next) =>
+                      onDocument(
+                        next
+                          ? setIn(doc, at('securityContext', 'capabilities', 'add'), next)
+                          : unsetIn(doc, at('securityContext', 'capabilities', 'add')),
+                      )
+                    }
+                  />
+                </FormGroup>
+              </GridItem>
             </Grid>
           </div>
         );
@@ -630,7 +664,7 @@ function ContainersEditor({ document: doc, onDocument, path, isDisabled }) {
       <Button
         variant="secondary"
         isDisabled={isDisabled}
-        data-testid="create-container-add"
+        data-testid="create-add-container"
         // Seeded with the restricted profile's two container-level
         // requirements, because admission judges the pod and not the container:
         // a second container added bare gets the whole object rejected,
