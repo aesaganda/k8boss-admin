@@ -37,6 +37,13 @@ def test_auth_discovery_is_public_and_disabled_by_default(client):
         "ldapEnabled": False,
         "oidcEnabled": False,
         "methods": ["local"],
+        # The general form. Empty rather than absent: a login page that cannot
+        # tell "no single sign-on is configured" from "this backend does not
+        # report providers" would have to guess, and the guess that renders
+        # nothing hides a working button on the deployment that has one.
+        "ssoProviders": [],
+        # The OpenID Connect entry of `ssoProviders`, repeated. Retained because
+        # an already-loaded older build of the SPA reads it.
         "oidc": None,
     }
 

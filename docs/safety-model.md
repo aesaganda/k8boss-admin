@@ -1654,16 +1654,27 @@ fourth, so adding one is a reviewed act with a written reason.
 
 ### 18.5 The two refusals that keep it honest
 
-**A password session cannot become a cluster identity.** If a local account in
-this console's own table could cause a request to arrive at the API server as
-`alice`, then the sign-in throttle and the password policy stop protecting a
-console and start protecting the cluster's authorization model — and this
-application's user table has quietly become an identity provider the cluster
-trusts. Nothing in the API server checks that the name in `Impersonate-User`
-belongs to anyone real; it checks only that the impersonator may say it. This is
-the condition most likely to be argued away by somebody who wants the feature on
-a cluster with no OIDC, and the answer there is to give the cluster an issuer,
-not to give the console one.
+**A session whose name the cluster could not have derived itself cannot become a
+cluster identity.** If a local account in this console's own table could cause a
+request to arrive at the API server as `alice`, then the sign-in throttle and the
+password policy stop protecting a console and start protecting the cluster's
+authorization model — and this application's user table has quietly become an
+identity provider the cluster trusts. Nothing in the API server checks that the
+name in `Impersonate-User` belongs to anyone real; it checks only that the
+impersonator may say it. This is the condition most likely to be argued away by
+somebody who wants the feature on a cluster with no OIDC, and the answer there is
+to give the cluster an issuer, not to give the console one.
+
+The console offers six ways in, and only two of them clear that bar: **OIDC**,
+because an API server can be pointed at the same issuer, and **the cluster's own
+OpenShift OAuth server**, because the username and groups *are* the cluster's own
+record of them. A plain OAuth 2.0 provider and a SAML IdP both genuinely
+authenticate somebody — in a vocabulary no API server consumes, so the string the
+console would send is one it chose the shape of, which is the same invention as
+sending its own opinion about somebody's groups. `IMPERSONATION_SOURCES` in
+`app/k8s/impersonation.py` is that set, with a test asserting its exact contents;
+`docs/adr-0007-impersonation.md` records why each of the six lands where it
+does.
 
 **An absent groups claim refuses.** Empty is a real answer. Absent means the
 issuer did not tell us, and impersonating on that reading strips every

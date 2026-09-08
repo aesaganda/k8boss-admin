@@ -39,6 +39,7 @@ from app.k8s.auth import TOKEN_AUTH_TYPES
 from app.k8s.client import manager
 from app.k8s.context import reset_current_cluster_id, set_current_cluster_id
 from app.k8s.quantities import add_quantities, parse_quantity
+from app.identity import oidc, openshift
 from app.models import Cluster, utcnow
 from app.services import nodes as nodes_service
 from app.services import route_domain
@@ -158,30 +159,45 @@ def _load(db: Session, cluster_id: int) -> Cluster:
 def _validate_impersonation(enabled: bool | None) -> None:
     """Refuse ADR-0007's opt-in on a deployment that could never satisfy it.
 
-    Turning it on where the console has no OpenID Connect provider produces a
-    cluster that refuses **every** operator with ``impersonation_unavailable``,
+    Turning it on where no sign-in method can supply a cluster identity produces
+    a cluster that refuses **every** operator with ``impersonation_unavailable``,
     at the request rather than at the setting. That failure is accurate and
     arrives in the worst possible place: on a page, to somebody who did not
     change the setting and cannot see it.
+
+    The methods that qualify are ADR-0007's ``IMPERSONATION_SOURCES`` — OpenID
+    Connect and the cluster's own OpenShift OAuth server — and this checks that
+    *at least one of them is configured*, not that the operator will arrive
+    through it. It cannot check the second: the setting is edited long before
+    anybody signs in, and a console offering both would otherwise have to guess
+    which button a future operator will press. An operator who is signed in
+    through a method that does not qualify still gets the refusal at the request,
+    naming their own auth source.
 
     Refusing at the form is the same choice ``_validate`` makes about an API
     server URL that could never build a client. It is deliberately *not* a check
     that the cluster and the console share an issuer — this console cannot read
     a cluster's ``--oidc-issuer-url`` and will not pretend to; that alignment is
     stated in `docs/adr-0007-impersonation.md` and is the operator's to get
-    right.
+    right. On an OpenShift cluster whose operators sign in through
+    ``OPENSHIFT_ENABLED`` there is nothing to align: the name the console sends
+    was read from that cluster's own ``users/~``.
     """
     if not enabled:
         return
-    if not settings.auth_enabled or not settings.oidc_enabled:
+    if not settings.auth_enabled or not (
+        oidc.enabled() or openshift.enabled()
+    ):
         raise Invalid(
-            "Impersonation needs this console to authenticate operators with "
-            "OpenID Connect.",
+            "Impersonation needs this console to authenticate operators through "
+            "OpenID Connect, or through the cluster's own OAuth server.",
             hint=(
-                "Enable AUTH_ENABLED and OIDC_ENABLED, or leave impersonation "
-                "off. A local or LDAP password cannot become a cluster "
-                "identity: the cluster trusts its own issuer, not this "
-                "console's user table."
+                "Enable AUTH_ENABLED with either OpenID Connect (OIDC_ENABLED) "
+                "or the cluster's own OAuth server (OPENSHIFT_ENABLED), or leave "
+                "impersonation off. A local or LDAP password cannot become a "
+                "cluster identity — the cluster trusts its own issuer, not this "
+                "console's user table — and a plain OAuth 2.0 or SAML provider "
+                "states an identity in a vocabulary no API server consumes."
             ),
             context={"field": "impersonation_enabled"},
         )

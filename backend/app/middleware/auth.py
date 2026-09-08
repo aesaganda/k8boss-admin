@@ -11,27 +11,64 @@ from app.config import settings
 from app.errors import AuthenticationRequired, PermissionDenied
 from app.identity.service import load_session
 
-#: Reachable without a session. Exact strings, matched against ``scope["path"]``.
+#: Reachable without a session before any provider's routes are added.
 #:
-#: The two OIDC routes have to be here for a reason that is obvious in hindsight
-#: and easy to miss: single sign-on *is how you get a session*, so challenging it
-#: for one makes the flow impossible to start and the symptom is a login button
-#: that 401s. Both are GET browser navigations, so the CSRF check below does not
-#: apply to them either; a future POST-mode callback would need explicit handling
-#: rather than inheriting this exemption.
+#: Single sign-on *is how you get a session*, so every route on the way to one
+#: has to be here: challenging them for a session makes the flow impossible to
+#: start, and the symptom is a login button that answers 401.
 #:
-#: Being public is not the same as being unprotected. ``/oidc/start`` mints a
-#: sealed handshake and redirects; ``/oidc/callback`` refuses anything that does
-#: not match a handshake this console started, and issues a session only after a
-#: signature-verified assertion.
-_PUBLIC_PATHS = frozenset({
+#: Being public is not the same as being unprotected. ``/start`` mints a sealed
+#: handshake and redirects; a callback refuses anything that does not match a
+#: handshake this console started, and issues a session only after a verified
+#: assertion.
+_BASE_PUBLIC_PATHS = frozenset({
     "/api/health",
     "/api/auth/config",
     "/api/auth/login",
-    "/api/auth/oidc/start",
-    "/api/auth/oidc/callback",
 })
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+_public_paths_cache: frozenset[str] | None = None
+
+
+def _public_paths() -> frozenset[str]:
+    """Every path reachable without a session. Still exact strings.
+
+    Built from the single sign-on registry rather than written out, so a fifth
+    provider cannot be reachable in the router and unreachable here — which
+    fails as "sign in to continue" on the callback of a provider that just
+    authenticated somebody, and reads as a broken identity provider.
+
+    Enumerated rather than prefix-matched, deliberately. A rule like "anything
+    under /api/auth/" is one route away from exempting something that should
+    never have been: this list is short, and every entry on it is a route that
+    exists because a session cannot yet be presented.
+
+    **One of them is a POST**, which the CSRF check below would otherwise cover:
+    SAML's assertion consumer service. It is exempt because the request comes
+    from the identity provider's origin and a console demanding a CSRF token
+    there would be demanding one from a party that has never seen a page of it.
+    What stands in its place is not weaker: the assertion carries a signature
+    checked against a configured certificate, and an ``InResponseTo`` *inside
+    that signed subtree* which must equal the request id sealed in this
+    browser's own handshake cookie. Any future POST route added here needs its
+    own answer to that question, not this one by inheritance.
+    """
+    global _public_paths_cache
+    if _public_paths_cache is None:
+        from app.identity import sso
+
+        paths = set(_BASE_PUBLIC_PATHS)
+        for provider in sso.providers().values():
+            paths.add(f"/api/auth/{provider.NAME}/start")
+            paths.add(f"/api/auth/{provider.NAME}/{provider.CALLBACK_SUFFIX}")
+        # Service-provider metadata: an entityID and an ACS URL, published so an
+        # administrator does not transcribe them. Public because the identity
+        # provider's setup form fetches it, and there is nobody signed in on the
+        # far side of that fetch.
+        paths.add("/api/auth/saml/metadata")
+        _public_paths_cache = frozenset(paths)
+    return _public_paths_cache
 
 
 def _header(scope, name: bytes) -> str | None:
@@ -84,7 +121,7 @@ class AuthenticationMiddleware:
 
         path = scope.get("path", "")
         if scope["type"] == "http" and (
-            path in _PUBLIC_PATHS or scope.get("method", "GET").upper() == "OPTIONS"
+            path in _public_paths() or scope.get("method", "GET").upper() == "OPTIONS"
         ):
             await self.app(scope, receive, send)
             return

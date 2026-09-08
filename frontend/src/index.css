@@ -1194,6 +1194,17 @@ body.admin-resizing * {
   gap: var(--admin-gap);
 }
 
+.admin-login__divider {
+  margin-block: var(--admin-gap);
+}
+
+/* A deployment can offer up to four single sign-on providers, so these stack.
+   Spaced rather than flush: two identically-styled buttons touching read as one
+   control with a split label. */
+.admin-login__sso + .admin-login__sso {
+  margin-block-start: 0.5rem;
+}
+
 .admin-auth-state {
   max-width: 42rem;
   margin: 10vh auto;

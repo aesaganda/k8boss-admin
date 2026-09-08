@@ -40,16 +40,24 @@ without the verifier, which never leaves this server's sealed cookie.
 **``state``.** Checked against the same sealed cookie, which is what stops a
 third party starting a login and getting the victim's browser to complete it.
 
-## Why there is no provider registry
+## One issuer, from the environment
 
 K8Boss stores identity providers as database rows with an admin CRUD surface.
-This console configures LDAP from the environment, and a second provider
-configured a different way would mean two places to look when a login fails and
-two things to get right in a Helm chart. So OIDC is environment-configured too,
-one issuer per deployment. Multiple concurrent issuers are a real feature and a
-real design change — a table, a CRUD surface, encrypted per-row secrets, and a
+This console configures LDAP from the environment, and a provider configured a
+different way would mean two places to look when a login fails and two things to
+get right in a Helm chart. So OIDC is environment-configured too, one issuer per
+deployment — as are the three siblings this module sits beside
+(:mod:`app.identity.oauth`, :mod:`app.identity.openshift`,
+:mod:`app.identity.saml`), which are four *kinds* of provider and still one of
+each.
+
+Several concurrent issuers **of the same kind** remains a real feature and a real
+design change — a table, a CRUD surface, encrypted per-row secrets, and a
 subject-collision story across issuers — not a config key, and the honest thing
-is to say the console does not do it rather than to half-build it.
+is to say the console does not do it rather than to half-build it. Two different
+kinds do not collide in the same way: each carries its own ``auth_source`` on the
+account row, so a username asserted by two of them is refused rather than merged
+(see :func:`app.identity.service.provision_federated_user`).
 """
 
 from __future__ import annotations
@@ -58,16 +66,17 @@ import base64
 import hashlib
 import logging
 import secrets
-import ssl
 import time
-from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlencode
 
 import httpx
 
 from app.config import settings
-from app.errors import IdentityProviderUnavailable, Invalid, PermissionDenied
+from app.errors import IdentityProviderUnavailable, PermissionDenied
+from app.identity import handshake as handshake_service
+from app.identity import sso
+from app.identity.sso import Begin, FederatedIdentity
 
 logger = logging.getLogger(__name__)
 
@@ -103,18 +112,21 @@ _discovery_fetched_at: float = 0.0
 _jwk_clients: dict[str, Any] = {}
 
 
-@dataclass(frozen=True)
-class OidcIdentity:
-    """One verified assertion, reduced to what this console stores."""
+#: What a verified assertion reduces to. The shared shape, aliased rather than
+#: redefined: everything downstream of verification — account binding, role
+#: mapping, the audit row — is identical for all four providers, and a private
+#: copy here would be the thing that drifts when one of them grows a field.
+#:
+#: The name is retained because it reads correctly at the call sites in this
+#: module, and because ``groups=None`` means the same thing here as everywhere
+#: else: the issuer omitted the claim, which must not demote anybody.
+OidcIdentity = FederatedIdentity
 
-    subject: str
-    username: str
-    display_name: str | None
-    email: str | None
-    #: Groups from the configured claim, or ``None`` when the claim was absent.
-    #: The distinction is the one :mod:`app.identity.roles` exists for: an issuer
-    #: that omits the groups claim must not silently demote an administrator.
-    groups: tuple[str, ...] | None
+#: Registry identity. See :mod:`app.identity.sso` for the interface these four
+#: module-level names and the four functions at the bottom of this file make up.
+NAME = "oidc"
+BINDING = "query"
+CALLBACK_SUFFIX = "callback"
 
 
 def enabled() -> bool:
@@ -135,12 +147,23 @@ def enabled() -> bool:
 def require_enabled() -> None:
     """Raise the §1.3 error a disabled provider should produce."""
     if not enabled():
-        raise Invalid(
-            "Single sign-on is not configured on this deployment.",
-            hint="Set OIDC_ENABLED, OIDC_ISSUER and OIDC_CLIENT_ID, then restart "
-                 "the console.",
-            context={"provider": "oidc"},
+        raise sso.not_configured(
+            NAME,
+            "Set OIDC_ENABLED, OIDC_ISSUER and OIDC_CLIENT_ID, then restart "
+            "the console.",
         )
+
+
+def label() -> str:
+    return settings.oidc_button_label
+
+
+def admin_group() -> str:
+    return settings.oidc_admin_group
+
+
+def configured_callback_url() -> str:
+    return settings.oidc_redirect_url.strip()
 
 
 def reset_discovery_cache() -> None:
@@ -155,53 +178,30 @@ def reset_discovery_cache() -> None:
     _jwk_clients.clear()
 
 
-def _tls_context() -> "ssl.SSLContext | None":
-    """The TLS trust configuration, as an ``SSLContext`` for non-httpx callers.
+def _tls_context():
+    """The TLS trust configuration as an ``SSLContext``, for ``PyJWKClient``.
 
-    ``httpx`` takes a CA bundle path or a bool directly; ``PyJWKClient`` fetches
-    the JWKS with ``urllib``, which takes neither. Without this the JWKS fetch
-    silently ignores ``OIDC_CA_CERTIFICATE_FILE`` and ``OIDC_VERIFY_TLS`` and
-    falls back to the system trust store.
-
-    The failure that produces: an issuer behind a private CA completes discovery
-    (httpx honoured the bundle) and then fails at key retrieval with
-    ``CERTIFICATE_VERIFY_FAILED``, reported as "the provider's signing keys could
-    not be read". Every sign-in fails, on a deployment whose CA is configured
-    correctly, and the one documented escape hatch does not cover the one fetch
-    that decides which key is trusted.
-
-    ``None`` means "the library's default", which is right only when neither
-    setting is in play.
+    It fetches the JWKS with ``urllib``, which takes neither a CA path nor a
+    bool, so without this the one fetch that decides *which key is trusted*
+    silently ignores ``OIDC_CA_CERTIFICATE_FILE`` and ``OIDC_VERIFY_TLS``. The
+    failure that produces: an issuer behind a private CA completes discovery
+    (httpx honoured the bundle) and then fails at key retrieval, reported as
+    "the provider's signing keys could not be read" — every sign-in failing on a
+    deployment whose CA is configured correctly.
     """
-    if settings.oidc_ca_certificate_file:
-        return ssl.create_default_context(cafile=settings.oidc_ca_certificate_file)
-    if not settings.oidc_verify_tls:
-        context = ssl.create_default_context()
-        context.check_hostname = False
-        context.verify_mode = ssl.CERT_NONE
-        return context
-    return None
+    return sso.tls_context(
+        verify=settings.oidc_verify_tls,
+        ca_file=settings.oidc_ca_certificate_file,
+    )
 
 
 def _verify_tls() -> bool | str:
-    """What to hand httpx as ``verify``.
-
-    A CA bundle path when one is configured, otherwise the boolean. Disabling
-    verification entirely is possible and is logged at WARNING every time the
-    document is fetched, because an unverified TLS connection to an identity
-    provider means the assertions this whole module carefully validates were
-    delivered by whoever was on the path.
-    """
-    if settings.oidc_ca_certificate_file:
-        return settings.oidc_ca_certificate_file
-    if not settings.oidc_verify_tls:
-        logger.warning(
-            "OIDC_VERIFY_TLS is false. The identity provider's certificate is "
-            "not being checked, so the signed assertions this console validates "
-            "are being fetched over a channel anyone on the path can control."
-        )
-        return False
-    return True
+    """What to hand httpx as ``verify``. See :func:`app.identity.sso.tls_verify`."""
+    return sso.tls_verify(
+        verify=settings.oidc_verify_tls,
+        ca_file=settings.oidc_ca_certificate_file,
+        provider=NAME,
+    )
 
 
 def discovery() -> dict[str, Any]:
@@ -486,16 +486,10 @@ def identity_from_claims(claims: dict[str, Any]) -> OidcIdentity:
     email = _claim(claims, settings.oidc_email_claim)
     display_name = _claim(claims, settings.oidc_display_name_claim) or None
 
-    raw_groups = _claim(claims, settings.oidc_groups_claim)
-    if raw_groups is None:
-        groups: tuple[str, ...] | None = None
-    elif isinstance(raw_groups, str):
-        # Some issuers emit a single group as a bare string and several emit a
-        # space- or comma-separated list. Treating the string as a one-element
-        # list would make "admins,staff" a group nobody is ever in.
-        groups = tuple(part for part in raw_groups.replace(",", " ").split() if part)
-    else:
-        groups = tuple(str(group) for group in raw_groups)
+    # Absent stays absent, and a bare string is split rather than wrapped: see
+    # `sso.parse_groups`, which the other three providers use for the same
+    # reason.
+    groups = sso.parse_groups(_claim(claims, settings.oidc_groups_claim))
 
     return OidcIdentity(
         subject=subject,
@@ -511,60 +505,104 @@ def check_group_allowlist(identity: OidcIdentity) -> None:
 
     ``OIDC_ALLOWED_GROUPS`` empty means every account the issuer authenticates
     may use the console, which is the right default for a deployment whose issuer
-    already only knows the right people.
-
-    When it is set and the groups claim is **absent**, this refuses. That is the
-    opposite of the role-mapping rule one function over, and deliberately: role
-    mapping asks "should this person be promoted", where the safe answer under
-    uncertainty is to change nothing, while this asks "may this person in at
-    all", where the safe answer under uncertainty is no. An allowlist that
-    admitted everyone whenever the claim went missing would be an allowlist that
-    stops working exactly when the issuer is misconfigured.
+    already only knows the right people. When it is set and the groups claim is
+    **absent**, the sign-in is refused — the opposite of the role-mapping rule,
+    and for the reason :func:`app.identity.sso.check_group_allowlist` states.
     """
-    from app.identity import roles
+    sso.check_group_allowlist(
+        identity,
+        allowed=settings.oidc_allowed_groups,
+        provider=NAME,
+        source_hint=(
+            f"The issuer did not include the {settings.oidc_groups_claim!r} "
+            "claim. Add the claim to the client's token mapping, request the "
+            "scope that carries it, or clear OIDC_ALLOWED_GROUPS."
+        ),
+    )
 
-    allowed = {
-        roles.normalize_group(group)
-        for group in settings.oidc_allowed_groups.split(",")
-        if group.strip()
-    }
-    if not allowed:
-        return
 
-    if identity.groups is None:
-        logger.warning(
-            "Refusing SSO for %r: OIDC_ALLOWED_GROUPS is set but the assertion "
-            "carried no %r claim, so membership could not be checked.",
-            identity.username, settings.oidc_groups_claim,
-        )
+# --------------------------------------------------------------------------- #
+# The registry interface (see app.identity.sso)
+# --------------------------------------------------------------------------- #
+
+
+def begin(*, callback_url: str, next_path: str) -> Begin:
+    """Start the Authorization Code + PKCE handshake.
+
+    The four values that have to survive the round trip — ``state``, ``nonce``,
+    the PKCE verifier and the exact ``redirect_uri`` — are minted here and sealed
+    by the caller. The redirect URI is sealed rather than recomputed at the
+    callback because OAuth requires the two to be byte-identical, and a
+    recomputed one differs the moment a forwarded header does, producing an
+    ``invalid_grant`` that reads as a credential problem.
+    """
+    state = secrets.token_urlsafe(24)
+    nonce = secrets.token_urlsafe(24)
+    verifier, challenge = generate_pkce()
+    return Begin(
+        url=authorization_url(
+            redirect_uri=callback_url,
+            state=state,
+            nonce=nonce,
+            code_challenge=challenge,
+        ),
+        handshake=handshake_service.Handshake(
+            provider=NAME,
+            state=state,
+            nonce=nonce,
+            code_verifier=verifier,
+            redirect_uri=callback_url,
+            next_path=next_path,
+        ),
+    )
+
+
+def complete(*, handshake, params) -> OidcIdentity:
+    """Exchange the code and verify the ID token completely. See the docstrings
+    on :func:`exchange_code` and :func:`verify_id_token` for what each check
+    prevents; nothing in the token is read before all of them have passed."""
+    tokens = exchange_code(
+        code=params.get("code") or "",
+        code_verifier=handshake.code_verifier,
+        redirect_uri=handshake.redirect_uri,
+    )
+    id_token = tokens.get("id_token")
+    if not id_token:
+        # Not "the sign-in failed": the issuer completed the exchange and
+        # asserted nothing about who it was for, which is a different fact and
+        # the one an administrator has to act on.
         raise PermissionDenied(
-            "Your single sign-on account could not be checked against this "
-            "console's permitted groups.",
-            hint="The issuer did not include the groups claim. Add the claim to "
-                 "the client's token mapping, or clear OIDC_ALLOWED_GROUPS.",
-            context={"provider": "oidc"},
+            "The identity provider returned no ID token, so it asserted nothing "
+            "about who signed in.",
+            hint="The client is registered as a plain OAuth 2.0 client rather "
+                 "than an OpenID Connect one, or the 'openid' scope is missing "
+                 "from OIDC_SCOPES. A provider that has no ID token to give can "
+                 "be configured as OAUTH_* instead.",
+            context={"provider": NAME},
         )
-
-    presented = {roles.normalize_group(group) for group in identity.groups}
-    if not (presented & allowed):
-        logger.info("Refusing SSO for %r: not in a permitted group.", identity.username)
-        raise PermissionDenied(
-            "Your account is not a member of a group permitted to use this "
-            "console.",
-            context={"provider": "oidc"},
-        )
+    identity = identity_from_claims(verify_id_token(id_token, nonce=handshake.nonce))
+    check_group_allowlist(identity)
+    return identity
 
 
 __all__ = [
     "ALLOWED_ALGORITHMS",
+    "BINDING",
+    "CALLBACK_SUFFIX",
+    "NAME",
     "OidcIdentity",
+    "admin_group",
     "authorization_url",
+    "begin",
     "check_group_allowlist",
+    "complete",
+    "configured_callback_url",
     "discovery",
     "enabled",
     "exchange_code",
     "generate_pkce",
     "identity_from_claims",
+    "label",
     "require_enabled",
     "reset_discovery_cache",
     "verify_id_token",

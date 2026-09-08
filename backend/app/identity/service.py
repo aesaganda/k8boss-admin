@@ -29,13 +29,20 @@ PASSWORD_MIN_LENGTH = 12
 #: two providers map onto it. Kept as a name here so existing importers of
 #: ``service.ROLES`` do not have to move.
 ROLES = roles.ROLES
-AUTH_SOURCES = frozenset({"local", "ldap", "oidc"})
+AUTH_SOURCES = frozenset({"local", "ldap", "oidc", "oauth", "openshift", "saml"})
 
 #: Auth sources whose role and profile are owned by the identity provider and
 #: refreshed at login. A console administrator cannot edit these fields, because
 #: the next successful login would overwrite the edit and the operator would have
 #: no way to see why it did not stick.
-FEDERATED_SOURCES = frozenset({"ldap", "oidc"})
+#:
+#: Every source but ``local``. Derived by subtraction rather than written out a
+#: second time: the guard in ``PUT /api/auth/users/{id}`` was originally a
+#: literal ``"ldap"``, and when OIDC arrived an administrator could promote an
+#: OIDC account and watch the change silently revert at that user's next sign-in
+#: with nothing anywhere explaining why. A fifth provider must not be able to
+#: reintroduce that by being added to one list and not the other.
+FEDERATED_SOURCES = AUTH_SOURCES - {"local"}
 
 
 @dataclass(frozen=True)
@@ -73,8 +80,10 @@ class Principal:
         is not about permissions. It does not consult any cluster: whether a
         given cluster asks for impersonation is that cluster's own flag.
         """
+        from app.k8s.impersonation import IMPERSONATION_SOURCES
+
         return (
-            self.auth_source == "oidc"
+            self.auth_source in IMPERSONATION_SOURCES
             and bool(self.idp_username)
             and self.idp_groups is not None
         )

@@ -415,21 +415,26 @@ export const auth = {
   logout: () => request('/auth/logout', { method: 'POST', expect: 'none', retry: false }),
 
   /**
-   * Where to send the browser to begin single sign-on.
+   * Where to send the browser to begin single sign-on with one provider.
    *
    * A full-page navigation, not a `fetch`. The handshake is a redirect to the
    * identity provider and back, and an XHR cannot follow that: the IdP needs to
    * show a login form, possibly a second factor, possibly a consent screen, in a
    * real browsing context. It also has to be a top-level navigation for the
    * handshake cookie to come back at all — see the backend's
-   * `identity/handshake.py` on why that cookie is SameSite=Lax.
+   * `identity/handshake.py` on why that cookie is SameSite=Lax, and why SAML's
+   * has to be SameSite=None instead.
+   *
+   * The provider is a name from `/auth/config`'s `ssoProviders`, never a string
+   * assembled here: the console can offer four, and a hard-coded `oidc` was
+   * what this function used to be.
    *
    * `cluster_id` is deliberately not appended: `buildUrl` is bypassed because
    * this is not an API call, and a cluster scope means nothing to a sign-in.
    */
-  ssoStartUrl: (nextPath = '/') => {
+  ssoStartUrl: (provider = 'oidc', nextPath = '/') => {
     const qs = new URLSearchParams({ next: nextPath || '/' });
-    return `${API_BASE}/auth/oidc/start?${qs.toString()}`;
+    return `${API_BASE}/auth/${encodeURIComponent(provider)}/start?${qs.toString()}`;
   },
 };
 
