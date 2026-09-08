@@ -401,8 +401,19 @@ rules:
   # whether OLM can install into the target namespace at all: withheld,
   # `target.ready` is null and the plan warns that it could not check, rather
   # than claiming a namespace has no OperatorGroup.
+  #
+  # `olmconfigs` is not read by §16 at all — it is here for §33's ownership
+  # scan, which reads every one of the twenty-six objects an install would
+  # write before it writes any of them, and OLMConfig is one of them. Withheld,
+  # the scan is fine on a cluster with no OLM (the API is not served, so the
+  # read is `unsupported` and the object cannot exist) and then fails with
+  # `rbac_denied` on every cluster where OLM IS installed — which is exactly
+  # when the adoption refusal is the thing protecting a running control plane
+  # from being overwritten. So the failure appears only after a first successful
+  # install, and it replaces "this OLM is not mine, I will not touch it" with a
+  # confusing permission error naming a resource nobody asked about.
   - apiGroups: ["operators.coreos.com"]
-    resources: ["subscriptions", "clusterserviceversions", "installplans", "catalogsources", "operatorgroups"]
+    resources: ["subscriptions", "clusterserviceversions", "installplans", "catalogsources", "operatorgroups", "olmconfigs"]
     verbs: ["get", "list"]
 
   # §4 generic browse. The resource browser reaches anything the cluster serves,

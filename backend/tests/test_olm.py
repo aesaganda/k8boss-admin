@@ -31,7 +31,14 @@ import yaml
 
 from app.admin import olm as olm_service
 from app.admin import olm_bundle
-from app.errors import Conflict, Invalid, MutationsDisabled, NotFound, RBACDenied
+from app.errors import (
+    Conflict,
+    Invalid,
+    MutationsDisabled,
+    NotFound,
+    RBACDenied,
+    Unsupported,
+)
 from app.resources import catalog
 from tests import test_routes
 
@@ -54,13 +61,21 @@ def allow_olm(monkeypatch, allow_mutations):
 _ACK = [olm_service.WARN_CLUSTER_ADMIN_GRANT, olm_service.WARN_CRD_OWNERSHIP]
 
 
-def stub_discovery(monkeypatch):
+def stub_discovery(monkeypatch, *, olm_apis=True):
     """Discovery covering every group the bundle writes into.
 
-    Including ``operators.coreos.com``, which on a real cluster does **not**
-    exist until phase one has run. The install's own handling of that is covered
-    by the dry-run and timeout tests; stubbing it present here keeps the other
-    cases about the thing they are testing.
+    ``olm_apis=False`` is the shape of a cluster that has never had OLM — the
+    entire population §33 exists for — where ``operators.coreos.com`` is not
+    served at all and every read of it raises ``unsupported`` (501) rather than
+    ``not_found`` (404).
+
+    **The default is the unrealistic one and that is deliberate.** Most cases
+    below are about something else and want the APIs present so the flow reaches
+    the code under test. But a suite that only ever ran the default is exactly
+    how the ownership scan shipped assuming a missing API arrives as 404: every
+    install on every OLM-less cluster failed with a 501 naming ``olmconfigs``
+    before writing anything, and no test saw it because the fake said the CRDs
+    were already there. `test_a_fresh_cluster_...` below is the case that pins it.
     """
     payloads = {
         "/api": {"versions": ["v1"]},
@@ -108,8 +123,12 @@ def stub_discovery(monkeypatch):
     groups = [
         ("apps", "v1"), ("rbac.authorization.k8s.io", "v1"),
         ("networking.k8s.io", "v1"), ("apiextensions.k8s.io", "v1"),
-        ("operators.coreos.com", "v1"), ("operators.coreos.com", "v1alpha1"),
     ]
+    if olm_apis:
+        groups += [("operators.coreos.com", "v1"), ("operators.coreos.com", "v1alpha1")]
+    else:
+        payloads.pop("/apis/operators.coreos.com/v1")
+        payloads.pop("/apis/operators.coreos.com/v1alpha1")
 
     def fake_raw_get(path, *, query=None):
         if path == "/apis":
@@ -143,7 +162,7 @@ def _established_crd(name):
 
 
 def _stub_absent_and_writable(
-    monkeypatch, *, fail_on=None, existing=None, establish=True,
+    monkeypatch, *, fail_on=None, existing=None, establish=True, olm_apis=True,
 ):
     """Nothing exists yet and every write succeeds, except where told otherwise.
 
@@ -155,6 +174,12 @@ def _stub_absent_and_writable(
 
     ``establish=False`` creates the CRDs and never marks them Established, which
     is the timeout case.
+
+    ``olm_apis=False`` makes reads of ``operators.coreos.com`` raise
+    ``Unsupported`` rather than ``NotFound``, which is what a cluster that has
+    never had OLM actually does. Without it the fresh-cluster test below passes
+    without ever executing the branch it exists to pin — the fake answers every
+    read with a 404 and the 501 path is never reached.
     """
     fail_on = fail_on or set()
     existing = dict(existing or {})
@@ -164,6 +189,11 @@ def _stub_absent_and_writable(
         key = (plural, namespace, name)
         if key in existing:
             return existing[key]
+        if not olm_apis and group == "operators.coreos.com" and not created:
+            raise Unsupported(
+                f"This cluster does not serve {group}/{version}.",
+                context={"group": group, "resource": plural, "version": version},
+            )
         if plural == "customresourcedefinitions" and name in created and establish:
             return _established_crd(name)
         if plural == "customresourcedefinitions" and name in created:
@@ -408,6 +438,55 @@ def test_the_bundle_is_the_size_the_docs_say_it_is():
     assert len(olm_bundle.build()) == 26
     assert len(olm_bundle.build(olm_bundle.OLMOptions(community_catalog=True))) == 27
     assert len(olm_bundle.crd_names()) == 8
+
+
+def test_the_shipped_reader_role_can_read_every_kind_the_ownership_scan_reads():
+    """The scan reads all twenty-six objects before writing any. All of them.
+
+    Miss one kind out of `deploy/rbac.yaml`'s reader role and nothing breaks on a
+    cluster with no OLM — the API is not served, the read is `unsupported`, and
+    the object provably cannot exist. It breaks on a cluster where OLM IS
+    installed, which is precisely when the scan is the thing standing between an
+    install and somebody's running operator control plane: instead of "this OLM
+    is not mine, I will not touch it", the operator gets `rbac_denied` naming a
+    resource they never asked about.
+
+    That is how `olmconfigs` shipped missing — the §16 reader rule lists the five
+    kinds the portal reads, and OLMConfig is not one of them, so nothing pointed
+    at it until an install had already succeeded once. Asserted against the real
+    file rather than a list here, because a second list is a second thing to
+    forget.
+    """
+    import pathlib
+
+    import yaml as _yaml
+
+    rbac = pathlib.Path(__file__).resolve().parents[2] / "deploy" / "rbac.yaml"
+    docs = [d for d in _yaml.safe_load_all(rbac.read_text()) if d]
+    # The READER role specifically. This file exists to support a console
+    # installed read-only, the writer role is explicitly deletable, and its
+    # wildcard rule grants create/update/patch/delete with no `get` — so a scan
+    # that needs `get` needs it from here or it does not have it.
+    readable: set[tuple[str, str]] = set()
+    for doc in docs:
+        if doc["kind"] != "ClusterRole" or doc["metadata"]["name"] != "k8boss-admin-reader":
+            continue
+        for rule in doc.get("rules") or []:
+            if "get" not in rule.get("verbs", []):
+                continue
+            for group in rule.get("apiGroups", []):
+                for resource in rule.get("resources", []):
+                    readable.add((group, resource))
+
+    needed = {
+        (item.group, item.plural)
+        for item in olm_bundle.build(olm_bundle.OLMOptions(community_catalog=True))
+    }
+    missing = {pair for pair in needed if pair not in readable}
+    assert not missing, (
+        "deploy/rbac.yaml grants no `get` on these, and app.admin.olm's ownership "
+        f"scan reads every one of them before writing anything: {sorted(missing)}"
+    )
 
 
 def test_a_body_carrying_configuration_this_bundle_does_not_have_is_ignored():
@@ -684,6 +763,63 @@ def test_a_clean_install_creates_every_object_in_two_phases(
     assert result["crds"]["established"] is True
 
 
+def test_a_fresh_cluster_that_serves_no_olm_apis_can_still_be_installed_onto(
+    monkeypatch, fake_k8s, allow_olm,
+):
+    """The case the whole feature is for, and the one the fake used to hide.
+
+    On a cluster that has never had OLM, ``operators.coreos.com`` is not in
+    discovery, so reading any of phase two's eleven objects raises ``unsupported``
+    (501) — not ``not_found`` (404). The ownership scan reads all twenty-six
+    before writing any, so this fires before a single object is created.
+
+    Shipped, that made §33 fail on 100% of its target clusters with
+    ``501 This cluster does not serve operators.coreos.com/v1``. Found on a real
+    k3s API server, not here.
+    """
+    stub_discovery(monkeypatch, olm_apis=False)
+    allow_preflight(fake_k8s)
+    _stub_absent_and_writable(monkeypatch, olm_apis=False)
+
+    # A dry run is the first thing anybody does, and it must not 501.
+    preview = olm_service.install({}, dry_run=True)
+
+    assert preview["installed"] is False
+    assert preview["failed"] == 0
+    assert len(preview["objects"]) == 26
+    # Phase two is rendered rather than projected, which is the correct answer
+    # here for a second reason: the API server has no such kind to project.
+    assert all(
+        o["projection"] == "rendered"
+        for o in preview["objects"] if o["phase"] == olm_bundle.PHASE_CORE
+    )
+
+
+def test_an_unsupported_api_is_read_as_absence_not_as_a_takeover(
+    monkeypatch, fake_k8s, allow_olm,
+):
+    """"The API is not served" means the object cannot exist. That is sound.
+
+    The other direction is what the scan exists for, so the inference has to be
+    exactly this narrow: `unsupported` and `not_found` become "not there", and a
+    forbidden read or an unreachable API server still propagates rather than
+    being read as a clear field to write into.
+    """
+    stub_discovery(monkeypatch, olm_apis=False)
+    allow_preflight(fake_k8s)
+    _stub_absent_and_writable(monkeypatch, olm_apis=False)
+
+    from app.errors import ClusterUnreachable
+
+    def unreachable(group, version, plural, name, namespace=None):
+        raise ClusterUnreachable("the API server did not answer")
+
+    monkeypatch.setattr(olm_service.reader, "get_resource", unreachable)
+
+    with pytest.raises(ClusterUnreachable):
+        olm_service.install({}, dry_run=True)
+
+
 def test_the_install_never_claims_olm_is_running(monkeypatch, fake_k8s, allow_olm):
     """Twenty-six accepted objects is not a package server. §33's whole point."""
     stub_discovery(monkeypatch)
@@ -928,6 +1064,70 @@ def test_status_is_null_rather_than_false_when_the_read_failed(monkeypatch, fake
     assert result["ready"] is None
     assert result["partial"] is True
     assert result["unavailable"]
+
+
+def test_a_cluster_with_no_olm_is_not_a_partial_read(monkeypatch, fake_k8s):
+    """The normal case for this whole feature, and it must not raise the banner.
+
+    Every cluster §33 exists for serves no `operators.coreos.com`, so reading the
+    packageserver ClusterServiceVersion raises `unsupported` on all of them. If
+    that lands in `unavailable[]`, the status of a perfectly ordinary OLM-less
+    cluster is `partial: true` and the panel renders "we could not answer some of
+    this" above four rows that answered correctly — §1.2's rule inverted, on the
+    one path that is always taken.
+
+    Found on a real cluster, not here: the fake stubs discovery with the OLM CRDs
+    present, so every earlier test read the CSV successfully and this never fired.
+    """
+    stub_discovery(monkeypatch)
+
+    def fake_get(group, version, plural, name, namespace=None):
+        if plural == "clusterserviceversions":
+            raise Unsupported(
+                "This cluster does not serve operators.coreos.com/v1alpha1.",
+                context={"group": group, "resource": plural},
+            )
+        raise NotFound(f"{plural}/{name} not found", context={"resource": plural})
+
+    monkeypatch.setattr(olm_service.reader, "get_resource", fake_get)
+    monkeypatch.setattr(
+        olm_service.reader, "list_resource",
+        lambda group, version, plural, **kw: {"items": []},
+    )
+
+    result = olm_service.status()
+
+    assert result["partial"] is False
+    assert result["unavailable"] == []
+    # And the absence is reported as an absence rather than as a null: an API
+    # the cluster does not serve cannot be hiding the object.
+    assert result["packageServer"]["csvPresent"] is False
+    assert result["installed"] is False
+
+
+def test_a_read_that_really_failed_still_makes_it_partial(monkeypatch, fake_k8s):
+    """The other half, so the fix above cannot swallow a genuine blind spot."""
+    stub_discovery(monkeypatch)
+
+    def fake_get(group, version, plural, name, namespace=None):
+        if plural == "clusterserviceversions":
+            raise RBACDenied(
+                "clusterserviceversions is forbidden",
+                context={"group": group, "resource": plural},
+            )
+        raise NotFound(f"{plural}/{name} not found", context={"resource": plural})
+
+    monkeypatch.setattr(olm_service.reader, "get_resource", fake_get)
+    monkeypatch.setattr(
+        olm_service.reader, "list_resource",
+        lambda group, version, plural, **kw: {"items": []},
+    )
+
+    result = olm_service.status()
+
+    assert result["partial"] is True
+    assert [e["resource"] for e in result["unavailable"]] == ["clusterserviceversions"]
+    assert result["packageServer"]["csvPresent"] is None
 
 
 def test_a_crd_listing_that_failed_counts_null_rather_than_zero(monkeypatch, fake_k8s):

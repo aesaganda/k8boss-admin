@@ -87,7 +87,7 @@ from app.admin.olm_bundle import (
 )
 from app.audit import recorder
 from app.config import settings
-from app.errors import AdminError, Conflict, Invalid, NotFound
+from app.errors import AdminError, Conflict, Invalid, NotFound, Unsupported
 from app.k8s.client import get_clients
 from app.resources import catalog as catalog_module
 from app.resources import reader
@@ -391,21 +391,34 @@ def _managed_by_us(obj: Any) -> bool:
 def _read_live(item: BundleObject) -> dict[str, Any] | None:
     """The object as it exists now, or ``None`` if it does not.
 
-    Only ``NotFound`` becomes ``None``. Every other failure propagates: turning a
-    forbidden read or an unanswered API server into "it is not there" would have
-    the installer write over a running OLM and report it as a fresh install,
-    which is the one outcome this whole scan exists to prevent.
+    Two failures become ``None``, and both are genuinely "it is not there":
 
-    ``NotFound`` covers two different absences here and both are genuinely "not
-    there": the object is missing, or — for the ``operators.coreos.com`` kinds in
-    phase two — the *API* is missing because the CRDs have not been created yet,
-    which is the normal state of every cluster this feature is for.
+    * ``NotFound`` — the API is served and has no such object.
+    * ``Unsupported`` — the cluster does not serve that API **at all**, so no
+      object of that kind can exist on it. This is not a swallowed error, it is
+      the only sound reading: you cannot have an OperatorGroup on a cluster with
+      no OperatorGroup CRD.
+
+    Everything else propagates. Turning a forbidden read or an unanswered API
+    server into "it is not there" would have the installer write over a running
+    OLM and report it as a fresh install, which is the one outcome this whole
+    scan exists to prevent.
+
+    **The ``Unsupported`` case was missed and it broke the feature outright.**
+    An earlier version of this docstring asserted that a missing API arrives as
+    ``NotFound``; it does not — ``resolve()`` raises ``unsupported`` (501) before
+    any request is made. Since the scan reads all twenty-six objects before
+    writing any, and eleven of them are ``operators.coreos.com`` kinds whose CRDs
+    phase one has not created yet, every install on every cluster with no OLM —
+    which is the entire population §33 exists for — failed here with a 501 naming
+    ``olmconfigs``, before touching anything. No unit test caught it because the
+    fake stubs discovery with those CRDs already present. It took a real cluster.
     """
     try:
         return reader.get_resource(
             item.group, item.version, item.plural, item.name, namespace=item.namespace,
         )
-    except NotFound:
+    except (NotFound, Unsupported):
         return None
 
 
@@ -1132,7 +1145,29 @@ def _packageserver_state(unavailable: list[dict[str, Any]]) -> dict[str, Any]:
             )
         except NotFound:
             csv = None
-    csv_readable = not collected.failed
+
+    # **A cluster that does not serve the API is not a cluster we failed to
+    # read**, and this is the one endpoint where getting that wrong is
+    # guaranteed rather than possible: every cluster §33 exists for serves no
+    # `operators.coreos.com`, so the read above raises `unsupported` on all of
+    # them. Left in `unavailable`, the status of a perfectly ordinary OLM-less
+    # cluster comes back `partial: true` and the panel renders a banner saying it
+    # could not answer, directly above four rows that answered correctly — §1.2's
+    # "an absent API is not an error" turned into a permanent warning on the
+    # normal case, which is how people learn to ignore the banner that matters.
+    #
+    # So an `unsupported` miss is withdrawn from the sink and read as what it is:
+    # the API is not served, therefore the object does not exist, therefore
+    # `csvPresent` is a real `False`. §16's own reader draws exactly this line —
+    # only `unknown` makes its listing partial — and the two must not disagree
+    # about the same cluster. Any other failure stays in the sink and leaves
+    # `csvPresent` null.
+    unsupported = bool(
+        collected.failed and (collected.entry or {}).get("reason") == "unsupported"
+    )
+    if unsupported and collected.entry in unavailable:
+        unavailable.remove(collected.entry)
+    csv_readable = (not collected.failed) or unsupported
 
     state = portal_service.source_state(portal_service.PACKAGES)
     return {
