@@ -17,7 +17,10 @@
  *
  * Instance browsing is the exact `Listing` component the API explorer already
  * uses for one resource type's objects — this page is a second, curated way
- * to reach it, not a second implementation of it.
+ * to reach it, not a second implementation of it. That is also how this page
+ * gets a `Create <Kind>…` button for every CRD without writing one: the button
+ * lives in `Listing`, and the kind, the verbs and the namespacing it needs all
+ * come off the same catalog entry the card was rendered from.
  */
 import { useMemo, useState } from 'react';
 import { Button, Card, CardBody, CardTitle } from '@patternfly/react-core';

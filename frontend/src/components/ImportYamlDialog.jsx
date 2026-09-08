@@ -20,14 +20,22 @@
  * the reviewer's eye goes to the spec, not to hunting `metadata.namespace` in a
  * wall of green.
  *
- * **`initialText` is how "Create Pod" differs from the masthead's blank
- * "Import YAML".** Both are this same dialog; a per-kind button on a list page
- * just seeds the editor with a starter manifest for that kind (see
- * `pages/_data.js`'s `POD_TEMPLATE` / `WORKLOAD_TEMPLATES`) instead of leaving
- * it empty. Deliberately never given a namespace of its own — the fallback
- * above already supplies one, and a template that hardcoded the namespace open
- * at click time would go stale the moment the operator switched the masthead
- * selector before finishing the edit.
+ * **`templates` is how "Create Service" differs from the masthead's blank
+ * "Import YAML".** Both are this same dialog; a create button on a listing
+ * hands it the starters for that one kind (`components/templates.js`) and the
+ * editor opens on the first of them instead of empty. Deliberately never given
+ * a namespace of its own — the fallback above already supplies one, and a
+ * starter that hardcoded the namespace open at click time would go stale the
+ * moment the operator switched the masthead selector before finishing the edit.
+ *
+ * Several kinds have more than one starter, because the shapes an operator
+ * picks between are different objects: a headless Service and a LoadBalancer
+ * share a kind and almost nothing else. Choosing another one **replaces the
+ * document**, which is the one destructive thing this dialog can do before it
+ * has sent anything anywhere — so it is said out loud and confirmed, and only
+ * when there is something to lose. An untouched starter is swapped
+ * immediately: refusing to switch away from a document nobody has typed into
+ * would be a confirmation about nothing.
  *
  * **Multi-document paste is refused, not split.** `YamlEditor`'s own validator
  * already blocks it with "apply them one at a time" — the same refusal
@@ -71,11 +79,12 @@
  * the diff.
  */
 import { useEffect, useMemo, useState } from 'react';
-import { Alert, Radio, Tooltip } from '@patternfly/react-core';
+import { Alert, Button, Radio, Tooltip } from '@patternfly/react-core';
 import MutationDialog from './MutationDialog';
 import ObjectForm from './ObjectForm';
 import YamlEditor, { validateYaml } from './YamlEditor';
 import {
+  FORM_MODELS,
   containsCycle,
   formModelFor,
   formatPath,
@@ -87,6 +96,18 @@ import {
 import { PartialBanner } from './ui';
 import { resources as resourcesApi } from '../api/client';
 import { useNamespace } from '../contexts/NamespaceContext';
+
+/**
+ * The kinds the form view can project, listed rather than counted.
+ *
+ * Read off `FORM_MODELS` instead of written down, because the sentence beside a
+ * disabled radio is the only place an operator finds out which kinds have a
+ * form — and a hand-written list of them is one that stops being true the first
+ * time somebody adds a model and does not think to come here. Rule 11.4 asks
+ * for the reason a control is unavailable; a reason that has quietly gone stale
+ * is worse than none, because it is the one they believe.
+ */
+const MODELLED_KINDS = [...new Set(FORM_MODELS.map((entry) => entry.kind))].sort().join(', ');
 
 /** How `localIssues` severities become PatternFly alert variants and headings. */
 const ISSUE_ALERTS = [
@@ -110,9 +131,25 @@ const ISSUE_ALERTS = [
   },
 ];
 
-export function ImportYamlDialog({ isOpen, title = 'Import YAML', initialText = '', onClose, onApplied }) {
+export function ImportYamlDialog({
+  isOpen,
+  title = 'Import YAML',
+  initialText = '',
+  templates = [],
+  onClose,
+  onApplied,
+}) {
   const { selected: namespaceFromMasthead } = useNamespace();
-  const [text, setText] = useState(initialText);
+  // What the editor opened on. An explicit `initialText` wins so the masthead's
+  // blank "+" and any caller with a document of its own keep working; otherwise
+  // it is the first starter for the kind the button was on.
+  const seedText = initialText || templates[0]?.text || '';
+  const [text, setText] = useState(seedText);
+  const [starterId, setStarterId] = useState(templates[0]?.id ?? null);
+  // A starter the operator asked to switch to and has not confirmed. Held
+  // rather than applied, because the document it would overwrite is the one
+  // they have been editing.
+  const [pendingId, setPendingId] = useState(null);
   const [catalog, setCatalog] = useState({ items: [], unavailable: [], loading: true, error: null });
 
   // Which view the dialog opens in is decided once, from the document it was
@@ -120,9 +157,29 @@ export function ImportYamlDialog({ isOpen, title = 'Import YAML', initialText = 
   // itself when a paste became parseable would move the control out from under
   // somebody mid-edit.
   const [view, setView] = useState(() => {
-    const seeded = validateYaml(initialText);
+    const seeded = validateYaml(seedText);
     return seeded.valid && formModelFor(seeded.parsed?.apiVersion, seeded.parsed?.kind) ? 'form' : 'yaml';
   });
+
+  const starter = templates.find((entry) => entry.id === starterId) ?? null;
+  const pending = templates.find((entry) => entry.id === pendingId) ?? null;
+  // "Edited" is measured against the starter itself rather than tracked with a
+  // flag: an operator who types a character and deletes it again has not
+  // changed the document, and warning them they are about to lose it would
+  // teach them to click past the warning that matters.
+  const edited = text !== (starter?.text ?? seedText);
+
+  const applyStarter = (entry) => {
+    setStarterId(entry.id);
+    setText(entry.text);
+    setPendingId(null);
+  };
+
+  const chooseStarter = (entry) => {
+    if (entry.id === starterId) return;
+    if (edited) setPendingId(entry.id);
+    else applyStarter(entry);
+  };
 
   // One fetch per opening. Not `useAsync` (that hook is page-scoped, keyed for
   // cross-navigation caching this one-shot dialog does not need) — a plain
@@ -200,7 +257,7 @@ export function ImportYamlDialog({ isOpen, title = 'Import YAML', initialText = 
       : !kind
         ? 'The document has no `kind`, so this console cannot tell which form to show.'
         : !model
-          ? `This console has no form for ${kind}. It has one for Pods, the six workload kinds, and NetworkPolicies; everything else is created from YAML.`
+          ? `This console has no form for ${kind}. It has one for ${MODELLED_KINDS}. Everything else is created from YAML, which is every field of every kind.`
           : containsCycle(parsed)
             // A YAML anchor that refers to the node containing it parses into a
             // genuinely cyclic object, and `toYaml` expands shared nodes rather
@@ -302,6 +359,65 @@ export function ImportYamlDialog({ isOpen, title = 'Import YAML', initialText = 
               ? `From the masthead selector — this document sets no metadata.namespace of its own.`
               : `This document sets no metadata.namespace and no namespace is selected above.`)}
       </Alert>
+
+      {templates.length > 1 && (
+        <div className="admin-confirm__views" data-testid="create-starters">
+          <span className="admin-confirm__views-label" id="create-starter-label">
+            Start from:
+          </span>
+          <div className="admin-confirm__views-options" role="radiogroup" aria-labelledby="create-starter-label">
+            {templates.map((entry) => (
+              <Radio
+                key={entry.id}
+                id={`create-starter-${entry.id}`}
+                name="create-starter"
+                label={entry.label}
+                data-testid={`create-starter-${entry.id}`}
+                // Checked follows the document, not the click. A starter the
+                // operator asked for and has not confirmed has not replaced
+                // anything, and a radio that moved first would be showing them
+                // a document they are not looking at.
+                isChecked={starterId === entry.id}
+                onChange={() => chooseStarter(entry)}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {starter?.description && (
+        // The sentence a starter would otherwise have written as a YAML comment.
+        // It lives here instead because a form edit re-serialises the document
+        // and nothing carries a comment across a parse — so a commented starter
+        // warns the operator it is about to destroy lines this console wrote,
+        // on the first click, before they have typed anything.
+        <p className="admin-confirm__views-reason" data-testid="create-starter-description">
+          {starter.description}
+        </p>
+      )}
+
+      {pending && (
+        <Alert
+          isInline
+          variant="warning"
+          className="admin-confirm__alert"
+          data-testid="create-starter-confirm"
+          title={`Starting from "${pending.label}" replaces what is in the editor`}
+        >
+          <p>
+            This document has been edited since it was seeded. Switching starters overwrites it with the
+            other one, and there is no undo here. Nothing has been sent to the cluster either way.
+          </p>
+          <div style={{ display: 'flex', gap: 'var(--admin-gap-sm, 0.5rem)', marginBlockStart: 'var(--admin-gap-sm, 0.5rem)' }}>
+            <Button variant="warning" data-testid="create-starter-replace" onClick={() => applyStarter(pending)}>
+              Replace the document
+            </Button>
+            <Button variant="link" data-testid="create-starter-keep" onClick={() => setPendingId(null)}>
+              Keep what I have
+            </Button>
+          </div>
+        </Alert>
+      )}
 
       <div className="admin-confirm__views">
         <span className="admin-confirm__views-label" id="create-view-label">

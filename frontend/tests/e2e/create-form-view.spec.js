@@ -22,7 +22,7 @@
  */
 import { expect, test } from '@playwright/test';
 
-import { containerControlTestIds } from '../../src/components/objectForm.js';
+import { FORM_MODELS, containerControlTestIds, objectListControlTestIds } from '../../src/components/objectForm.js';
 import { FIXTURES, mockApi } from './fixtures.js';
 
 /** Answer every §9 check as allowed, so RBAC is not what is under test. */
@@ -103,6 +103,35 @@ const HAND_WRITTEN = DEPLOYMENT.replace(
 `,
   );
 
+/**
+ * A manifest with exactly three comment lines: a whole-line one, a trailing one
+ * and one inside a list. Nothing carries any of them across a parse, which is
+ * what the form edit has to say before it makes one.
+ */
+const COMMENTED = `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  # The name every other object refers to.
+  name: example
+  namespace: prod
+  labels:
+    app: example
+spec:
+  replicas: 1  # One is the default; zero is a valid Deployment with no pods.
+  selector:
+    matchLabels:
+      app: example
+  template:
+    metadata:
+      labels:
+        app: example
+    spec:
+      containers:
+        # The unprivileged build listens on 8080 rather than 80.
+        - name: example
+          image: docker.io/nginxinc/nginx-unprivileged:1.30-alpine
+`;
+
 /** Open the masthead's dialog with `text` in the editor, in YAML view. */
 async function openImport(page, text, options = {}) {
   await mockApi(page, { preflight: ALLOW_ALL, ...options });
@@ -152,11 +181,23 @@ test.describe('the create dialog form view', () => {
     await expect(page.getByTestId('yaml-editor')).toBeVisible();
   });
 
-  test('a kind with no form says so instead of offering a partial one', async ({ page }) => {
-    await openImport(page, 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: app-config\n  namespace: prod\ndata:\n  a: b\n');
+  test('a kind with no form says so, and names the kinds that have one', async ({ page }) => {
+    // A CRD is the ordinary case here and the one that must not read as a
+    // broken console: this cluster serves the kind, the object is creatable,
+    // and only the *form* is missing.
+    await openImport(
+      page,
+      'apiVersion: cilium.io/v2alpha1\nkind: CiliumCIDRGroup\nmetadata:\n  name: office\n  namespace: prod\nspec:\n  externalCIDRs:\n    - 10.0.0.0/8\n',
+    );
 
     await expect(page.getByTestId('create-view-form')).toBeDisabled();
-    await expect(page.getByTestId('create-view-form-reason')).toContainText('no form for ConfigMap');
+    const reason = page.getByTestId('create-view-form-reason');
+    await expect(reason).toContainText('no form for CiliumCIDRGroup');
+    // The list is read off `FORM_MODELS` rather than written down, so this
+    // asserts the mechanism as much as the sentence: a kind that has a model
+    // is named, and the reason cannot go stale behind one that is added later.
+    await expect(reason).toContainText('Deployment');
+    await expect(reason).toContainText('ConfigMap');
     // And the YAML path is untouched: the object is still creatable.
     await expect(page.getByTestId('mutation-preview')).toBeEnabled();
   });
@@ -246,6 +287,100 @@ test.describe('the create dialog form view', () => {
     }
   });
 
+  test('every row field an objectList declares has a control on screen', async ({ page }) => {
+    // The same check as the one above, for the control that generalises it. A
+    // row field's coverage is *derived* from its declaration, so a declared
+    // field with no rendered control is not a stale pattern — it is a path the
+    // model swears is represented and nothing on screen represents. The
+    // container editor's list can go stale; this one can only be empty.
+    const service = FORM_MODELS.find((model) => model.kind === 'Service');
+    const ports = service.sections.flatMap((section) => section.fields).find((field) => field.control === 'objectList');
+
+    await openForm(
+      page,
+      `apiVersion: v1
+kind: Service
+metadata:
+  name: example
+  namespace: prod
+spec:
+  selector:
+    app: example
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+`,
+    );
+
+    for (const testid of objectListControlTestIds(ports, 0)) {
+      await expect(page.getByTestId(testid)).toBeVisible();
+    }
+
+    // A second row carries its own ids, and adding one does not disturb the
+    // first — index-keyed rows are what makes that worth asserting.
+    await page.getByTestId(`create-${ports.id}-add`).click();
+    for (const testid of objectListControlTestIds(ports, 1)) {
+      await expect(page.getByTestId(testid)).toHaveCount(1);
+    }
+    await expect(page.getByTestId(`create-${ports.id}-port-0`)).toHaveValue('80');
+  });
+
+  test('a row the form removes takes its own values with it, and no others', async ({ page }) => {
+    // The failure the generation key exists for: rows are index-keyed, so
+    // deleting one hands every later row a key that already has a mounted
+    // subtree. Without the bump the survivor shows the deleted row's values and
+    // the next keystroke writes them onto it — a manifest nobody wrote, with a
+    // diff that looks fine.
+    await openForm(
+      page,
+      `apiVersion: v1
+kind: Service
+metadata:
+  name: example
+  namespace: prod
+spec:
+  selector:
+    app: example
+  ports:
+    - name: doomed
+      port: 80
+    - name: keeper
+      port: 443
+`,
+    );
+
+    await page.getByTestId('create-ports-remove-0').click();
+    await expect(page.getByTestId('create-ports-name-0')).toHaveValue('keeper');
+    await expect(page.getByTestId('create-ports-port-0')).toHaveValue('443');
+    await expect(page.getByTestId('create-ports-row-1')).toHaveCount(0);
+
+    const text = await yamlText(page);
+    expect(text).toContain('keeper');
+    expect(text).not.toContain('doomed');
+  });
+
+  test('a row that is not a block of keys is shown as what it is, not edited', async ({ page }) => {
+    // A list can hold anything, and a bare string where a block belongs is the
+    // classic paste error. Controls that each wrote a key into a scalar would
+    // destroy it; the row says what it holds and is left alone.
+    await openForm(
+      page,
+      `apiVersion: v1
+kind: Service
+metadata:
+  name: example
+  namespace: prod
+spec:
+  ports:
+    - "80"
+`,
+    );
+
+    await expect(page.getByTestId('create-ports-opaque-0')).toContainText('rather than a block of keys');
+    expect(await yamlText(page)).toContain('"80"');
+  });
+
   test('clearing a number removes the key rather than writing zero', async ({ page }) => {
     // Rule 11.2 on the way out. `replicas: 0` is a Deployment with no pods and
     // no error anywhere on screen; absent is a Deployment with one.
@@ -296,7 +431,7 @@ test.describe('the create dialog form view', () => {
     await mockApi(page, { preflight: ALLOW_ALL });
     await page.goto('/network');
     await page.getByRole('tab', { name: 'Network Policies' }).click();
-    await page.getByRole('button', { name: 'New network policy…' }).click();
+    await page.getByRole('button', { name: 'Create NetworkPolicy…' }).click();
     await expect(page.getByTestId('create-form')).toBeVisible();
 
     await page.getByTestId('create-podSelector-add').click();
@@ -454,18 +589,22 @@ spec:
     await expect(page.getByTestId('yaml-editor-input')).toHaveValue(/self: \*meta/);
   });
 
-  test('the comments a form edit would destroy are counted before it happens', async ({ page }) => {
+  test('a starter costs nothing to open in the form, and says what its two lines mean', async ({ page }) => {
+    // The starters carry no comments precisely so this is true: the form is the
+    // view a create button opens in, and a warning about destroying lines this
+    // console wrote — before the operator has typed anything — is a warning
+    // that teaches people to click past warnings.
     await mockApi(page, { preflight: ALLOW_ALL });
     await page.goto('/network');
     await page.getByRole('tab', { name: 'Network Policies' }).click();
-    await page.getByRole('button', { name: 'New network policy…' }).click();
+    await page.getByRole('button', { name: 'Create NetworkPolicy…' }).click();
 
     await expect(page.getByTestId('create-form')).toBeVisible();
-    await expect(page.getByTestId('create-rewrite-warning')).toContainText('3 comment lines would be dropped');
+    await expect(page.getByTestId('create-rewrite-warning')).toHaveCount(0);
 
-    // What those comments said is on the form as help text and as the two
-    // statements below, which is why losing them costs nothing an operator was
-    // reading. Both are the sentences the policy page uses.
+    // What a comment would have said is on the form as help text, in the
+    // starter's own description, and in the two statements below.
+    await expect(page.getByTestId('create-starter-description')).toContainText('selects EVERY pod in the namespace');
     await expect(page.getByTestId('create-issues-info')).toContainText('every pod in the namespace');
     await expect(page.getByTestId('create-issues-info')).toContainText('denies all inbound traffic');
 
@@ -474,10 +613,16 @@ spec:
     // anybody creates, that would be wrong about its single most consequential
     // field.
     await expect(page.getByTestId('create-unrepresented-none')).toBeVisible();
+  });
+
+  test('the comments a form edit would destroy are counted before it happens', async ({ page }) => {
+    await openForm(page, COMMENTED);
+
+    await expect(page.getByTestId('create-rewrite-warning')).toContainText('3 comment lines would be dropped');
 
     // And the warning clears once the rewrite has happened, rather than
     // standing there describing something already done.
-    await page.getByTestId('create-name').fill('deny-all');
+    await page.getByTestId('create-name').fill('checkout');
     await expect(page.getByTestId('create-rewrite-warning')).toHaveCount(0);
   });
 

@@ -424,26 +424,62 @@ export const FIXTURES = {
       // The rest of what §11.9's form view can project. Without them the dialog
       // resolves no route for a Pod or a CronJob and refuses to preview, which
       // would make every form assertion below pass against a disabled button.
+      //
+      // Since §11.10, this list is also what decides whether a listing's
+      // `Create <Kind>…` button knows its kind at all: the button reads the
+      // kind and the verbs off the catalog entry rather than off the tab. A
+      // resource missing from here renders a disabled `Create…`, which is the
+      // correct answer for a cluster that does not serve it and a confusing one
+      // for a test that meant to exercise the button.
       ...[
-        ['', 'v1', 'Pod', 'pods', ['po']],
-        ['apps', 'v1', 'StatefulSet', 'statefulsets', ['sts']],
-        ['apps', 'v1', 'DaemonSet', 'daemonsets', ['ds']],
-        ['apps', 'v1', 'ReplicaSet', 'replicasets', ['rs']],
-        ['batch', 'v1', 'Job', 'jobs', []],
-        ['batch', 'v1', 'CronJob', 'cronjobs', ['cj']],
-        ['networking.k8s.io', 'v1', 'NetworkPolicy', 'networkpolicies', ['netpol']],
-      ].map(([group, version, kind, resource, shortNames]) => ({
+        ['', 'v1', 'Pod', 'pods', ['po'], true],
+        ['', 'v1', 'Service', 'services', ['svc'], true],
+        ['', 'v1', 'ServiceAccount', 'serviceaccounts', ['sa'], true],
+        ['', 'v1', 'Secret', 'secrets', [], true],
+        ['', 'v1', 'PersistentVolumeClaim', 'persistentvolumeclaims', ['pvc'], true],
+        ['apps', 'v1', 'StatefulSet', 'statefulsets', ['sts'], true],
+        ['apps', 'v1', 'DaemonSet', 'daemonsets', ['ds'], true],
+        ['apps', 'v1', 'ReplicaSet', 'replicasets', ['rs'], true],
+        ['batch', 'v1', 'Job', 'jobs', [], true],
+        ['batch', 'v1', 'CronJob', 'cronjobs', ['cj'], true],
+        ['networking.k8s.io', 'v1', 'NetworkPolicy', 'networkpolicies', ['netpol'], true],
+        ['networking.k8s.io', 'v1', 'Ingress', 'ingresses', ['ing'], true],
+        ['rbac.authorization.k8s.io', 'v1', 'Role', 'roles', [], true],
+        ['rbac.authorization.k8s.io', 'v1', 'RoleBinding', 'rolebindings', [], true],
+        ['rbac.authorization.k8s.io', 'v1', 'ClusterRole', 'clusterroles', [], false],
+        ['rbac.authorization.k8s.io', 'v1', 'ClusterRoleBinding', 'clusterrolebindings', [], false],
+        ['storage.k8s.io', 'v1', 'StorageClass', 'storageclasses', ['sc'], false],
+        // Cluster-scoped and CRD-backed: the Custom Resources page groups it
+        // under `cilium.io`, which is deliberately not in that page's list of
+        // built-in groups.
+        ['cilium.io', 'v2alpha1', 'CiliumCIDRGroup', 'ciliumcidrgroups', [], false],
+      ].map(([group, version, kind, resource, shortNames, namespaced]) => ({
         group,
         version,
         kind,
         resource,
-        namespaced: true,
+        namespaced,
         verbs: ['get', 'list', 'create', 'update', 'patch', 'delete'],
         shortNames,
         categories: [],
         apiVersion: group ? `${group}/${version}` : version,
         preferred: true,
       })),
+      // A resource the API serves and will not create. §11.10's first question
+      // is about the API, not the caller, and nothing else in this fixture can
+      // produce that answer.
+      {
+        group: '',
+        version: 'v1',
+        kind: 'Endpoints',
+        resource: 'endpoints',
+        namespaced: true,
+        verbs: ['get', 'list'],
+        shortNames: ['ep'],
+        categories: [],
+        apiVersion: 'v1',
+        preferred: true,
+      },
     ],
     continue: null,
     remaining: null,

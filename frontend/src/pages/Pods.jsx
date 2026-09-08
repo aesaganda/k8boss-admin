@@ -33,10 +33,11 @@ import {
   Toolbar,
 } from '../components/ui';
 import ImportYamlDialog from '../components/ImportYamlDialog';
+import { templatesFor } from '../components/templates';
 import { useCluster } from '../contexts/ClusterContext';
 import { useDensity } from '../contexts/DensityContext';
 import { useNamespace } from '../contexts/NamespaceContext';
-import { POD_TEMPLATE, useGates, useResourceList } from './_data';
+import { useGates, useResourceList } from './_data';
 import {
   ActionButton,
   ImagesCell,
@@ -287,7 +288,7 @@ export default function Pods() {
         <ImportYamlDialog
           isOpen
           title="Create Pod"
-          initialText={POD_TEMPLATE}
+          templates={templatesFor({ apiVersion: 'v1', kind: 'Pod' })}
           onClose={() => setCreateOpen(false)}
           onApplied={() => {
             setCreateOpen(false);

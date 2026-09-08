@@ -35,6 +35,7 @@ import {
   Toolbar,
 } from '../components/ui';
 import ImportYamlDialog from '../components/ImportYamlDialog';
+import { templatesFor } from '../components/templates';
 import ScaleDialog from '../components/ScaleDialog';
 import RestartDialog from '../components/RestartDialog';
 import SuspendDialog from '../components/SuspendDialog';
@@ -46,7 +47,6 @@ import { truncate } from '../utils/format';
 import {
   KIND_TO_PLURAL,
   WORKLOAD_KINDS,
-  WORKLOAD_TEMPLATES,
   capabilityGate,
   useAsync,
   useGates,
@@ -419,7 +419,10 @@ export default function Workloads() {
         <ImportYamlDialog
           isOpen
           title={`Create ${createTarget.spec.kind}`}
-          initialText={WORKLOAD_TEMPLATES[createTarget.plural]}
+          templates={templatesFor({
+            apiVersion: `${createTarget.spec.group}/${createTarget.spec.version}`,
+            kind: createTarget.spec.kind,
+          })}
           onClose={() => setCreateTarget(null)}
           onApplied={() => {
             setCreateTarget(null);

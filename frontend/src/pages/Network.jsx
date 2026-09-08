@@ -71,7 +71,6 @@ import {
   Toolbar,
 } from '../components/ui';
 import { DeleteDialog } from '../components/DeleteDialog';
-import { ImportYamlDialog } from '../components/ImportYamlDialog';
 import { network as networkApi } from '../api/client';
 import { useCluster } from '../contexts/ClusterContext';
 import { useNamespace } from '../contexts/NamespaceContext';
@@ -117,35 +116,10 @@ const POLICY_GVP = { group: 'networking.k8s.io', version: 'v1', plural: 'network
  */
 function policyChecks(namespace) {
   return [
-    { id: 'create', verb: 'create', group: POLICY_GVP.group, resource: POLICY_GVP.plural, namespace },
     { id: 'update', verb: 'update', group: POLICY_GVP.group, resource: POLICY_GVP.plural, namespace },
     { id: 'delete', verb: 'delete', group: POLICY_GVP.group, resource: POLICY_GVP.plural, namespace },
   ];
 }
-
-/**
- * A starter manifest, seeded into the shared import dialog.
- *
- * Deliberately the *default-deny* policy rather than an allow rule. It is the
- * one every segmentation story starts with, it is four lines, and — unlike a
- * template full of placeholder selectors — there is no way to apply it by
- * accident and believe something was allowed. The namespace is left out on
- * purpose: `ImportYamlDialog` falls back to the masthead selection and tells the
- * operator which namespace it will use, and a hardcoded one would go stale the
- * moment they switched scope before finishing the edit.
- */
-const POLICY_TEMPLATE = `apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: default-deny-ingress
-spec:
-  # An empty podSelector selects EVERY pod in the namespace.
-  podSelector: {}
-  # Ingress listed with no ingress rules below denies all inbound traffic.
-  # Removing this line would leave the policy governing nothing at all.
-  policyTypes:
-    - Ingress
-`;
 
 /** A LabelSelector as human-readable terms. `[]` means "matches everything". */
 function selectorTerms(selector) {
@@ -941,7 +915,6 @@ export default function Network() {
 
   const [editTarget, setEditTarget] = useState(null);
   const [deleteTarget, setDeleteTarget] = useState(null);
-  const [creating, setCreating] = useState(false);
 
   // Scoped to the namespace in the masthead, like the Explorer's. A check with
   // no namespace asks whether the caller may write NetworkPolicies *anywhere*,
@@ -950,17 +923,17 @@ export default function Network() {
   const checks = useMemo(() => policyChecks(namespace), [namespace]);
   const { gate } = useGates(checks);
 
-  // Bumped after any write, and threaded into the tab's key so the listing is
-  // read again. One mechanism for all three writes rather than two: the create
-  // button is page-level and has no row to take a `reload` from, and a table
-  // that keeps showing a policy somebody just deleted is worse than a table that
-  // also forgets the search box. The remount closes the drawer too, which is
-  // what should happen to a panel describing an object that no longer exists.
+  // Bumped after an edit or a delete, and threaded into the tab's key so the
+  // listing is read again. Both are page-level writes with no listing handle to
+  // call `reload` on, and a table that keeps showing a policy somebody just
+  // deleted is worse than a table that also forgets the search box. The remount
+  // closes the drawer too, which is what should happen to a panel describing an
+  // object that no longer exists. Creates do not come through here: the create
+  // button lives in the listing's own toolbar and reloads it directly.
   const [refreshToken, setRefreshToken] = useState(0);
   const finish = useCallback(() => {
     setEditTarget(null);
     setDeleteTarget(null);
-    setCreating(false);
     setRefreshToken((token) => token + 1);
   }, []);
 
@@ -1078,25 +1051,8 @@ export default function Network() {
       <ResourceTabsPage
         title="Network"
         subtitle="Services, Ingresses, the addresses behind them, and the NetworkPolicies that describe who may reach what. This console reads no service mesh — what is here is what the API server serves."
-        actions={(activeKey) =>
-          activeKey === 'networkpolicies' ? (
-            <ActionButton gate={gate('create')} onClick={() => setCreating(true)}>
-              New network policy…
-            </ActionButton>
-          ) : null
-        }
         tabs={tabs}
       />
-
-      {creating && (
-        <ImportYamlDialog
-          isOpen
-          title="New network policy"
-          initialText={POLICY_TEMPLATE}
-          onClose={() => setCreating(false)}
-          onApplied={finish}
-        />
-      )}
 
       {editTarget && (
         <EditYamlDialog

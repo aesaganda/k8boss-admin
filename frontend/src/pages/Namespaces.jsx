@@ -18,6 +18,15 @@
  * "New project" is §17's write: a namespace created together with what governs
  * it, the way `oc new-project` instantiates a project request template. It is
  * gated on `create namespaces` and disabled with the reason, never hidden.
+ *
+ * "Create Namespace…" beside it is the §4 write, and the two are kept apart
+ * rather than merged because they produce different numbers of objects. A
+ * project is five writes into a namespace that does not exist yet — the
+ * namespace, a quota, a limit range, a role binding and a default-deny policy —
+ * and a bare namespace is one. An operator who wanted the second and pressed
+ * the first would create four objects nobody asked for; one who wanted the
+ * first and pressed the second would get an ungoverned namespace and no sign
+ * that anything was missing.
  */
 import { useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
@@ -33,7 +42,9 @@ import {
   StatusBadge,
   Toolbar,
 } from '../components/ui';
+import ImportYamlDialog from '../components/ImportYamlDialog';
 import NewProjectDialog from '../components/NewProjectDialog';
+import { templatesFor } from '../components/templates';
 import { namespaces as namespacesApi } from '../api/client';
 import { useCluster } from '../contexts/ClusterContext';
 import { useNamespace } from '../contexts/NamespaceContext';
@@ -51,6 +62,7 @@ export default function Namespaces() {
   const navigate = useNavigate();
   const [search, setSearch] = useState('');
   const [creating, setCreating] = useState(false);
+  const [creatingBare, setCreatingBare] = useState(false);
 
   const { data, loading, error, reload } = useAsync(() => namespacesApi.list(), {
     key: `namespaces:${activeClusterId}`,
@@ -143,6 +155,9 @@ export default function Namespaces() {
           <ActionButton key="create" gate={gate('create')} variant="primary" onClick={() => setCreating(true)}>
             New project…
           </ActionButton>,
+          <ActionButton key="create-bare" gate={gate('create')} onClick={() => setCreatingBare(true)}>
+            Create Namespace…
+          </ActionButton>,
         ]}
       />
 
@@ -195,6 +210,23 @@ export default function Namespaces() {
           onClose={() => setCreating(false)}
           onApplied={() => {
             reload();
+            refreshScope();
+          }}
+        />
+      )}
+
+      {creatingBare && (
+        <ImportYamlDialog
+          isOpen
+          title="Create Namespace"
+          templates={templatesFor({ apiVersion: 'v1', kind: 'Namespace' })}
+          onClose={() => setCreatingBare(false)}
+          onApplied={() => {
+            setCreatingBare(false);
+            reload();
+            // The masthead selector reads its own copy of this list, and a
+            // namespace it does not know about is one the operator cannot scope
+            // to — which is the first thing they will try to do with it.
             refreshScope();
           }}
         />
