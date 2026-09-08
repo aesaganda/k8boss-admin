@@ -905,6 +905,54 @@ export const portal = {
    * body: the plan body + { acknowledgeConsequences, dryRun }
    */
   subscribe: (body) => api.post('/portal/subscriptions', body),
+
+  /* ── §33 Installing OLM itself ─────────────────────────────────────────── */
+
+  /**
+   * Whether this cluster runs Operator Lifecycle Manager. A live read.
+   *
+   * **Two tri-states, and they are different questions.** `installed` says
+   * OLM's objects are on the cluster; `ready` says the package server is
+   * answering, which is what makes the catalog above show anything. Rendering
+   * one as the other is the §33.5 mistake: `installed: true, ready: false` is
+   * the ordinary state for a minute after an install, and the permanent state
+   * on a cluster where OLM cannot schedule. `null` in either means a read
+   * failed — never `false`, which during an outage would offer an install on
+   * top of an OLM that is already running.
+   */
+  olmStatus: () => api.get('/portal/olm'),
+
+  /**
+   * Every object an install would apply, with its YAML. **Writes nothing** and
+   * is ungated, like `plan` above — and here that is the point rather than a
+   * convenience: this response contains the ClusterRole granting OLM every verb
+   * on every resource, and deciding whether to set `ADMIN_OLM_INSTALL_ENABLED`
+   * means reading it.
+   *
+   * `retry: true` for the same reason `plan` sets it: a pure render replayed
+   * costs nothing.
+   *
+   * body: { communityCatalog }
+   */
+  olmPlan: (body) => request('/portal/olm/plan', { method: 'POST', body, retry: true }),
+
+  /**
+   * Install OLM. Twenty-six writes in two phases with a bounded wait between.
+   *
+   * `installed: true` means twenty-six objects were accepted by the API server.
+   * It is **not** a claim that OLM is running — `ready` is always null on this
+   * response, and `readyDetail` names `olmStatus` as the live read that answers
+   * it. A UI that rendered a success toast as "OLM installed and working" would
+   * be wrong for the minute or two it takes OLM to reconcile the package
+   * server, and permanently wrong on a cluster where it never does.
+   *
+   * `acknowledgeConsequences` must name every code the plan returned, or the
+   * write is refused with `422 invalid` and `context.unacknowledged` lists what
+   * was missing.
+   *
+   * body: { communityCatalog, acknowledgeConsequences, dryRun }
+   */
+  installOlm: (body) => api.post('/portal/olm', body),
 };
 
 /* ── §17 Projects ───────────────────────────────────────────────────────── */

@@ -5542,3 +5542,172 @@ schedule; `expiringWindowSeconds` is a rendering threshold, not a notification.
 
 **Not a certificate manager.** It writes nothing. Renewing one is cert-manager's
 job or the CA's, and replacing one is §4's YAML editor through the funnel.
+
+---
+
+## 33. Installing Operator Lifecycle Manager
+
+§16's portal reads what OLM offers. §33 puts OLM there when it is not.
+
+**This is the second bundle this console ships, and it is the last one.**
+ADR-0004 drew a boundary at one — "one pinned bundle of eight objects, through
+the ordinary write funnel, and nothing else, ever" — and ADR-0005 said the day
+somebody argued a second bundle was really just like the portal was the day both
+boundaries needed re-reading. `docs/adr-0008-shipped-olm.md` is that re-reading:
+it records the decision, the argument against it, and the fact that "and nothing
+else, ever" has now been wrong once. Read it before adding a third.
+
+**It ships manifests, not a controller.** `deploy/olm/crds.yaml` and
+`deploy/olm/olm.yaml` are upstream's release artifacts, vendored byte for byte,
+their SHA-256 digests pinned in `app/admin/olm_bundle.py` and checked on every
+load. Installing them is twenty-six ordinary writes through the funnel — twenty-six
+preflights, twenty-six diffs, twenty-six audit rows. Nothing watches OLM
+afterwards. `GET /api/portal/olm` is a live read.
+
+Off by default behind `ADMIN_OLM_INSTALL_ENABLED`, on top of
+`ADMIN_ALLOW_MUTATIONS`. Separate from `ADMIN_PORTAL_INSTALL_ENABLED`, because
+they are different sizes of decision: that one writes one object into an API the
+cluster already serves, and this one creates the API.
+
+### 33.1 What it is, and what it is not
+
+| It does | It does not |
+|---|---|
+| Install a pinned OLM onto a cluster that has none | Upgrade an OLM that is already there |
+| Report which version is running and whether it matches the shipped one | Claim a newer OLM exists |
+| Refuse to write over an OLM it did not install, naming every conflict | Adopt objects that already carry these names |
+| Offer upstream's community `CatalogSource` as an acknowledged option | Install it by default, or ship a catalog of its own |
+| Report that twenty-six objects were accepted | Claim OLM is running (§33.6) |
+| Say what removing OLM actually takes | Uninstall it (§33.8) |
+
+### 33.2 `GET /api/portal/olm`
+
+A live read. Nothing is cached and nothing is remembered between calls.
+
+```jsonc
+{
+  "enabled": false,
+  "enabledDetail": "Installing Operator Lifecycle Manager is switched off …",
+  "installed": false,          // tri-state — see 33.5
+  "ready": false,              // tri-state, and NOT the same question
+  "shippedVersion": "0.35.0",
+  "upstream": "https://github.com/operator-framework/…/download/v0.35.0",
+  "managedByUs": null,         // null when nothing is present to ask about
+  "crds": { "expected": 8, "present": 0, "established": 0, "missing": [...], "detail": null },
+  "deployments": [ { "name": "olm-operator", "present": false, … } ],
+  "packageServer": { "csvPresent": false, "phase": null, "apiAvailable": false, … },
+  "namespaces": ["olm", "operators"],
+  "notes": [ … ],
+  "partial": false,
+  "unavailable": []
+}
+```
+
+### 33.3 `POST /api/portal/olm/plan`
+
+Ungated, like §14's and §16's plans. Reads no cluster, writes nothing, records no
+audit row. Returns every object's rendered YAML, the two phases, the digests, and
+the consequences.
+
+It is ungated **because** of what it contains. Deciding whether to set
+`ADMIN_OLM_INSTALL_ENABLED` means deciding whether this console may create a
+ClusterRole granting every verb on every resource, and that decision has to be
+made with the object on screen. A gate that hid the plan would withhold exactly
+the thing the gate exists to make someone think about.
+
+Body: `{ "communityCatalog": false }` — the only choice §33 offers. Everything
+else in upstream's manifests is not configurable, and that is upstream's decision
+rather than this console's: OLM's Deployments, its ClusterRoleBinding subject and
+the `packageserver` CSV all name the `olm` namespace literally.
+
+### 33.4 `POST /api/portal/olm`
+
+The write. Body is the plan's plus `dryRun` (default **true**) and
+`acknowledgeConsequences`.
+
+Twenty-six writes in two ordered phases:
+
+1. **`crds`** — eight CustomResourceDefinitions.
+2. *(the wait)* — each must report `Established` before phase two, bounded by
+   `ADMIN_OLM_ESTABLISH_TIMEOUT_SECONDS`. On success the console's discovery
+   cache is invalidated, because phase two addresses five `operators.coreos.com`
+   kinds that were not in it when the request started.
+3. **`core`** — the eighteen objects that are OLM itself, in upstream's order.
+
+The order inside each phase is upstream's, preserved: `olm-operators` precedes
+the `packageserver` CSV because OLM refuses to install a CSV into a namespace
+with no OperatorGroup, and the ClusterRole precedes the binding that references
+it.
+
+**Phase two never runs into APIs that do not exist.** If a CRD write fails, or
+the wait expires, phase two's objects are reported with a `skipped` sentence and
+no `error` — because they have no error of their own, and eighteen 404s that all
+describe the first problem is not eighteen answers.
+
+### 33.5 The two tri-states, and why a UI must not collapse them
+
+`installed` says OLM's objects are on the cluster. `ready` says the package
+server is answering, which is what makes §16 show anything. `null` in either
+means a read failed and the question is open — never `false`, which during an API
+outage would invite an operator to install over an OLM that is already running.
+
+`installed: true, ready: false` is the ordinary state for a minute or two after
+an install, and the permanent state on a cluster where OLM cannot schedule.
+
+### 33.6 `installed: true` does not mean OLM works
+
+The strongest thing the install response can honestly say is that twenty-six
+objects were accepted by the API server. Two things happen afterwards that belong
+to OLM:
+
+* the two Deployments have to schedule and become Ready, and
+* the `packageserver` ClusterServiceVersion has to be reconciled by OLM, which
+  registers `v1.packages.operators.coreos.com` as an aggregated APIService.
+
+Until that second one succeeds, §16 reads exactly the empty state it read before
+the install — *and it is right to*. So the install response carries `ready: null`
+and a `readyDetail` naming `GET /api/portal/olm` as the endpoint that answers it.
+Nothing in the install response may be rendered as "Operator Lifecycle Manager is
+installed and working".
+
+### 33.7 Consequences
+
+Acknowledged by code before a real write, like §16's and §13's. Two are
+unconditional, which §16's are not: they are what installing OLM *is*, rather
+than findings about a particular cluster.
+
+| Code | When |
+|---|---|
+| `cluster_admin_grant` | Always. `system:controller:operator-lifecycle-manager` grants `apiGroups: ['*']`, `resources: ['*']` with every verb including `escalate` and `bind`. Quoted rather than paraphrased |
+| `crd_ownership` | Always. Eight CRDs join the cluster's API, and deleting one later deletes every custom resource made from it |
+| `community_catalog` | `communityCatalog: true`. The cluster pulls `quay.io/operatorhubio/catalog:latest`, hourly |
+
+`notes[]` is separate and **not** acknowledgeable: `installed_is_not_running`,
+`preflight_cannot_see_escalation`, `no_uninstall_and_no_upgrade`,
+`network_policies`. None is an outcome anyone can accept or decline, and mixing
+them in would train people to tick four boxes to get past the two that mattered.
+
+### 33.8 What §33 is not
+
+**Not an uninstall.** Removing OLM means deleting its CRDs, and deleting a CRD
+deletes every custom resource made from it across every namespace, with no second
+confirmation — every operator's Subscription and ClusterServiceVersion on the
+cluster. There is no endpoint and no delete verb granted in `deploy/rbac.yaml`.
+This is §16's asymmetry one layer down and larger, and it is not closed.
+
+**Not an upgrade.** A later OLM is installed with `kubectl` from upstream's
+release. This console reports which version is running and whether it matches the
+one it ships, and stops. `versionMatches` is that report; it is never a claim
+that a newer OLM exists, which would be a statement about a third party's release
+history made from a string baked into this repository.
+
+**Not a catalog.** §33 installs the software that reads catalogs. Which catalogs
+a cluster trusts stays the operator's decision — ADR-0005's largest rejection,
+preserved.
+
+**Not OLM v1.** This installs `operators.coreos.com` v0, which is what §16 reads.
+`olm.operatorframework.io` `ClusterExtension` is neither read nor installed.
+
+**Not a reconcile loop.** The one wait between the phases is bounded, lives
+inside a single request, holds no state and corrects no drift — what `kubectl
+wait` does. There is no watch and no drift correction anywhere in this section.

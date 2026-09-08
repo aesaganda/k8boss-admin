@@ -1745,6 +1745,164 @@ export const FIXTURES = {
     truncated: [],
     enabled: true,
     enabledDetail: 'This deployment permits subscribing to catalog operators.',
+    // §33's gate, on §16's envelope. A DIFFERENT switch from `enabled` above —
+    // ADMIN_OLM_INSTALL_ENABLED, not ADMIN_PORTAL_INSTALL_ENABLED — and it is
+    // here rather than behind its own request so the install panel paints
+    // disabled-with-the-reason on first render instead of correcting itself a
+    // round trip later.
+    olmInstall: {
+      enabled: true,
+      detail: 'This deployment permits installing Operator Lifecycle Manager.',
+    },
+  },
+
+  /**
+   * §33 `GET /portal/olm` on a cluster that does not run OLM.
+   *
+   * `installed: false` and `ready: false` are real answers here, not nulls:
+   * every read succeeded and found nothing. The distinction matters because the
+   * panel offers an install off the back of `installed === false`, and offering
+   * one off the back of a read that *failed* is how somebody installs OLM on
+   * top of an OLM.
+   */
+  olmStatusAbsent: {
+    enabled: true,
+    enabledDetail: 'This deployment permits installing Operator Lifecycle Manager.',
+    installed: false,
+    ready: false,
+    shippedVersion: '0.35.0',
+    upstream:
+      'https://github.com/operator-framework/operator-lifecycle-manager/releases/download/v0.35.0',
+    managedByUs: null,
+    crds: { expected: 8, present: 0, established: 0, missing: [], detail: null },
+    deployments: [
+      { name: 'olm-operator', present: false, desiredReplicas: null, readyReplicas: null, image: null, managedByUs: null, detail: null },
+      { name: 'catalog-operator', present: false, desiredReplicas: null, readyReplicas: null, image: null, managedByUs: null, detail: null },
+    ],
+    packageServer: {
+      csvPresent: false,
+      phase: null,
+      message: null,
+      apiAvailable: false,
+      apiDetail: 'This cluster does not serve PackageManifest objects.',
+      detail: 'packages.operators.coreos.com is the API the portal reads.',
+    },
+    namespaces: ['olm', 'operators'],
+    notes: [],
+    partial: false,
+    unavailable: [],
+  },
+
+  /**
+   * §33 the state the whole feature is careful about: every object landed and
+   * OLM is not working yet.
+   *
+   * `installed: true` with `ready: false`. A UI that renders one badge over both
+   * reports a working OLM over a package server that has not registered — and
+   * then the catalog stays empty underneath it, correctly, with nothing on the
+   * page explaining why.
+   */
+  olmStatusInstalledNotReady: {
+    enabled: true,
+    enabledDetail: 'This deployment permits installing Operator Lifecycle Manager.',
+    installed: true,
+    ready: false,
+    shippedVersion: '0.35.0',
+    upstream:
+      'https://github.com/operator-framework/operator-lifecycle-manager/releases/download/v0.35.0',
+    managedByUs: true,
+    crds: { expected: 8, present: 8, established: 8, missing: [], detail: null },
+    deployments: [
+      { name: 'olm-operator', present: true, desiredReplicas: 1, readyReplicas: 1, image: 'quay.io/operator-framework/olm@sha256:8c86', managedByUs: true, detail: null },
+      { name: 'catalog-operator', present: true, desiredReplicas: 1, readyReplicas: 1, image: 'quay.io/operator-framework/olm@sha256:8c86', managedByUs: true, detail: null },
+    ],
+    packageServer: {
+      csvPresent: true,
+      phase: 'Installing',
+      message: 'installing: waiting for deployment packageserver to become ready',
+      apiAvailable: false,
+      apiDetail: 'This cluster does not serve PackageManifest objects.',
+      detail: 'packages.operators.coreos.com is the API the portal reads.',
+    },
+    namespaces: ['olm', 'operators'],
+    notes: [],
+    partial: false,
+    unavailable: [],
+  },
+
+  /**
+   * §33 `POST /portal/olm/plan`. Writes nothing and is ungated.
+   *
+   * Three objects rather than twenty-six — enough for the dialog to render both
+   * phases and the ClusterRole, which is the one anybody actually has to read.
+   */
+  olmPlan: {
+    version: '0.35.0',
+    upstream:
+      'https://github.com/operator-framework/operator-lifecycle-manager/releases/download/v0.35.0',
+    digests: {
+      'crds.yaml': '0b66ca9d94298f04ec0704887adf663003447f50ca906187aa0ed14d701a9bd7',
+      'olm.yaml': '5756646581f5a13fab43a20e7c548492c2494ed5899d8ad2d18c0c3032d2a590',
+    },
+    communityCatalog: false,
+    communityCatalogImage: 'quay.io/operatorhubio/catalog:latest',
+    namespaces: ['olm', 'operators'],
+    consequences: [
+      {
+        code: 'cluster_admin_grant',
+        label: 'This grants OLM full control of the cluster',
+        consequence:
+          "apiGroups: ['*'], resources: ['*'] with every verb including escalate and bind.",
+        mitigation: 'There is no narrower version of this to choose.',
+      },
+      {
+        code: 'crd_ownership',
+        label: "Eight CustomResourceDefinitions become part of the cluster's API",
+        consequence: 'Deleting one later deletes every custom resource made from it.',
+        mitigation: 'This console does not offer that removal.',
+      },
+    ],
+    notes: [
+      {
+        code: 'installed_is_not_running',
+        label: 'A successful install is not a running OLM',
+        detail:
+          'The Deployments still have to become Ready and OLM has to reconcile the packageserver CSV.',
+      },
+    ],
+    phases: [
+      { phase: 'crds', detail: 'Eight CustomResourceDefinitions.' },
+      { phase: 'core', detail: 'OLM itself.' },
+    ],
+    objects: [
+      {
+        kind: 'CustomResourceDefinition',
+        name: 'subscriptions.operators.coreos.com',
+        namespace: null,
+        group: 'apiextensions.k8s.io',
+        resource: 'customresourcedefinitions',
+        phase: 'crds',
+        yaml: 'apiVersion: apiextensions.k8s.io/v1\nkind: CustomResourceDefinition\n',
+      },
+      {
+        kind: 'Namespace',
+        name: 'olm',
+        namespace: null,
+        group: '',
+        resource: 'namespaces',
+        phase: 'core',
+        yaml: 'apiVersion: v1\nkind: Namespace\n',
+      },
+      {
+        kind: 'ClusterRole',
+        name: 'system:controller:operator-lifecycle-manager',
+        namespace: null,
+        group: 'rbac.authorization.k8s.io',
+        resource: 'clusterroles',
+        phase: 'core',
+        yaml: "apiVersion: rbac.authorization.k8s.io/v1\nkind: ClusterRole\nrules:\n- apiGroups: ['*']\n",
+      },
+    ],
   },
 
   /**
@@ -1863,6 +2021,15 @@ export const FIXTURES = {
     truncated: [],
     enabled: true,
     enabledDetail: 'This deployment permits subscribing to catalog operators.',
+    // §33's gate, on §16's envelope. A DIFFERENT switch from `enabled` above —
+    // ADMIN_OLM_INSTALL_ENABLED, not ADMIN_PORTAL_INSTALL_ENABLED — and it is
+    // here rather than behind its own request so the install panel paints
+    // disabled-with-the-reason on first render instead of correcting itself a
+    // round trip later.
+    olmInstall: {
+      enabled: true,
+      detail: 'This deployment permits installing Operator Lifecycle Manager.',
+    },
   },
 
   /**
@@ -2011,6 +2178,15 @@ export const FIXTURES = {
     unavailable: [],
     enabled: true,
     enabledDetail: 'This deployment permits subscribing to catalog operators.',
+    // §33's gate, on §16's envelope. A DIFFERENT switch from `enabled` above —
+    // ADMIN_OLM_INSTALL_ENABLED, not ADMIN_PORTAL_INSTALL_ENABLED — and it is
+    // here rather than behind its own request so the install panel paints
+    // disabled-with-the-reason on first render instead of correcting itself a
+    // round trip later.
+    olmInstall: {
+      enabled: true,
+      detail: 'This deployment permits installing Operator Lifecycle Manager.',
+    },
   },
 
   /**
@@ -4608,6 +4784,9 @@ export async function mockApi(
     portalInstalled = null,
     portalPlan = null,
     portalSubscribe = null,
+    olmStatus = null,
+    olmPlan = null,
+    olmInstall = null,
     project = null,
     projectPlan = null,
     projectCreate = null,
@@ -5223,6 +5402,80 @@ export async function mockApi(
     /* ── §16 the operator portal ───────────────────────────────────────── */
 
     if (path === '/portal/catalog') return json(portalCatalog ?? FIXTURES.portalCatalog);
+
+    /* ── §33 installing OLM itself ─────────────────────────────────────── */
+
+    // The plan is matched BEFORE the status route below: it lives under the
+    // same prefix, and a router that matched `/portal/olm` first would answer a
+    // plan with a status object — which renders as an empty dialog rather than
+    // as an error, so nothing would fail loudly.
+    if (path === '/portal/olm/plan' && route.request().method() === 'POST') {
+      const body = JSON.parse(route.request().postData() || '{}');
+      if (olmPlan) return json(olmPlan(body));
+      // `communityCatalog` adds a third consequence, derived rather than
+      // echoed: a dialog that never re-reads the plan after ticking the box
+      // would otherwise pass while the real backend refused the write.
+      return json({
+        ...FIXTURES.olmPlan,
+        communityCatalog: Boolean(body.communityCatalog),
+        consequences: body.communityCatalog
+          ? [
+              ...FIXTURES.olmPlan.consequences,
+              {
+                code: 'community_catalog',
+                label: 'The cluster will pull and trust a community catalog',
+                consequence: 'quay.io/operatorhubio/catalog:latest, re-polled hourly.',
+                mitigation: 'Leave it off and add a CatalogSource you have chosen.',
+              },
+            ]
+          : FIXTURES.olmPlan.consequences,
+      });
+    }
+    if (path === '/portal/olm') {
+      if (route.request().method() === 'POST') {
+        const body = JSON.parse(route.request().postData() || '{}');
+        if (olmInstall) return json(olmInstall(body));
+        const dryRun = body.dryRun !== false;
+        return json({
+          dryRun,
+          // Derived, never echoed. `installed` here means twenty-six objects
+          // were accepted and nothing more — see `ready`, which is null on this
+          // response on purpose.
+          installed: !dryRun,
+          failed: 0,
+          skipped: 0,
+          version: '0.35.0',
+          namespaces: ['olm', 'operators'],
+          communityCatalog: Boolean(body.communityCatalog),
+          objects: FIXTURES.olmPlan.objects.map((object) => ({
+            kind: object.kind,
+            name: object.name,
+            namespace: object.namespace,
+            group: object.group,
+            resource: object.resource,
+            phase: object.phase,
+            verb: 'create',
+            applied: !dryRun,
+            diff: { unified: `+++ ${object.kind}\n+${object.name}\n`, changed: true },
+            projection: dryRun && object.phase === 'core' ? 'rendered' : 'server',
+            preflight: null,
+            skipped: null,
+            auditId: dryRun ? null : 42,
+            error: null,
+          })),
+          crds: dryRun
+            ? null
+            : { established: true, pending: [], unreadable: [], detail: null },
+          consequences: FIXTURES.olmPlan.consequences,
+          notes: FIXTURES.olmPlan.notes,
+          ready: null,
+          readyDetail:
+            'Whether OLM is running is not knowable from this response. ' +
+            'GET /api/portal/olm answers that, as a live read.',
+        });
+      }
+      return json(olmStatus ?? FIXTURES.olmStatusAbsent);
+    }
     // Ordered before `/portal/subscriptions`: the plan lives under it, and a
     // router that matched the listing first would answer a plan with a table.
     // §17 projects. The plan and the write derive their objects from the

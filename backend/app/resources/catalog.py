@@ -22,10 +22,22 @@ not look like a cluster with fewer resources*.
 answer — not that their cluster does not have metrics. Getting this backwards
 would send an operator to install something they already have.
 
-The result is cached per cluster with a **bounded** TTL. Bounded, not
-invalidate-on-write: installing a CRD is not an action this console takes, so
-there is no event to hang an invalidation on, and an unbounded cache would make a
-freshly installed operator's resources invisible until the pod restarted.
+The result is cached per cluster with a **bounded** TTL, and the bound is what
+carries it. Almost every CRD that appears on a cluster is installed by something
+other than this console — an operator, a Helm release, somebody's ``kubectl`` —
+and there is no event to hang an invalidation on for any of those, so an
+unbounded cache would make a freshly installed operator's resources invisible
+until the pod restarted.
+
+There is now exactly **one** thing this console does that creates CRDs itself:
+§33 installing Operator Lifecycle Manager. It calls :func:`invalidate_cache`
+directly after the eight CRDs report Established, because its own second phase
+addresses five ``operators.coreos.com`` kinds that were not in this cache when
+the request started — and the console disbelieving a cluster on the strength of a
+cache it filled itself, moments earlier, is the failure this module exists to
+prevent. That is a targeted invalidation for one caller, not a general
+invalidate-on-write: nothing else here knows when a cluster's API surface
+changed, and the TTL remains the answer for everything else.
 """
 
 from __future__ import annotations

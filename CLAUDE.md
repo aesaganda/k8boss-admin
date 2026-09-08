@@ -14,14 +14,20 @@ holds no cluster state: every page is a live read.
 Not a deployment engine. Two things qualify that, and they are different acts —
 do not merge them in your head or in a docstring.
 
-**It ships one bundle and installs it (§14):** a pinned HAProxy ingress
-controller, because an exposure written into a cluster with no controller is an
-object that routes nothing while looking created. One bundle of eight objects
-through the ordinary write funnel and **nothing else, ever** — no reconcile loop,
-no desired state, no watch, and its status is a live read. Off by default behind
-`ADMIN_ROUTER_MANAGE_ENABLED`. `docs/adr-0004-shipped-router.md` records the
-boundary and what crossing it costs; if you are about to add a second bundle this
-console ships, read it first.
+**It ships two bundles and installs them (§14, §33).** §14 is a pinned HAProxy
+ingress controller, because an exposure written into a cluster with no controller
+is an object that routes nothing while looking created. §33 is Operator Lifecycle
+Manager itself, vendored byte for byte from upstream's release and pinned by
+SHA-256, because §16's portal on a cluster with no OLM is empty, correct and
+useless. Both go through the ordinary write funnel — no reconcile loop, no
+desired state, no watch — and both report status as a live read. Off by default
+behind `ADMIN_ROUTER_MANAGE_ENABLED` and `ADMIN_OLM_INSTALL_ENABLED`.
+
+**Two, and that is the number to defend.** ADR-0004 said one bundle, "and nothing
+else, ever"; `docs/adr-0008-shipped-olm.md` is the re-reading that made it two,
+with the argument against it kept intact. **If you are about to add a third
+bundle, read both of those first** — a third is not a third instance of a
+pattern, it is the point at which the boundary stops being one.
 
 **It can also create one OLM Subscription (§16)**, which is not that. It ships no
 catalog, pins no image and installs nothing: it writes one object into an API the
@@ -47,7 +53,7 @@ of [K8Boss](https://github.com/aesaganda/k8boss) and shares no code with it —
 | `backend/app/k8s/` | Per-request cluster context, auth strategy, client manager, and ADR-0007's impersonation decision (`impersonation.py`) — whether a call acts as the signed-in operator or as the console, refusing rather than falling back | `docs/architecture.md` §2, `docs/adr-0007-impersonation.md` |
 | `backend/app/resources/` | Catalog (discovery), reader (generic list/get/YAML, plus `read_object` by known GVK), transport (the one round trip that keeps its `Warning:` headers), shaping (rows), envelope | `docs/api-contract.md` §1.2, §4, §8 |
 | `backend/app/services/` | Typed read models: the unified workload row, node rows, the unified route row, the operator catalog (`portal.py`), one pod's detail, environment and usage (`pods.py`), network policy correlation (`network.py`), what a PodDisruptionBudget actually covers and which pods two of them make un-evictable (`disruption.py`), whether the next workload fits a namespace's quota and which bound refuses it — including the compulsory-resource rule a 403 does not name (`quota.py`), events (`events.py`), one namespace with what governs it (`projects.py`), the control plane's own health (`cluster_status.py`), why a pod is Pending — the scheduler's own verdict, its age, and the nodes this console can rule out but never rule in (`scheduling.py`), the certificate each exposure points at — when it expires and whether its subject alternative names cover the host it serves (`tls.py`) | `docs/api-contract.md` §5, §6, §7.5–§7.7, §8.4, §13, §16, §17, §19, §28, §29, §30, §31, §32 |
-| `backend/app/admin/` | **Every write.** The funnel, preflight, diff, apply, scale, rollout, node drain, debug containers, route compilation, the shipped router, the one operator Subscription (`portal.py`), the project — five creates into a namespace that does not exist (`projects.py`), the Pod Security level a namespace declares (`podsecurity.py`), growing a persistent volume claim (`pvc.py`), an autoscaler's replica bounds and which autoscaler will revert a manual scale (`hpa.py`), one VolumeSnapshot of a claim — and what a snapshot is not (`snapshot.py`), a node's taints and labels with the pods a `NoExecute` taint deletes and why no PodDisruptionBudget stops it (`node_scheduling.py`), approving a CertificateSigningRequest after decoding what it asks to become (`csr.py`), deleting a namespace after reading what goes with it — the volumes whose data is destroyed, the addresses released, the admission webhooks left without a backend (`namespace_delete.py`), adding or removing one subject on a RoleBinding after resolving what the role confers — and what a revoke does **not** take away (`rbac_grants.py`). Also the authorization machinery that is not a write: §9's preflight and §23's review of another subject (`access_review.py`) | `docs/safety-model.md` |
+| `backend/app/admin/` | **Every write.** The funnel, preflight, diff, apply, scale, rollout, node drain, debug containers, route compilation, the shipped router, the one operator Subscription (`portal.py`), installing Operator Lifecycle Manager itself — vendored upstream manifests in `deploy/olm/`, twenty-six writes in two phases with the codebase's one bounded wait between them (`olm_bundle.py`, `olm.py`), the project — five creates into a namespace that does not exist (`projects.py`), the Pod Security level a namespace declares (`podsecurity.py`), growing a persistent volume claim (`pvc.py`), an autoscaler's replica bounds and which autoscaler will revert a manual scale (`hpa.py`), one VolumeSnapshot of a claim — and what a snapshot is not (`snapshot.py`), a node's taints and labels with the pods a `NoExecute` taint deletes and why no PodDisruptionBudget stops it (`node_scheduling.py`), approving a CertificateSigningRequest after decoding what it asks to become (`csr.py`), deleting a namespace after reading what goes with it — the volumes whose data is destroyed, the addresses released, the admission webhooks left without a backend (`namespace_delete.py`), adding or removing one subject on a RoleBinding after resolving what the role confers — and what a revoke does **not** take away (`rbac_grants.py`). Also the authorization machinery that is not a write: §9's preflight and §23's review of another subject (`access_review.py`) | `docs/safety-model.md` |
 | `backend/app/audit/` | Append-only, hash-chained trail: `record()`, `query()`, `verify()`, export | `docs/api-contract.md` §10 |
 | `backend/app/identity/` | Local password hashing, opaque sessions, LDAP search-and-bind, sign-in throttling, and four single sign-on providers behind one registry (`sso.py`) and one pair of routes: OIDC (`oidc.py`), a plain OAuth 2.0 server (`oauth.py`), the cluster's own OAuth server (`openshift.py`), and SAML 2.0 (`saml.py`) | `docs/api-contract.md` §12 |
 | `backend/tests/` | pytest on SQLite. The fake Kubernetes client **raises** on an unstubbed call | — |
@@ -191,8 +197,9 @@ Everything that changes a cluster goes through it, in this order:
 ```
 
 Step one is `ADMIN_ALLOW_MUTATIONS` **and** the feature's own switch, when it has
-one. `ADMIN_NODE_DEBUG_ENABLED`, `ADMIN_CLI_ENABLED`, `ADMIN_ROUTER_MANAGE_ENABLED`
-and `ADMIN_PORTAL_INSTALL_ENABLED` are handed to `mutate()` as a `FeatureGate` —
+one. `ADMIN_NODE_DEBUG_ENABLED`, `ADMIN_CLI_ENABLED`, `ADMIN_ROUTER_MANAGE_ENABLED`,
+`ADMIN_PORTAL_INSTALL_ENABLED` and `ADMIN_OLM_INSTALL_ENABLED` are handed to
+`mutate()` as a `FeatureGate` —
 an ordered list of `Switch`es, each carrying the sentence it produces and whether
 it withholds the dry run — and are **not** checked by the feature. Five features
 once carried their own copy of that step, and a copy that stopped writing its
@@ -377,6 +384,8 @@ serving a request — and SQLite could not reproduce it.
 | `docs/adr-0004-shipped-router.md` | Why the console installs a router at all, why HAProxy, what it does not serve, and the boundary that keeps "not a deployment engine" true of everything else |
 | `docs/adr-0005-operator-portal.md` | Why creating an OLM Subscription is not a second thing this console installs, and where that line is |
 | `docs/adr-0006-projects.md` | Why a project is five ordinary writes into a namespace that does not exist, not a template engine, and why the dry run says whose diff each object carries |
+| `docs/adr-0008-shipped-olm.md` | **The boundary ADR-0004 drew at one bundle, re-opened at two.** Why the console installs OLM, why the manifests are vendored rather than fetched, the `*`-on-`*` ClusterRole it creates, why `installed` is not `ready`, and why a third bundle would end the boundary rather than extend it |
+| `deploy/olm/` | The vendored OLM release, applicable by hand. **Not generated and not editable** — upstream's bytes, pinned by SHA-256 in `olm_bundle.py` and refused at load time if they change |
 | `docs/adr-0007-impersonation.md` | **Accepted.** Why every cluster call is made as one ServiceAccount by default, what per-cluster impersonation fixes, what its grant costs, the six conditions the implementation had to meet, the two questions it forced — why `system:authenticated` is sent though no issuer states it, and why the new audit column is hashed only when set — and which of the six sign-in methods may supply a cluster identity at all |
 | `deploy/router.yaml` | The shipped router bundle, applicable by hand. **Generated** — `make router-manifest`, enforced by a test |
 | `deploy/rbac.yaml` | The shipped roles. Each rule is annotated with the contract section it serves |

@@ -156,6 +156,161 @@ test.describe('a cluster with no Operator Lifecycle Manager', () => {
   });
 });
 
+test.describe('installing OLM from the empty portal (§33)', () => {
+  test('offers the install, and the plan is readable', async ({ page }) => {
+    await mockApi(page, { preflight: ALLOW_ALL, portalCatalog: NO_OLM });
+    await openPortal(page);
+
+    const panel = page.getByTestId('olm-panel');
+    await expect(panel).toBeVisible();
+    await expect(panel).toContainText('0.35.0');
+
+    // The plan button is never gated. What it contains is the ClusterRole that
+    // grants OLM every verb on every resource, and deciding whether to set
+    // ADMIN_OLM_INSTALL_ENABLED means reading it.
+    await panel.getByTestId('olm-plan-open').click();
+    await expect(page.getByTestId('olm-plan-object').first()).toBeVisible();
+    await expect(page.getByText('system:controller:operator-lifecycle-manager')).toBeVisible();
+    // Both phases are named, because the order is not cosmetic: phase two's
+    // objects are instances of phase one's CustomResourceDefinitions.
+    await expect(page.getByText('Phase one — the APIs')).toBeVisible();
+    await expect(page.getByText('Phase two — OLM itself')).toBeVisible();
+  });
+
+  test('refuses to preview until every consequence is ticked', async ({ page }) => {
+    await mockApi(page, { preflight: ALLOW_ALL, portalCatalog: NO_OLM });
+    await openPortal(page);
+
+    await page.getByTestId('olm-install').click();
+    await expect(page.getByTestId('olm-consequences')).toBeVisible();
+
+    // The ClusterRole is quoted rather than paraphrased. "Broad permissions"
+    // would make the object in the diff sound smaller than it is.
+    await expect(page.getByTestId('olm-ack-cluster_admin_grant')).toBeVisible();
+    await expect(page.getByTestId('olm-ack-crd_ownership')).toBeVisible();
+
+    const preview = page.getByRole('button', { name: /Preview the install/ });
+    await expect(preview).toBeDisabled();
+
+    await page.getByTestId('olm-ack-cluster_admin_grant').check();
+    await expect(preview).toBeDisabled();
+    await page.getByTestId('olm-ack-crd_ownership').check();
+    await expect(preview).toBeEnabled();
+  });
+
+  test('turning the community catalog on clears the ticks and adds a third', async ({ page }) => {
+    await mockApi(page, { preflight: ALLOW_ALL, portalCatalog: NO_OLM });
+    await openPortal(page);
+
+    await page.getByTestId('olm-install').click();
+    await page.getByTestId('olm-ack-cluster_admin_grant').check();
+    await page.getByTestId('olm-ack-crd_ownership').check();
+    await expect(page.getByRole('button', { name: /Preview the install/ })).toBeEnabled();
+
+    // Consent given for two consequences must not survive into three. The
+    // backend refuses the write naming the missing code; this is the half that
+    // stops the operator meeting that refusal at confirm time.
+    await page.getByTestId('olm-community-catalog').check();
+    await expect(page.getByTestId('olm-ack-community_catalog')).toBeVisible();
+    await expect(page.getByTestId('olm-ack-cluster_admin_grant')).not.toBeChecked();
+    await expect(page.getByRole('button', { name: /Preview the install/ })).toBeDisabled();
+  });
+
+  test('a dry run shows phase two as rendered, not as projected', async ({ page }) => {
+    await mockApi(page, { preflight: ALLOW_ALL, portalCatalog: NO_OLM });
+    await openPortal(page);
+
+    await page.getByTestId('olm-install').click();
+    await page.getByTestId('olm-ack-cluster_admin_grant').check();
+    await page.getByTestId('olm-ack-crd_ownership').check();
+    await page.getByRole('button', { name: /Preview the install/ }).click();
+
+    const report = page.getByTestId('olm-object-report');
+    await expect(report).toBeVisible();
+    // On a cluster with no OLM the API server genuinely cannot project an
+    // OperatorGroup, so those diffs are the bundle's own manifests and are
+    // labelled as such. Calling them "projected" would make a promise about an
+    // admission check that never happened.
+    // Phase one IS projected by the API server — apiextensions.k8s.io is served
+    // everywhere — and phase two is not, because its CRDs do not exist yet.
+    // Asserted as that pairing rather than as "something is rendered": the
+    // first version of this checked a `data-phase` attribute nothing carried,
+    // so it passed whatever the component did.
+    await expect(
+      report.locator('[data-testid="olm-object"][data-phase="crds"][data-projection="server"]'),
+    ).not.toHaveCount(0);
+    await expect(
+      report.locator('[data-testid="olm-object"][data-phase="core"][data-projection="server"]'),
+    ).toHaveCount(0);
+    await expect(
+      report.locator('[data-testid="olm-object"][data-phase="core"][data-projection="rendered"]'),
+    ).not.toHaveCount(0);
+    await expect(page.getByText('rendered by the console').first()).toBeVisible();
+  });
+
+  test('a finished install never claims OLM is running', async ({ page }) => {
+    await mockApi(page, { preflight: ALLOW_ALL, portalCatalog: NO_OLM });
+    await openPortal(page);
+
+    await page.getByTestId('olm-install').click();
+    await page.getByTestId('olm-ack-cluster_admin_grant').check();
+    await page.getByTestId('olm-ack-crd_ownership').check();
+    await page.getByRole('button', { name: /Preview the install/ }).click();
+    await page.getByTestId('mutation-typed').fill('operator-lifecycle-manager');
+    await page.getByRole('button', { name: /Install it/ }).click();
+
+    // "objects were accepted", never "OLM is installed and working". At this
+    // moment the package server has certainly not registered yet. Scoped to the
+    // dialog because the toast carries the same headline, and the dialog is the
+    // one that stays on screen with the per-object report under it.
+    const summary = page.getByTestId('mutation-summary');
+    await expect(summary).toContainText(/objects were accepted/);
+    await expect(summary).toContainText(/not knowable from this response/);
+  });
+
+  test('installed but not ready is reported as two separate answers', async ({ page }) => {
+    await mockApi(page, {
+      preflight: ALLOW_ALL,
+      portalCatalog: NO_OLM,
+      olmStatus: FIXTURES.olmStatusInstalledNotReady,
+    });
+    await openPortal(page);
+
+    const panel = page.getByTestId('olm-panel');
+    await expect(panel).toContainText('Objects are on the cluster');
+    await expect(panel).toContainText('Not yet');
+    await expect(page.getByTestId('olm-installed-not-ready')).toBeVisible();
+    await expect(page.getByTestId('olm-installed-not-ready')).toContainText(
+      'that is correct, not a failure',
+    );
+
+    // And the install is not offered over an OLM that is already there.
+    await expect(page.getByTestId('olm-install')).toBeDisabled();
+  });
+
+  test('the gate disables the install with the reason, and leaves the plan readable', async ({
+    page,
+  }) => {
+    const gated = {
+      ...NO_OLM,
+      olmInstall: {
+        enabled: false,
+        detail: 'Installing OLM is switched off (ADMIN_OLM_INSTALL_ENABLED is not set).',
+      },
+    };
+    await mockApi(page, { preflight: ALLOW_ALL, portalCatalog: gated });
+    await openPortal(page);
+
+    await expect(page.getByTestId('olm-install')).toBeDisabled();
+    // Rule 11.4: disabled WITH the reason, not hidden.
+    await page.getByTestId('olm-install').hover();
+    await expect(page.getByText(/ADMIN_OLM_INSTALL_ENABLED/)).toBeVisible();
+    // The plan stays readable, which is the whole point of the gate being where
+    // it is: you cannot decide to open it without reading what it allows.
+    await expect(page.getByTestId('olm-plan-open')).toBeEnabled();
+  });
+});
+
 test.describe('a Subscription listing that did not answer', () => {
   test('renders Unknown, never "not installed"', async ({ page }) => {
     await mockApi(page, { preflight: ALLOW_ALL, portalCatalog: INSTALLED_UNREADABLE });

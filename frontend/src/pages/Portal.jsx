@@ -48,6 +48,7 @@ import {
   Toolbar,
 } from '../components/ui';
 import SubscribeDialog from '../components/SubscribeDialog';
+import OlmPanel from '../components/OlmPanel';
 import { portal } from '../api/client';
 import { useCluster } from '../contexts/ClusterContext';
 import { useNamespace } from '../contexts/NamespaceContext';
@@ -64,6 +65,18 @@ import { ChipList, Muted, NoClusterState } from './_parts';
  */
 const CHECKS = [
   { id: 'portal-subscribe', verb: 'create', group: 'operators.coreos.com', resource: 'subscriptions' },
+  // §33. Asked against the CustomResourceDefinition create, which is phase one
+  // of the install and the first thing it would do. It is deliberately NOT the
+  // ClusterRole create: that one's review answers yes on almost every cluster
+  // and the API server then refuses it at admission (escalation prevention),
+  // so gating the button on it would offer an install that cannot work while
+  // hiding one that can.
+  {
+    id: 'olm-install',
+    verb: 'create',
+    group: 'apiextensions.k8s.io',
+    resource: 'customresourcedefinitions',
+  },
 ];
 
 const INSTALLED_STATES = ['Installed', 'Not installed', 'Unknown'];
@@ -221,6 +234,26 @@ export default function Portal() {
     }
     return gate('portal-subscribe');
   }, [enabled, enabledDetail, gate]);
+
+  // §33's gate, and it is a *different* switch from the one above:
+  // ADMIN_OLM_INSTALL_ENABLED, not ADMIN_PORTAL_INSTALL_ENABLED. Reading the
+  // subscribe gate here would offer an install on a deployment that permits
+  // subscribing and forbids installing, and disable it on one that does the
+  // reverse — both of which send an operator to edit the wrong line of the same
+  // file. It rides along on the catalog envelope for the reason `enabled` does:
+  // the panel must paint disabled-with-the-reason on first render, not correct
+  // itself a round trip later.
+  const olmEnabled = catalog.data?.olmInstall ?? installed.data?.olmInstall;
+  const olmGate = useMemo(() => {
+    if (olmEnabled?.enabled === false) return { allowed: false, reason: olmEnabled.detail };
+    if (olmEnabled == null) {
+      return {
+        allowed: false,
+        reason: 'Whether this deployment permits installing OLM has not been read yet.',
+      };
+    }
+    return gate('olm-install');
+  }, [olmEnabled, gate]);
 
   const active = tab === 'catalog' ? catalog : installed;
   const sources = active.data?.sources ?? [];
@@ -474,22 +507,31 @@ export default function Portal() {
       <PartialBanner unavailable={active.data?.unavailable} />
 
       {olmAbsent && (
-        // Blue, once, and never in the PartialBanner. A cluster without
-        // Operator Lifecycle Manager is an ordinary cluster; §1.2 is explicit
-        // that rendering an absent API as an error is how red stops meaning
-        // anything.
-        <Alert
-          isInline
-          variant="info"
-          className="admin-confirm__alert"
-          data-testid="portal-unsupported"
-          title="Operator Lifecycle Manager is not installed on this cluster"
-        >
-          None of the APIs this page reads — PackageManifests, Subscriptions,
-          ClusterServiceVersions — are served here, so there is no catalog to install from and
-          nothing to list. That is an ordinary state for a cluster that has not installed OLM, not
-          a fault in this console or in the cluster.
-        </Alert>
+        <>
+          {/* Blue, once, and never in the PartialBanner. A cluster without
+              Operator Lifecycle Manager is an ordinary cluster; §1.2 is explicit
+              that rendering an absent API as an error is how red stops meaning
+              anything. The panel below offers to change that (§33) and does not
+              change the fact that this state is not a fault. */}
+          <Alert
+            isInline
+            variant="info"
+            className="admin-confirm__alert"
+            data-testid="portal-unsupported"
+            title="Operator Lifecycle Manager is not installed on this cluster"
+          >
+            None of the APIs this page reads — PackageManifests, Subscriptions,
+            ClusterServiceVersions — are served here, so there is no catalog to install from and
+            nothing to list. That is an ordinary state for a cluster that has not installed OLM, not
+            a fault in this console or in the cluster.
+          </Alert>
+
+          {/* Rendered only when OLM is genuinely absent, which is `every source
+              unsupported` — never when a source is `unknown`. Offering an
+              install off the back of a read that failed is how somebody installs
+              OLM on top of an OLM. */}
+          <OlmPanel gate={olmGate} onChanged={() => active.reload()} />
+        </>
       )}
 
       <Tabs

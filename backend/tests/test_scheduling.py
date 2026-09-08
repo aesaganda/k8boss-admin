@@ -49,11 +49,24 @@ from tests.conftest import obj
 NAMESPACE = "prod"
 POD = "checkout-7d9-abc"
 POD_PATH = f"/api/v1/namespaces/{NAMESPACE}/pods/{POD}"
-NOW = datetime.now(timezone.utc)
+#: Deliberately a function and not a module-level constant.
+#:
+#: It was a constant, captured at import. Every timestamp in this file was built
+#: from it, and the age assertions below compare the derived age against the
+#: *real* clock at the moment the test runs — so an event built as "three minutes
+#: ago" measured 180 seconds plus however long the suite had been running since
+#: collection. The 150-250 window meant the file silently required the whole
+#: backend suite to reach it within about seventy seconds, and a test added
+#: anywhere in the tree that pushed past that budget failed a scheduling test
+#: that had not changed. That is the shape of failure this project cares most
+#: about pointed at its own suite: a green check that depended on something
+#: nobody had stated.
+def _now():
+    return datetime.now(timezone.utc)
 
 
 def _ts(minutes_ago):
-    return NOW - timedelta(minutes=minutes_ago)
+    return _now() - timedelta(minutes=minutes_ago)
 
 
 # --------------------------------------------------------------------------- #

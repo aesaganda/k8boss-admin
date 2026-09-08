@@ -20,9 +20,9 @@ clusters, built on the assumption that the dangerous part is not reading.
   controller and can install it (§14), because an exposure written into a
   cluster with no controller is an object that routes nothing while looking
   created. It installs **one bundle of eight objects, through the same write
-  funnel as everything else, and nothing else, ever** — no reconcile loop, no
-  desired state, no drift correction, and its status is a live read like every
-  other page. It is off by default behind `ADMIN_ROUTER_MANAGE_ENABLED`.
+  funnel as everything else** — no reconcile loop, no desired state, no drift
+  correction, and its status is a live read like every other page. It said "and
+  nothing else, ever" until §33 below; it is now one of exactly two. It is off by default behind `ADMIN_ROUTER_MANAGE_ENABLED`.
   [`docs/adr-0004-shipped-router.md`](docs/adr-0004-shipped-router.md) records
   the boundary and what it costs.
 
@@ -33,6 +33,17 @@ clusters, built on the assumption that the dangerous part is not reading.
   Off by default behind `ADMIN_PORTAL_INSTALL_ENABLED`;
   [`docs/adr-0005-operator-portal.md`](docs/adr-0005-operator-portal.md) records
   why that line is where it is.
+
+  **There is a second bundle, and it is the last one.** On a cluster that runs no
+  OLM at all, §16's portal is empty and correct and useless, and §33 can install
+  Operator Lifecycle Manager itself: upstream's release manifests, vendored byte
+  for byte and pinned by SHA-256, applied as twenty-six ordinary writes in two
+  phases. Off by default behind `ADMIN_OLM_INSTALL_ENABLED`, separate from the
+  gate above because the sizes are different — that one writes into an API your
+  cluster already serves, this one creates the API, along with a ClusterRole
+  granting OLM every verb on every resource. ADR-0004 said one bundle, forever;
+  [`docs/adr-0008-shipped-olm.md`](docs/adr-0008-shipped-olm.md) is the
+  re-reading that made it two, with the argument against it kept intact.
 * **Not a security posture product.** It lists NetworkPolicies, says which pods
   each one selects, and — by subtracting one listing from another — which pods
   nothing selects. That is a correlation, not an analysis: it computes no
@@ -1018,6 +1029,8 @@ means read-only.
 | `ADMIN_CLI_IMAGE` | `alpine/k8s:1.34.9` | Image a CLI pod runs. It needs `kubectl` (or `oc`) on its PATH **and a `/bin/sh`** — the pod runs a shell loop, because a kubectl image's own entrypoint *is* kubectl and would exit immediately. The console cannot check either and does not pretend to: an image without them starts fine and answers `command not found`. Pick a kubectl within one minor version of your cluster — Kubernetes' own supported skew, which this default will drift out of. Set an image carrying `oc` for OpenShift, and one in your own registry for an air-gapped cluster, where the default cannot be pulled |
 | `ADMIN_CLI_MAX_SECONDS` | `3600` | Wall-clock limit on a CLI pod's container, as `spec.activeDeadlineSeconds`; 0 means unbounded. It bounds the window in which an unattended shell holding a live API token is possible. It does **not** clean up: the kubelet stops the container at the deadline and marks the pod Failed, and the pod object stays until somebody removes it |
 | `ADMIN_PORTAL_INSTALL_ENABLED` | `false` | **A sixth gate.** Allows the operator portal (§16) to create an OLM `Subscription` — the one write it makes. Separate from `ADMIN_ALLOW_MUTATIONS` because of what follows the write rather than what is in it: the object is nine lines, and Operator Lifecycle Manager then installs somebody else's operator and grants it whatever its bundle asks for — with OLM's permissions, not the console's, so neither RBAC here nor any preflight bounds it. Like the router and unlike node debug pods, the **dry run is permitted with this off**: the plan is your own request rendered as a Subscription plus the contents of a catalog your cluster already publishes, and deciding whether to turn this on requires reading it. With it off, a real write returns `403 mutations_disabled` and the refusal is audited |
+| `ADMIN_OLM_INSTALL_ENABLED` | `false` | **A seventh gate.** Allows the console to install Operator Lifecycle Manager itself (§33) onto a cluster that does not run it — the second and last bundle it ships. Separate from the gate above because they are different sizes of decision: that one writes one nine-line object into an API your cluster already serves, and this one *creates* that API — eight CustomResourceDefinitions, two controllers, and `system:controller:operator-lifecycle-manager`, which grants every verb on every resource in every API group including `escalate` and `bind`. That is the widest grant this console can create anywhere, and it is inherent to OLM rather than chosen here. Like the router and unlike node debug pods, the **dry run is permitted with this off** — and here that is the whole point: deciding whether to turn this on means reading that ClusterRole, so the plan renders with both gates shut. Note that opening this switch is not sufficient on its own: the console's ServiceAccount also needs `escalate` and `bind` from `deploy/rbac.yaml`, or the install fails at the ClusterRole with a 403 no preflight could have predicted |
+| `ADMIN_OLM_ESTABLISH_TIMEOUT_SECONDS` | `90` | How long a §33 install waits for those eight CRDs to report `Established` before giving up and reporting what it did. One bounded wait inside one request — not a reconcile loop — and generous because establishment is normally sub-second: waiting too long costs a slow request, and not waiting long enough costs eighteen 404s that all describe the timeout and name something else |
 | `AUTH_ENABLED` | `false` | Requires a managed local, LDAP or single sign-on session for every API and WebSocket request except health, login and the two OIDC handshake routes |
 | `AUTH_SESSION_TTL_HOURS` | `12` | Lifetime of the revocable HttpOnly session cookie, from 1 to 168 hours |
 | `AUTH_COOKIE_NAME` | `k8boss_admin_session` | Session cookie name |
