@@ -374,6 +374,12 @@ is dropped from list responses (kept in the single-object read):
 
 ### `POST /api/resources/{group}/{version}/{plural}`
 Body `{"yaml": "...", "namespace": "prod", "dryRun": true}` → mutation response (§1.5).
+The console's create dialog has a form view (§11.9) and it does not change this
+body: the form edits the parsed document and the document is re-serialised into
+`yaml`, so there is no second mode here and no form model for this endpoint to
+reassemble. A create screen that posted a structured spec instead would be a
+second write path for the same object, and the first one to stop matching would
+do it silently.
 
 ### `PUT /api/resources/{group}/{version}/{plural}/{name}`
 Body `{"yaml": "...", "namespace": "prod", "resourceVersion": "884213", "dryRun": true}`
@@ -1364,6 +1370,19 @@ trace.
    an unopened tab would start an audited exec session nobody asked for. The URL
    half is not cosmetic: a panel an operator cannot link to is a panel they have
    to describe over the phone.
+9. A screen offering **both a form and a document** — the create dialog (§4), the
+   exposure screen (§13.5) — makes the **document authoritative and the form a
+   projection of it**. A form edit is patched *into* the current document rather
+   than regenerating it, and the form **names, by path, every field it is not
+   showing**. Both halves are load-bearing. Without the first, a `spec.affinity`
+   somebody hand-wrote disappears the moment they touch an unrelated control, and
+   the diff they approve is a correct projection of a manifest nobody wrote.
+   Without the second, "some fields may not be represented in this form view" is
+   a warning with no way to act on it. Where the patching happens is not fixed:
+   §13.5 compiles server-side and returns `preserved[]` because one form field
+   there means three different objects; the create dialog computes both in the
+   browser, because a create is one object and no round trip is involved — which
+   also means nothing on the wire attests to it and only a test can.
 
 ---
 

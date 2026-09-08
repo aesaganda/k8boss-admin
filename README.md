@@ -748,6 +748,14 @@ version being that there is no undo for a deleted StatefulSet.
 * Create, replace and delete any resource from YAML, with optimistic concurrency.
   The manifest editor numbers its lines and colours its syntax, so the line a
   parse error names is the line you can see.
+* **A form view on every create**, for Pods, the six workload kinds and
+  NetworkPolicies — OpenShift's "Configure via: Form view / YAML view", with the
+  same difference the Routes screen below draws. The document is the source of
+  truth and the form is a projection of it, so an `affinity` block or an
+  annotation you hand-wrote survives a trip through the form; and rather than
+  warning that *some fields may not be represented*, the form lists the ones it
+  is not showing, by path. Anything without a form is still created from YAML,
+  and the control says which kinds have one.
 * Every object's YAML, rendered the same way, wherever the object is — including
   a pod's, from the row you clicked. Each panel says when it was read, re-reads
   on a timer, and has a Reload button for when a timer is not fast enough. A

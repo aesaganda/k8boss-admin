@@ -1,0 +1,323 @@
+/**
+ * The create dialog's Form view (§11.9).
+ *
+ * The feature is OpenShift's "Configure via: Form view / YAML view", and every
+ * assertion here is about the one property that separates this from OpenShift's:
+ *
+ *   **The document is the source of truth and the form is a projection of it.**
+ *
+ * OpenShift's console shows a standing note saying that *some fields may not be
+ * represented in this form view*, and never says which. So the two tests that
+ * matter below are `a field the form does not show survives an edit made in the
+ * form` and `the form names, by path, what it is not showing` — a form that
+ * quietly dropped a hand-written `spec.affinity` at the moment somebody renamed
+ * the object would produce a diff that is a correct projection of a manifest
+ * nobody wrote, and the operator would approve it.
+ *
+ * The rest are the states a convenient implementation collapses: an empty
+ * numeric field is an *absent* key and never `0`; a selector that cannot match
+ * its own pod template is reported rather than repaired behind the operator's
+ * back; and the comments a form edit is about to destroy are counted while that
+ * is still actionable.
+ */
+import { expect, test } from '@playwright/test';
+
+import { FIXTURES, mockApi } from './fixtures.js';
+
+/** Answer every §9 check as allowed, so RBAC is not what is under test. */
+const ALLOW_ALL = (checks) =>
+  checks.map((check) => ({
+    verb: check.verb,
+    group: check.group,
+    resource: check.resource,
+    namespace: check.namespace ?? null,
+    subresource: check.subresource ?? null,
+    allowed: true,
+    reason: '',
+    evaluationError: null,
+    hint: null,
+  }));
+
+const DEPLOYMENT = `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: example
+  namespace: prod
+  labels:
+    app: example
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: example
+  template:
+    metadata:
+      labels:
+        app: example
+    spec:
+      containers:
+        - name: example
+          image: docker.io/nginxinc/nginx-unprivileged:1.30-alpine
+`;
+
+/** Open the masthead's dialog with `text` in the editor, in YAML view. */
+async function openImport(page, text, options = {}) {
+  await mockApi(page, { preflight: ALLOW_ALL, ...options });
+  await page.goto('/');
+  await page.getByTestId('import-yaml-button').click();
+  if (text) await page.getByTestId('yaml-editor-input').fill(text);
+  return page.getByTestId('mutation-dialog');
+}
+
+/** The same, then switched to the form. */
+async function openForm(page, text = DEPLOYMENT, options = {}) {
+  const dialog = await openImport(page, text, options);
+  await page.getByTestId('create-view-form').check();
+  await expect(page.getByTestId('create-form')).toBeVisible();
+  return dialog;
+}
+
+/** The manifest as the YAML view currently holds it. */
+async function yamlText(page) {
+  await page.getByTestId('create-view-yaml').check();
+  return page.getByTestId('yaml-editor-input').inputValue();
+}
+
+test.describe('the create dialog form view', () => {
+  test('a create seeded with a kind opens in the form; the masthead paste does not', async ({ page }) => {
+    // The two entry points differ in exactly one thing — whether a document was
+    // seeded — and that is what decides the opening view. Nothing switches the
+    // view on the operator afterwards.
+    await mockApi(page, { preflight: ALLOW_ALL });
+    await page.goto('/pods');
+    await page.getByRole('button', { name: 'Create Pod' }).click();
+    await expect(page.getByTestId('create-form')).toBeVisible();
+    await expect(page.getByTestId('create-view-form')).toBeChecked();
+
+    // The masthead's "+" has no document, so there is no kind, so there is no
+    // form — offered and disabled with the reason (rule 11.4) rather than
+    // absent, which would make "why is there no form" unanswerable.
+    await openImport(page, '');
+    await expect(page.getByTestId('yaml-editor')).toBeVisible();
+    await expect(page.getByTestId('create-view-form')).toBeDisabled();
+    await expect(page.getByTestId('create-view-form-reason')).toContainText('Paste or type a manifest first');
+
+    // Pasting one enables the control. It does not press it.
+    await page.getByTestId('yaml-editor-input').fill(DEPLOYMENT);
+    await expect(page.getByTestId('create-view-form')).toBeEnabled();
+    await expect(page.getByTestId('create-view-yaml')).toBeChecked();
+    await expect(page.getByTestId('yaml-editor')).toBeVisible();
+  });
+
+  test('a kind with no form says so instead of offering a partial one', async ({ page }) => {
+    await openImport(page, 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: app-config\n  namespace: prod\ndata:\n  a: b\n');
+
+    await expect(page.getByTestId('create-view-form')).toBeDisabled();
+    await expect(page.getByTestId('create-view-form-reason')).toContainText('no form for ConfigMap');
+    // And the YAML path is untouched: the object is still creatable.
+    await expect(page.getByTestId('mutation-preview')).toBeEnabled();
+  });
+
+  test('a field the form does not show survives an edit made in the form', async ({ page }) => {
+    // The assertion this whole feature exists for. `spec.affinity` and the
+    // annotation are things no control here can reach; renaming the object must
+    // not be the moment they disappear.
+    const handWritten = DEPLOYMENT.replace(
+      '  replicas: 1\n',
+      `  replicas: 1
+  revisionHistoryLimit: 3
+`,
+    ).replace(
+      '    spec:\n      containers:',
+      `    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: topology.kubernetes.io/zone
+                    operator: In
+                    values:
+                      - eu-west-1a
+      containers:`,
+    );
+
+    await openForm(page, handWritten);
+    await page.getByTestId('create-name').fill('checkout');
+
+    const text = await yamlText(page);
+    expect(text).toContain('name: checkout');
+    expect(text).toContain('topology.kubernetes.io/zone');
+    expect(text).toContain('eu-west-1a');
+    expect(text).toContain('revisionHistoryLimit: 3');
+  });
+
+  test('the form names, by path, every field it is not showing', async ({ page }) => {
+    await openForm(page, DEPLOYMENT.replace('  replicas: 1\n', '  replicas: 1\n  paused: false\n  minReadySeconds: 5\n'));
+
+    const list = page.getByTestId('create-unrepresented');
+    await expect(list).toContainText('spec.paused');
+    await expect(list).toContainText('spec.minReadySeconds');
+    // And the things it *does* show are not in the list, or the list would be
+    // noise nobody reads.
+    await expect(list).not.toContainText('spec.replicas');
+    await expect(list).not.toContainText('metadata.name');
+  });
+
+  test('a document the form covers completely says nothing is hidden', async ({ page }) => {
+    await openForm(page, DEPLOYMENT);
+    await expect(page.getByTestId('create-unrepresented-none')).toBeVisible();
+  });
+
+  test('clearing a number removes the key rather than writing zero', async ({ page }) => {
+    // Rule 11.2 on the way out. `replicas: 0` is a Deployment with no pods and
+    // no error anywhere on screen; absent is a Deployment with one.
+    await openForm(page, DEPLOYMENT);
+    await page.getByTestId('create-replicas').fill('');
+
+    const cleared = await yamlText(page);
+    expect(cleared).not.toContain('replicas');
+
+    await page.getByTestId('create-view-form').check();
+    await page.getByTestId('create-replicas').fill('0');
+    expect(await yamlText(page)).toContain('replicas: 0');
+  });
+
+  test('a selector that cannot match its own pods is reported, and repaired only on request', async ({
+    page,
+  }) => {
+    await openForm(page, DEPLOYMENT);
+
+    // Relabelling the pod template leaves the selector selecting nothing. The
+    // API server refuses the object outright, so this is a state an operator
+    // can otherwise only discover from a rejected write.
+    await page.getByTestId('create-podLabels-value-0').fill('checkout');
+    await expect(page.getByTestId('create-issues-error')).toContainText('selector does not match the pod labels');
+
+    // Nothing was rewritten behind them: the selector still says what it said.
+    expect(await yamlText(page)).toContain('matchLabels:\n      app: example');
+
+    await page.getByTestId('create-view-form').check();
+    await page.getByTestId('create-selector-repair').click();
+    await expect(page.getByTestId('create-issues-error')).toHaveCount(0);
+    expect(await yamlText(page)).toContain('app: checkout');
+  });
+
+  test('the comments a form edit would destroy are counted before it happens', async ({ page }) => {
+    await mockApi(page, { preflight: ALLOW_ALL });
+    await page.goto('/network');
+    await page.getByRole('tab', { name: 'Network Policies' }).click();
+    await page.getByRole('button', { name: 'New network policy…' }).click();
+
+    await expect(page.getByTestId('create-form')).toBeVisible();
+    await expect(page.getByTestId('create-comments-warning')).toContainText('drop 3 comment lines');
+
+    // What those comments said is on the form as help text and as the two
+    // statements below, which is why losing them costs nothing an operator was
+    // reading. Both are the sentences the policy page uses.
+    await expect(page.getByTestId('create-issues-info')).toContainText('every pod in the namespace');
+    await expect(page.getByTestId('create-issues-info')).toContainText('denies all inbound traffic');
+
+    // And the warning clears once the rewrite has happened, rather than
+    // standing there describing something already done.
+    await page.getByTestId('create-name').fill('deny-all');
+    await expect(page.getByTestId('create-comments-warning')).toHaveCount(0);
+  });
+
+  test('what the form produced is what is sent, and only the confirm claims a write', async ({ page }) => {
+    const creates = [];
+    await mockApi(page, { preflight: ALLOW_ALL, resourceCreates: creates });
+    await page.goto('/');
+    await page.getByTestId('import-yaml-button').click();
+    await page.getByTestId('yaml-editor-input').fill(DEPLOYMENT);
+    await page.getByTestId('create-view-form').check();
+
+    await page.getByTestId('create-name').fill('checkout');
+    await page.getByTestId('create-container-image-0').fill('registry.example:5000/checkout:1.4.2');
+
+    await page.getByTestId('mutation-preview').click();
+    await expect(page.getByTestId('mutation-confirm')).toBeVisible();
+
+    // §11.3: the dry run goes first, and it carries the manifest the form
+    // built — not a form model the backend would have to reassemble.
+    expect(creates).toHaveLength(1);
+    expect(creates[0].body.dryRun).toBe(true);
+    expect(creates[0].body.yaml).toContain('name: checkout');
+    expect(creates[0].body.yaml).toContain('registry.example:5000/checkout:1.4.2');
+    expect(creates[0].plural).toBe('deployments');
+
+    // The masthead's dialog closes on success and lands on the object it just
+    // created, the way `Explorer`'s own catalog click does — so the evidence
+    // that the write happened is the route, not a summary panel that is
+    // unmounted before it can be read.
+    await page.getByTestId('mutation-confirm').click();
+    await expect(page.getByTestId('mutation-dialog')).toHaveCount(0);
+    await expect(page).toHaveURL(/\/explorer\/apps\/v1\/deployments\?name=checkout&namespace=prod$/);
+
+    expect(creates).toHaveLength(2);
+    expect(creates[1].body.dryRun).toBe(false);
+    // The two calls carry the same manifest: nothing is recomputed between the
+    // diff the operator read and the write they approved.
+    expect(creates[1].body.yaml).toBe(creates[0].body.yaml);
+  });
+
+  test('a kind missing from an incomplete catalog is not reported as one the cluster lacks', async ({
+    page,
+  }) => {
+    // §11.1 at the point it decides whether an object can be created at all.
+    // Discovery that could not read `apps` returns a catalog with no Deployment
+    // in it, and "this cluster does not serve Deployment" would send an
+    // operator to install what they are already running.
+    await openImport(page, DEPLOYMENT, {
+      catalog: {
+        ...FIXTURES.catalog,
+        items: FIXTURES.catalog.items.filter((item) => item.group !== 'apps'),
+        partial: true,
+        unavailable: [{ group: 'apps', version: 'v1', resource: null, namespace: null, reason: 'unreachable', detail: 'the apps APIService did not answer' }],
+      },
+    });
+
+    await expect(page.getByTestId('partial-banner').first()).toBeVisible();
+    await expect(page.getByTestId('mutation-preview-disabled-reason')).toContainText(
+      'Discovery came back incomplete',
+    );
+  });
+
+  test('a DaemonSet form offers no replica count, and says why', async ({ page }) => {
+    await openForm(
+      page,
+      DEPLOYMENT.replace('kind: Deployment', 'kind: DaemonSet').replace('  replicas: 1\n', ''),
+    );
+
+    await expect(page.getByTestId('create-replicas')).toHaveCount(0);
+    await expect(page.getByTestId('create-section-daemonset')).toContainText('no replica count');
+  });
+
+  test('a Job with no restartPolicy is caught locally, and the select says what is missing', async ({
+    page,
+  }) => {
+    // The API server defaults an unset `restartPolicy` to Always and then
+    // refuses the object for it, so a manifest that never mentions the field
+    // fails for a value nobody wrote.
+    await openForm(
+      page,
+      `apiVersion: batch/v1
+kind: Job
+metadata:
+  name: example
+  namespace: prod
+spec:
+  template:
+    spec:
+      containers:
+        - name: example
+          image: busybox
+`,
+    );
+
+    await expect(page.getByTestId('create-issues-error')).toContainText('no restartPolicy');
+    // The select shows the document's actual state rather than rendering its
+    // first option, which would show a setting the manifest does not contain.
+    await expect(page.getByTestId('create-restartPolicy')).toHaveValue('');
+  });
+});
