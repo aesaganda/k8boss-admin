@@ -1095,6 +1095,66 @@ body.admin-resizing * {
   gap: 0.3rem;
 }
 
+/*
+ * The "Configure via: Form view / YAML view" switch (§11.9).
+ *
+ * A row rather than PatternFly's stacked radio group: the two views are one
+ * choice about the same document, and stacking them reads as two settings. The
+ * reason under it is a paragraph and not a tooltip on purpose — a disabled
+ * radio's tooltip is unreachable by keyboard and by touch, which are the two
+ * ways the operators most likely to need the sentence will arrive at it.
+ */
+.admin-confirm__views {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--admin-gap);
+  margin-block-end: var(--admin-gap-sm);
+}
+
+.admin-confirm__views-options {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--admin-gap);
+}
+
+.admin-confirm__views-label {
+  font-weight: bold;
+}
+
+.admin-confirm__views-reason {
+  margin: 0 0 var(--admin-gap);
+  color: var(--admin-muted);
+  font-size: var(--pf-t--global--font--size--body--sm, 0.875rem);
+}
+
+/*
+ * One container in the form view.
+ *
+ * The rule is a left edge and nothing else. A container is six field groups
+ * deep and the pod may hold several, so without a mark saying where one ends
+ * an operator edits the image of the wrong one — and the diff they then approve
+ * is a correct projection of a manifest they misread.
+ */
+.admin-create-container {
+  margin-block-end: var(--admin-gap);
+  padding-inline-start: 0.75rem;
+  border-inline-start: 2px solid var(--admin-border);
+}
+
+/*
+ * The paths the form is not showing. Monospace because they are field paths to
+ * be found in the YAML view, not prose.
+ */
+.admin-create-paths {
+  margin: 0;
+  padding-inline-start: 1.1rem;
+  color: var(--admin-muted);
+  font-family: var(--admin-mono);
+  font-size: 0.8125rem;
+}
+
 /* ── States ─────────────────────────────────────────────────────────────── */
 
 .admin-loading {

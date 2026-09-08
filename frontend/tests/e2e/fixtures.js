@@ -30,6 +30,26 @@ export const OVERVIEW_UNAVAILABLE = [
 ];
 
 /**
+ * `metadata.name` out of a posted manifest, without a YAML parser.
+ *
+ * Only the create mock uses it, and only to echo a plausible `target.name` back
+ * — the assertions that matter read the manifest the dialog sent, not this. It
+ * walks from the `metadata:` line rather than taking the first `name:` in the
+ * document, because a pod template has one too and it is two levels deeper.
+ */
+function manifestName(text) {
+  const lines = String(text ?? '').split('\n');
+  const start = lines.findIndex((line) => line.trimEnd() === 'metadata:');
+  if (start < 0) return null;
+  for (const line of lines.slice(start + 1)) {
+    if (/^\S/.test(line)) break;
+    const match = /^ {2}name:\s*(.+?)\s*$/.exec(line);
+    if (match) return match[1].replace(/^["']|["']$/g, '');
+  }
+  return null;
+}
+
+/**
  * One object's manifest, as `GET .../{name}/yaml` returns it: `text/plain`, and
  * carrying a `resourceVersion`, which is what every concurrency assertion in
  * the suite is actually about.
@@ -401,6 +421,29 @@ export const FIXTURES = {
         apiVersion: 'v1',
         preferred: true,
       },
+      // The rest of what §11.9's form view can project. Without them the dialog
+      // resolves no route for a Pod or a CronJob and refuses to preview, which
+      // would make every form assertion below pass against a disabled button.
+      ...[
+        ['', 'v1', 'Pod', 'pods', ['po']],
+        ['apps', 'v1', 'StatefulSet', 'statefulsets', ['sts']],
+        ['apps', 'v1', 'DaemonSet', 'daemonsets', ['ds']],
+        ['apps', 'v1', 'ReplicaSet', 'replicasets', ['rs']],
+        ['batch', 'v1', 'Job', 'jobs', []],
+        ['batch', 'v1', 'CronJob', 'cronjobs', ['cj']],
+        ['networking.k8s.io', 'v1', 'NetworkPolicy', 'networkpolicies', ['netpol']],
+      ].map(([group, version, kind, resource, shortNames]) => ({
+        group,
+        version,
+        kind,
+        resource,
+        namespaced: true,
+        verbs: ['get', 'list', 'create', 'update', 'patch', 'delete'],
+        shortNames,
+        categories: [],
+        apiVersion: group ? `${group}/${version}` : version,
+        preferred: true,
+      })),
     ],
     continue: null,
     remaining: null,
@@ -4734,6 +4777,13 @@ export async function mockApi(
     workloads = null,
     pods = null,
     networkPolicies = null,
+    // §4's generic create, which nothing mocked before §11.9's form view needed
+    // to assert on what it sends. `resourceCreates` records every body; pass
+    // `resourceCreate` to shape the response, `catalog` to change what the
+    // dialog can resolve.
+    resourceCreates = [],
+    resourceCreate = null,
+    catalog = null,
     isolation = null,
     podDetail = null,
     podEnvironment = null,
@@ -4912,7 +4962,56 @@ export async function mockApi(
     if (/^\/clusters\/\d+\/test$/.test(path)) {
       return json({ reachable: true, server_version: 'v1.31.4', latency_ms: 42, permissions: [] });
     }
-    if (path === '/resources/catalog') return json(FIXTURES.catalog);
+    if (path === '/resources/catalog') return json(catalog ?? FIXTURES.catalog);
+    // Before the listing branches below, and method-checked, because a create
+    // POSTs to the same path a list GETs from: without this, `POST
+    // /resources/core/v1/pods` matched the pod listing and the dialog rendered a
+    // table of pods as its own dry run.
+    if (/^\/resources\/[^/]+\/[^/]+\/[^/]+$/.test(path) && route.request().method() === 'POST') {
+      const body = JSON.parse(route.request().postData() || '{}');
+      const [, , group, version, plural] = path.split('/');
+      resourceCreates.push({ group, version, plural, body });
+      if (resourceCreate) return json(resourceCreate(body, { group, version, plural }));
+      return json({
+        dryRun: body.dryRun !== false,
+        // Derived, never echoed: §1.5 makes `applied` the only evidence a
+        // cluster changed.
+        applied: body.dryRun === false,
+        verb: 'create',
+        target: {
+          group: group === 'core' ? '' : group,
+          version,
+          resource: plural,
+          namespace: body.namespace ?? null,
+          name: manifestName(body.yaml) ?? 'example',
+        },
+        diff: {
+          // A create has nothing to diff against, which is why the whole
+          // object is the diff.
+          before: '',
+          after: body.yaml ?? '',
+          // With the hunk header `difflib.unified_diff` always emits, and
+          // without the phantom `+` a trailing newline would add. `DiffView`
+          // derives both line-number gutters from that header and prints none
+          // at all when it is missing — so a mock without one exercises a
+          // rendering path the real endpoint can never produce.
+          unified: (() => {
+            const lines = (body.yaml ?? '').split('\n');
+            if (lines.at(-1) === '') lines.pop();
+            return [
+              '--- live',
+              '+++ projected',
+              `@@ -0,0 +1,${lines.length} @@`,
+              ...lines.map((line) => `+${line}`),
+            ].join('\n');
+          })(),
+          changed: true,
+        },
+        resourceVersion: '5001',
+        warnings: [],
+        auditId: 7300,
+      });
+    }
     // `text/plain`, not JSON: §4's YAML read is the one endpoint in the API that
     // does not answer with an envelope, and a mock that returned JSON here
     // would let a client-side parse bug through.

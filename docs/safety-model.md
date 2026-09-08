@@ -778,6 +778,42 @@ sends the document **verbatim, with no form model at all**. Without that last
 part the form's fields would be recompiled over the hand-edit at write time —
 silently undoing the change the lock existed to protect.
 
+**The create dialog's form view holds the same invariant, and holds it with
+nothing on the wire to prove it.** §11.9 of the contract states it generally, and
+the create dialog is the second implementation: every control is a lens into the
+parsed object, a form edit is one path write that copies the rest of the document
+through, and the list of paths the form does not show is *computed* from the
+document and the model rather than written down — so it cannot go stale, and a
+control removed from a model puts its path straight back on screen.
+
+One input to that list is not derived: a container's coverage is a table in
+`objectForm.js` describing a renderer in `ObjectForm.jsx`, and a control deleted
+without its pattern would move that field silently into the set the form hides
+while saying it hides nothing — the one way this list can lie. The two are
+checked against each other by a test, which is the same answer this document
+gives above for the vendor-annotation rule: enforced rather than asserted.
+
+Two differences from the Route form matter to anyone reviewing it. There is **no
+render endpoint**: an exposure is compiled server-side because one form field
+there can mean three different objects, whereas a create is one object whose
+fields are already in front of us, so the patching and the "what I am not
+showing" list are both computed in the browser. Nothing in the mutation response
+attests to either, which means **only a test can** —
+`frontend/tests/e2e/create-form-view.spec.js` is where "a field the form does not
+show survives an edit made in the form" is actually established, the same way the
+no-vendor-annotation rule above is enforced by a test rather than stated as
+policy. And there is **no hand-edit lock**, because there is nothing to lock: the
+two views edit one string of text, the form is rebuilt from it every time it is
+opened, and the write sends that text whichever view produced it.
+
+What survives a form edit is the *object*, and three things in a manifest live in
+the text rather than in the object: comments, which nothing carries across a
+parse; and anchors and merge keys, which the parser resolves, so a rewrite spells
+out what they stood for. The first is a loss and the other two are an expansion,
+and the dialog says which is which, counted, before the first form edit — the
+only moment any of it is still actionable. Calling an expanded anchor "dropped"
+would be its own wrong answer.
+
 ### 11.4 `routes/custom-host` — the denial preflight would otherwise misname
 
 OpenShift gates *choosing a hostname* behind its own RBAC subresource, separate

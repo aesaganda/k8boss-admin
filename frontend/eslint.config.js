@@ -54,6 +54,12 @@ export default [
       // silent about two pages that threw ReferenceError on first render and
       // showed the error boundary instead of their content.
       'react/jsx-no-undef': 'error',
+      // And the same failure outside JSX. A call to a function that was never
+      // imported is legal JavaScript, so Vite builds it and the error arrives
+      // as a ReferenceError during a render — the error boundary in place of a
+      // dialog, with the operator's manifest inside it. `globals` above is what
+      // makes this rule usable rather than 500 false positives.
+      'no-undef': 'error',
       'react-refresh/only-export-components': ['warn', { allowConstantExport: true }],
       // Contexts intentionally export both a provider component and its hook
       // from one file; that is the pattern the whole app consumes.
