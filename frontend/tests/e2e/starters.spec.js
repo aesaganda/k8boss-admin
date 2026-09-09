@@ -9,18 +9,17 @@
  * the click, in a dialog that had already promised a valid starting point.
  */
 import { expect, test } from '@playwright/test';
-import yaml from 'js-yaml';
 
+import { divergences, load, loadAll } from '../../src/components/clusterYaml.js';
 import { rewriteLosses } from '../../src/components/objectForm.js';
 import { allStarters, skeletonStarter, templatesFor } from '../../src/components/templates.js';
-import { divergences } from '../../src/components/yamlDivergence.js';
 
 const starters = allStarters();
 
 test('there is at least one starter, and every one is registered under the kind it declares', () => {
   expect(starters.length).toBeGreaterThan(20);
   for (const starter of starters) {
-    const documents = yaml.loadAll(starter.text);
+    const documents = loadAll(starter.text);
     expect(documents, `${starter.kind}/${starter.id} is not exactly one document`).toHaveLength(1);
     const [document] = documents;
     // The dialog resolves where to POST from these two fields alone. A starter
@@ -33,7 +32,7 @@ test('there is at least one starter, and every one is registered under the kind 
 
 test('no starter names a namespace, and every one names an object', () => {
   for (const starter of starters) {
-    const document = yaml.load(starter.text);
+    const document = load(starter.text);
     // The dialog falls back to the masthead's selection and says which
     // namespace won. A starter that hardcoded one would go stale the moment the
     // operator switched scope after opening the dialog.
@@ -59,17 +58,19 @@ test('no starter carries a comment', () => {
   }
 });
 
-test('no starter holds a scalar the two parsers in this system disagree about', () => {
-  // The browser parses with js-yaml (YAML 1.2) and the backend with PyYAML
-  // (YAML 1.1), so an unquoted `Off` is the text "Off" on one side and `false`
-  // on the other. `divergences` answers that by parsing twice rather than by
-  // pattern-matching the source, which is why this can assert it of a starter
-  // holding a block scalar without a special case for one.
+test('no starter holds a scalar YAML readers disagree about', () => {
+  // This console reads a manifest the way it sends it (ADR-0009), so a starter
+  // holding an unquoted `Off` would not mislead the console — it would mislead
+  // the operator, who is reading YAML 1.2 and sees the text "Off" where `false`
+  // is going to be sent. A starter is the one manifest here nobody wrote, so it
+  // has no business needing the warning. `divergences` answers that by parsing
+  // both ways rather than by pattern-matching the source, which is why this can
+  // assert it of a starter holding a block scalar without a special case.
   for (const starter of starters) {
     const found = divergences(starter.text);
     expect(
       found.map((entry) => entry.path.join('.')),
-      `${starter.kind}/${starter.id} holds a scalar the API server reads differently from this console. Quote it.`,
+      `${starter.kind}/${starter.id} holds a scalar a YAML 1.2 reader reads differently from this console. Quote it.`,
     ).toEqual([]);
   }
 });
@@ -84,7 +85,7 @@ test('every starter carrying a pod template satisfies the restricted profile', (
       : document.spec?.template?.spec ?? document.spec?.jobTemplate?.spec?.template?.spec ?? null;
 
   for (const starter of starters) {
-    const pod = podSpecOf(yaml.load(starter.text));
+    const pod = podSpecOf(load(starter.text));
     if (!pod) continue;
     const where = `${starter.kind}/${starter.id}`;
     expect(pod.securityContext?.runAsNonRoot, where).toBe(true);
@@ -107,7 +108,7 @@ test('a kind with no starter gets a labelled skeleton rather than a guess', () =
   // same guess presented as an answer.
   expect(offered[0].description).toContain('ships no starter');
 
-  const document = yaml.load(offered[0].text);
+  const document = load(offered[0].text);
   expect(document).toEqual({ apiVersion: 'cilium.io/v2alpha1', kind: 'CiliumCIDRGroup', metadata: { name: 'example' } });
 });
 

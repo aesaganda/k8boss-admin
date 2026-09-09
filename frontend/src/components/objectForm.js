@@ -66,8 +66,6 @@
  * file is also the one place a test can reach the model without mounting
  * anything. `ObjectForm.jsx` renders it.
  */
-import yaml from 'js-yaml';
-
 import { tokenizeYaml } from './yamlSyntax';
 
 /* ── Path lenses ────────────────────────────────────────────────────────── */
@@ -305,27 +303,12 @@ function startsWithPath(pattern, prefix) {
 
 /* ── The document, as text ──────────────────────────────────────────────── */
 
-/**
- * Serialise a form edit back into the editor's text.
- *
- * `lineWidth: -1` is the one option here that is not cosmetic. js-yaml folds
- * long scalars at 80 columns by default, which turns
- * `image: registry.example.com/team/service@sha256:…` into two lines joined by
- * a newline the parser puts back as a space — a valid document holding a
- * different image reference. `noRefs` is the same class of surprise: a
- * document with the same mapping in two places would come back with a `&a1`
- * anchor and a `*a1` alias, which is correct YAML and unreadable to somebody
- * reviewing a diff before applying it to production.
+/*
+ * `toYaml` used to live here and now lives in `clusterYaml.js`, with the schema
+ * it has to dump against: a form edit only round-trips if it is written by the
+ * same reading that parsed it (ADR-0009). It is imported from there by every
+ * call site that used to import it from here.
  */
-export function toYaml(document) {
-  return yaml.dump(document ?? {}, {
-    indent: 2,
-    lineWidth: -1,
-    noRefs: true,
-    sortKeys: false,
-    quotingType: '"',
-  });
-}
 
 /**
  * What the text says that the parsed object does not, counted.

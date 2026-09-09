@@ -1,11 +1,12 @@
 /**
- * The two parsers this console reads a manifest with, held to the same corpus.
+ * The console's reading of a manifest, held to the parser it is a copy of.
  *
- * `backend/tests/test_yaml_scalar_divergence.py` runs the rows below through
- * the real PyYAML — the parser whose reading is what the API server is actually
- * sent. This side runs them through the real js-yaml, and through the mirror
- * schema in `src/components/yamlDivergence.js` that claims to reproduce PyYAML
- * from inside a language that cannot call it.
+ * `backend/tests/test_yaml_scalar_reading.py` runs the rows below through the
+ * real PyYAML — the parser whose reading is what the API server is actually
+ * sent. This side runs them through the mirror schema in
+ * `src/components/clusterYaml.js`, which claims to reproduce PyYAML from inside
+ * a language that cannot call it, and through js-yaml's own default schema,
+ * which is the YAML 1.2 reading the warning is about.
  *
  * Neither test can see the other's parser, which is the whole reason there is
  * one corpus and two tests rather than two corpora: the file is what makes a
@@ -17,7 +18,15 @@ import { fileURLToPath } from 'node:url';
 import { expect, test } from '@playwright/test';
 import yaml from 'js-yaml';
 
-import { CLUSTER_SCHEMA, divergenceNote, divergences } from '../../src/components/yamlDivergence.js';
+import {
+  CLUSTER_SCHEMA,
+  divergenceNote,
+  divergences,
+  load,
+  loadAll,
+  toYaml,
+} from '../../src/components/clusterYaml.js';
+import { formModelFor, localIssues } from '../../src/components/objectForm.js';
 import { mockApi } from './fixtures.js';
 
 const CORPUS = JSON.parse(
@@ -28,7 +37,8 @@ const CORPUS = JSON.parse(
 const SPELLED = { '@inf': Infinity, '@-inf': -Infinity, '@nan': NaN };
 const expected = (value) => (typeof value === 'string' && value in SPELLED ? SPELLED[value] : value);
 
-const read = (scalar, options) => yaml.load(`value: ${scalar}\n`, options).value;
+const readPlain = (scalar) => yaml.load(`value: ${scalar}\n`).value;
+const readSent = (scalar) => load(`value: ${scalar}\n`).value;
 
 const POD = `apiVersion: v1
 kind: Pod
@@ -50,14 +60,26 @@ spec:
 
 test.describe('the corpus, from the browser side', () => {
   for (const row of CORPUS.rows) {
-    test(`js-yaml reads \`${row.scalar}\` the way the corpus records`, () => {
-      expect(read(row.scalar)).toEqual(expected(row.browser));
+    test(`js-yaml's own schema reads \`${row.scalar}\` the way the corpus records`, () => {
+      expect(readPlain(row.scalar)).toEqual(expected(row.yaml12));
     });
 
-    test(`the mirror reads \`${row.scalar}\` the way PyYAML does`, () => {
-      // The claim this whole module rests on. Its other half is the backend
+    test(`this console reads \`${row.scalar}\` the way PyYAML does`, () => {
+      // The claim the whole module rests on. Its other half is the backend
       // test, which runs the same string through the parser being mirrored.
-      expect(read(row.scalar, { schema: CLUSTER_SCHEMA })).toEqual(expected(row.cluster));
+      expect(readSent(row.scalar)).toEqual(expected(row.sent));
+    });
+
+    test(`a form edit round-trips \`${row.scalar}\` unchanged`, () => {
+      // The reason `toYaml` dumps against this schema and not js-yaml's
+      // default. A form edit rewrites the whole document, so every scalar it
+      // did not touch has to come back meaning what it meant — and the value
+      // that catches a default dump is the string `"1_000"`, which js-yaml
+      // writes bare because YAML 1.2 has no underscore digits, and which this
+      // console would then send as the number 1000.
+      const value = readSent(row.scalar);
+      const text = toYaml({ value });
+      expect(load(text).value, `dumped as \`${text.trim()}\``).toEqual(value);
     });
   }
 });
@@ -99,14 +121,14 @@ data:
     expect(found).toEqual([]);
   });
 
-  test('a key the two parsers read differently is reported as a key', () => {
-    // `off:` is a ConfigMap data key called "False" by the time it reaches the
+  test('a key read differently is reported as a key', () => {
+    // `off:` is a ConfigMap data key called "false" by the time it reaches the
     // cluster, and no control in the form view would show that.
     const found = divergences('apiVersion: v1\nkind: ConfigMap\ndata:\n  off: enabled\n');
     expect(found).toHaveLength(1);
     expect(found[0].isKey).toBe(true);
-    expect(found[0].browser).toBe('off');
-    expect(found[0].cluster).toBe('false');
+    expect(found[0].looksLike).toBe('off');
+    expect(found[0].sent).toBe('false');
   });
 
   test('a document that does not parse is left to the parse error', () => {
@@ -149,8 +171,8 @@ data:
   test('the note names the path and both readings, and counts the rest', () => {
     const note = divergenceNote('spec:\n  a: off\n  b: 010\n  c: 8:30\n  d: yes\n  e: on\n  f: 1_000\n');
     expect(note.severity).toBe('warning');
-    expect(note.text).toContain('`spec.a` is read here as the text "off" and will be sent as the boolean false');
-    expect(note.text).toContain('`spec.b` is read here as the number 10 and will be sent as the number 8');
+    expect(note.text).toContain('`spec.a` looks like the text "off" and will be sent as the boolean false');
+    expect(note.text).toContain('`spec.b` looks like the number 10 and will be sent as the number 8');
     // Four named, then counted rather than listed — and said, rather than the
     // list simply stopping.
     expect(note.text).toContain('and 2 more like it');
@@ -162,6 +184,91 @@ data:
     // A warning that fired on those is one that gets dismissed on the day it is
     // right.
     expect(divergenceNote(POD)).toBeNull();
+  });
+});
+
+test.describe('what the one reading buys', () => {
+  test('the local check written for this class can finally see it', () => {
+    // The point of ADR-0009 in one assertion. `version: yes` is a label value
+    // that reaches the API server as a boolean and gets the whole object
+    // refused with an unmarshalling error naming no field. The check for it has
+    // been in `localIssues` all along and could not see this one, because to
+    // js-yaml it was the harmless string "yes" — so the console was reasoning
+    // carefully about a document it was not going to send.
+    const document = load(`apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: example
+  labels:
+    managed: off
+    version: yes
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: example
+  template:
+    metadata:
+      labels:
+        app: example
+    spec:
+      containers:
+        - name: example
+          image: nginx
+`);
+    expect(document.metadata.labels).toEqual({ managed: false, version: true });
+
+    const issues = localIssues(document, formModelFor(document.apiVersion, document.kind)).map(
+      (issue) => issue.text,
+    );
+    expect(issues).toContain(
+      'metadata.labels.version is the boolean true. Label and annotation values must be strings — quote it.',
+    );
+    expect(issues).toContain(
+      'metadata.labels.managed is the boolean false. Label and annotation values must be strings — quote it.',
+    );
+  });
+});
+
+test.describe('the reader and the writer are the same one', () => {
+  test('a multi-document stream is read with the schema too', () => {
+    // `loadAll` is what the editor validates with, and a second document read
+    // by a different schema than the first is the bug this module exists to
+    // make impossible.
+    const documents = loadAll('a: off\n---\nb: 010\n');
+    expect(documents).toEqual([{ a: false }, { b: 8 }]);
+  });
+
+  test('a string that would come back as something else is quoted', () => {
+    // The dump side of the same reading. All four are values a manifest really
+    // holds: a label, a digit-grouped annotation, a ConfigMap key.
+    const text = toYaml({ a: 'off', b: '1_000', c: '8:30', d: '010' });
+    expect(load(text)).toEqual({ a: 'off', b: '1_000', c: '8:30', d: '010' });
+  });
+
+  test('an image reference is not folded onto two lines', () => {
+    // `lineWidth: -1`, kept through the move: js-yaml folds at 80 columns by
+    // default and the parser puts the fold back as a space, which is a valid
+    // document holding a different image.
+    const image = 'registry.example.com/team/service@sha256:2c3d4e5f60718293a4b5c6d7e8f90112233445566778899aabbccddeeff00112';
+    const text = toYaml({ spec: { containers: [{ name: 'app', image }] } });
+    expect(text.split('\n').some((line) => line.includes(image))).toBe(true);
+    expect(load(text).spec.containers[0].image).toBe(image);
+  });
+
+  test('the schema can write a boolean at all', () => {
+    // Replacing a type by tag replaces both of its halves, and a schema that
+    // kept only the resolver throws `unacceptable kind of an object to dump
+    // [object Boolean]` the first time the form view serialises a document —
+    // which is every form edit of every manifest with a boolean in it.
+    expect(toYaml({ a: true, b: 1, c: 1.5 }).trim()).toBe('a: true\nb: 1\nc: 1.5');
+  });
+
+  test('the schema is the one thing exported for a second opinion', () => {
+    // `divergences` needs js-yaml's default schema on one side, so the mirror
+    // has to be nameable. Asserted so that removing the export is a failing
+    // test rather than a silently different comparison.
+    expect(yaml.load('a: off\n', { schema: CLUSTER_SCHEMA })).toEqual({ a: false });
   });
 });
 
@@ -194,8 +301,8 @@ test.describe('where the warning appears', () => {
       .getByTestId('yaml-editor-input')
       .fill('apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: example\ndata:\n  debug: off\n');
 
-    const note = page.getByTestId('yaml-editor-note').filter({ hasText: 'read this document differently' });
-    await expect(note).toContainText('`data.debug` is read here as the text "off"');
+    const note = page.getByTestId('yaml-editor-note').filter({ hasText: 'YAML readers disagree about' });
+    await expect(note).toContainText('`data.debug` looks like the text "off"');
     await expect(note).toContainText('will be sent as the boolean false');
 
     // And it does not block. The document is legal YAML either way and the dry
@@ -203,10 +310,11 @@ test.describe('where the warning appears', () => {
     await expect(page.getByTestId('mutation-preview')).toBeEnabled();
   });
 
-  test('the form view says so too, because its controls are the browser’s reading', async ({ page }) => {
-    // The label check written for exactly this class — "a label value that
-    // parsed as a number or a boolean" — cannot see this one, because to
-    // js-yaml it is the string "off". This warning is what covers it.
+  test('the form view shows the value the cluster will be sent', async ({ page }) => {
+    // Before ADR-0009 this control read "off" and the cluster was sent `false`,
+    // and the check written for exactly this class — "a label value that parsed
+    // as a number or a boolean" — could not see it, because to js-yaml it was
+    // the string "off". Now the form is a lens onto the object being written.
     await mockApi(page, { preflight: ALLOW_ALL });
     await page.goto('/');
     await page.getByTestId('import-yaml-button').click();
@@ -234,7 +342,7 @@ spec:
     await page.getByTestId('create-view-form').check();
 
     await expect(page.getByTestId('create-divergence-warning')).toContainText(
-      '`metadata.labels.managed` is read here as the text "off"',
+      '`metadata.labels.managed` looks like the text "off"',
     );
     // Once, not twice: the editor is not mounted in this view.
     await expect(page.getByTestId('yaml-editor-note')).toHaveCount(0);
@@ -249,7 +357,7 @@ spec:
 
     await page.getByTestId('create-view-yaml').check();
     await expect(
-      page.getByTestId('yaml-editor-note').filter({ hasText: 'read this document differently' }),
+      page.getByTestId('yaml-editor-note').filter({ hasText: 'YAML readers disagree about' }),
     ).toHaveCount(0);
   });
 });

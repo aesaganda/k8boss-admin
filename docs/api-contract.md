@@ -1485,29 +1485,42 @@ trace.
 
    **No starter is a claim that the object will be accepted.** The dry run is.
 
-12. **The console parses every submitted manifest twice, and says so when the
-   two readings differ.** The browser parses with js-yaml (YAML 1.2); the
-   backend parses with PyYAML (YAML 1.1). For a handful of unquoted scalars
-   those disagree — `off` is the text `"off"` to one and the boolean `false` to
-   the other, `010` is ten and eight, `8:30` is a string and 510 — and the
-   editor reports each one by path, with both readings, as a **warning that
-   never blocks**: the document is legal YAML either way and §1.5's dry run is
-   the authority on whether the cluster wants it.
+12. **The console has one reading of a manifest, and it is the one it sends.**
+   `parse_document` runs PyYAML, whose implicit resolvers are YAML 1.1, and its
+   result leaves as JSON — so `off` is the boolean `false`, `0755` is 493 and
+   `8:30` is 510. The browser reads and re-serialises the same document the same
+   way, against a schema mirroring those resolvers. Everything the console says
+   about a manifest locally — the form view's controls, the fields rule 9 names
+   as unrepresented, and the document-only checks beside them — is therefore a
+   lens onto the object that is going to be written, and not onto a second
+   reading of it. ADR-0009 records why the reading that won is that one; the
+   short version is that it is what was already being sent, and what `kubectl`
+   sends for `0755`.
 
-   The diff is not what this protects. `diff.after` is the API server's own
-   projection of what it was actually sent, so it already shows the truth. What
-   is built on the browser's reading is everything *local*: the form view's
-   controls, the fields rule 9 names as unrepresented, and the document-only
-   checks beside them — including the one written for exactly this class, which
-   cannot see `version: yes` because to js-yaml it is a harmless string.
+   **The editor still says where that is not the obvious reading**, because the
+   ambiguity is the document's and not the console's. `off` is the text `"off"`
+   to YAML 1.2, which is the specification and what the operator's editor
+   implements, and each such scalar is reported by path with both readings as a
+   **warning that never blocks**: the document is legal YAML either way and
+   §1.5's dry run is the authority on whether the cluster wants it.
 
-   **The second reading comes from a parser, not from a pattern over the
-   source.** A pattern cannot tell a plain `off` from one inside a `|` block,
-   from a quoted `"off"`, from a continuation line of a multi-line scalar, and
-   a create screen that warned about a config file's contents is one whose
-   warnings stop being read. What is transcribed from the other parser is only
-   its scalar resolvers, and both sides of that transcription are pinned
-   against the real parsers over one shared corpus.
+   The diff was never what this protects. `diff.after` is the API server's own
+   projection of what it was actually sent, so it already showed the truth while
+   the form beside it did not.
+
+   **Both readings come from a parser, not from a pattern over the source.** A
+   pattern cannot tell a plain `off` from one inside a `|` block, from a quoted
+   `"off"`, from a continuation line of a multi-line scalar, and a create screen
+   that warned about a config file's contents is one whose warnings stop being
+   read. What is transcribed across the language boundary is only PyYAML's three
+   scalar resolvers, and both sides of that transcription are pinned against the
+   real parsers over one shared corpus.
+
+   **A scalar JSON cannot carry is refused rather than sent.** `.inf`, `-.Inf`
+   and `.nan` are YAML numbers with no JSON spelling; `parse_document` answers
+   `422 invalid` naming the path, instead of letting the API server reject a
+   body with a syntax error at a character offset that is in neither the
+   operator's document nor the object they meant.
 
 ---
 

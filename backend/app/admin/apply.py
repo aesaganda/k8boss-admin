@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import math
 from typing import Any
 
 import yaml
@@ -175,6 +176,17 @@ def create_fn(
 def parse_document(text: str) -> dict[str, Any]:
     """Parse the editor's YAML (or JSON — YAML is a superset) into one object.
 
+    **This is the console's reading of a manifest, and there is only one of it.**
+    PyYAML resolves plain scalars the way YAML 1.1 does, so ``enabled: off`` is
+    the boolean ``False`` here and ``mode: 0755`` is 493 — and since this
+    function's result is what goes on the wire as JSON, that is what the cluster
+    receives. The browser reads the same document the same way, against a schema
+    mirroring these resolvers; ADR-0009 records why the reading that won is this
+    one, and what it still does not agree with. If you change the loader here,
+    you are changing what every manifest this console has ever accepted *means*,
+    and the mirror in ``frontend/src/components/clusterYaml.js`` has to change
+    with it or the console goes back to showing one object and writing another.
+
     Every failure here is a 422 with the parser's own message: an editor that
     says "invalid" without saying which line has a tab in it is an editor people
     stop using.
@@ -215,7 +227,51 @@ def parse_document(text: str) -> dict[str, Any]:
             detail=f"Parsed as {type(document).__name__}, expected a mapping with apiVersion and kind.",
             context={"parameter": "yaml"},
         )
+    _refuse_unsendable_numbers(document)
     return document
+
+
+def _refuse_unsendable_numbers(document: dict[str, Any]) -> None:
+    """Refuse ``.inf`` and ``.nan``, which YAML has and JSON does not.
+
+    PyYAML resolves ``.inf``, ``-.Inf`` and ``.nan`` to Python floats, and every
+    write in this package leaves as JSON. ``json.dumps`` spells those three
+    ``Infinity``, ``-Infinity`` and ``NaN`` — tokens no JSON parser is required
+    to accept and Go's is not willing to, so the API server rejects the *body*
+    and answers with a syntax error naming a character offset. The operator is
+    then told their manifest is malformed at a position that is in neither the
+    document they wrote nor the object they meant.
+
+    So it is refused here, by path, before a request that cannot succeed is made
+    and audited. ``kubectl`` refuses the same three scalars at the same point and
+    for the same reason, which is the useful cross-check: this is not a rule this
+    console invented, it is JSON's.
+    """
+    def walk(value: Any, path: list[str], ancestors: frozenset[int]) -> None:
+        if isinstance(value, float) and not math.isfinite(value):
+            where = ".".join(path) if path else "the document"
+            raise Invalid(
+                f"`{where}` is {value}, which JSON cannot carry.",
+                detail=(
+                    "YAML resolves `.inf`, `-.Inf` and `.nan` to numbers; the API server is "
+                    "sent JSON, which has no spelling for any of them."
+                ),
+                hint="Quote the value if the field wants the text, or write a finite number.",
+                context={"parameter": "yaml", "path": where},
+            )
+        # An anchor can contain the node that holds it, and PyYAML builds that
+        # into a genuinely recursive object rather than refusing it. Guarding by
+        # ancestors rather than by everything seen keeps a node that legitimately
+        # appears twice checked twice.
+        if isinstance(value, (dict, list)):
+            if id(value) in ancestors:
+                return
+            nested = ancestors | {id(value)}
+            items = value.items() if isinstance(value, dict) else enumerate(value)
+            for key, item in items:
+                walk(item, [*path, str(key)], nested)
+
+    walk(document, [], frozenset())
 
 
 def _expected_api_version(group: str, version: str) -> str:
