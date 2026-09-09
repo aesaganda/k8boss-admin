@@ -13,18 +13,7 @@ import yaml from 'js-yaml';
 
 import { rewriteLosses } from '../../src/components/objectForm.js';
 import { allStarters, skeletonStarter, templatesFor } from '../../src/components/templates.js';
-
-/**
- * Scalars js-yaml and PyYAML resolve differently, unquoted.
- *
- * The browser parses with js-yaml 4 (YAML 1.2 core schema) and the backend with
- * PyYAML (YAML 1.1), so an unquoted `Off` is the string "Off" on one side and
- * `false` on the other — and the document that produced the diff is then not the
- * document that was applied. That divergence is a live property of this system;
- * what this test pins is the narrower promise that no starter *this console
- * ships* walks into it.
- */
-const AMBIGUOUS = /^\s*[^#\s][^:]*:\s+(y|Y|yes|Yes|YES|n|N|no|No|NO|on|On|ON|off|Off|OFF|0\d+|\d+:\d+)\s*$/;
+import { divergences } from '../../src/components/yamlDivergence.js';
 
 const starters = allStarters();
 
@@ -71,13 +60,17 @@ test('no starter carries a comment', () => {
 });
 
 test('no starter holds a scalar the two parsers in this system disagree about', () => {
+  // The browser parses with js-yaml (YAML 1.2) and the backend with PyYAML
+  // (YAML 1.1), so an unquoted `Off` is the text "Off" on one side and `false`
+  // on the other. `divergences` answers that by parsing twice rather than by
+  // pattern-matching the source, which is why this can assert it of a starter
+  // holding a block scalar without a special case for one.
   for (const starter of starters) {
-    for (const [index, line] of starter.text.split('\n').entries()) {
-      expect(
-        AMBIGUOUS.test(line),
-        `${starter.kind}/${starter.id} line ${index + 1}: "${line.trim()}" reads as a string in the browser and as something else in the API server. Quote it.`,
-      ).toBe(false);
-    }
+    const found = divergences(starter.text);
+    expect(
+      found.map((entry) => entry.path.join('.')),
+      `${starter.kind}/${starter.id} holds a scalar the API server reads differently from this console. Quote it.`,
+    ).toEqual([]);
   }
 });
 

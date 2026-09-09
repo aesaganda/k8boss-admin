@@ -204,6 +204,50 @@ be unreachable.
 change" instead of a confirm button. A no-op write that reports success is a
 small lie that teaches people the console's success messages are decorative.
 
+### 4.1 The diff is honest, and it is not the only thing reading the document
+
+The console parses every submitted manifest **twice, with two parsers that do
+not agree**. The browser uses js-yaml, which is YAML 1.2. `parse_document` uses
+PyYAML, which is YAML 1.1. For a handful of unquoted scalars those differ:
+
+```
+  enabled: off      browser: the text "off"     API server: the boolean false
+  version: 010      browser: the number 10      API server: the number 8
+  port: 8:30        browser: the text "8:30"    API server: the number 510
+  limit: 1_000      browser: the text "1_000"   API server: the number 1000
+```
+
+**The diff is not what this endangers, and saying otherwise would overstate
+it.** `diff.after` is the API server's own projection of what it was actually
+sent, so the operator confirming a diff is confirming the truth. What is built
+on the *browser's* reading is everything local: the form view's controls are
+lenses onto it, §11.9's list of fields the form is not showing is computed from
+it, and so is every document-only check beside them — including the one written
+for precisely this class of mistake, *"a label value that parsed as a number or
+a boolean is the one mistake YAML makes on the operator's behalf"*, which cannot
+see `version: yes` because to js-yaml that is an ordinary string.
+
+So the console reports it, by path, with both readings, before any of that: a
+warning in the editor and in the form view, which **never blocks**. The document
+is legal YAML whichever parser reads it, and §3's dry run remains the authority
+on whether the cluster wants it. What an operator gets is the chance to quote a
+scalar while quoting it is still free.
+
+*Why a second parse rather than a pattern over the text.* A pattern cannot tell
+a plain `off` from an `off` inside a `|` block, from a quoted `"off"`, from a
+continuation line of a multi-line scalar — and a console that warned about the
+contents of a ConfigMap holding an nginx config would be teaching operators to
+dismiss the warning on the day it was right. Both readings therefore come from a
+parser. The only thing transcribed across the language boundary is PyYAML's
+three scalar resolvers, and both halves of that transcription are held to the
+real parsers, from both sides, over one shared corpus —
+`backend/tests/data/yaml_scalar_corpus.json`. A PyYAML release that moves one of
+those resolvers fails a test rather than quietly making the warning wrong.
+
+**The deeper fix is not this one.** Making the two parsers agree means changing
+what every manifest this console has ever accepted *means*, which is a decision
+with an ADR behind it and not a warning. This says what is true today.
+
 ---
 
 ## 5. Optimistic concurrency

@@ -774,6 +774,14 @@ version being that there is no undo for a deleted StatefulSet.
   a paste holding four objects is refused rather than split, because a create
   that lands three of them and fails the fourth has no honest way to report
   itself.
+* **The editor tells you when it and the API server read your manifest
+  differently.** The browser parses YAML 1.2 and the backend parses YAML 1.1, so
+  an unquoted `off` is the text "off" to one and the boolean `false` to the
+  other — as are `010` (ten, or eight), `8:30` (a string, or 510) and `1_000`.
+  Each one is named by path with both readings, as a warning that does not
+  block, while quoting it is still free. It is found by parsing the document a
+  second time rather than by pattern-matching the text, so an `off` inside a
+  `|` block is what it is: part of your config file, and not a warning.
 * **A form view on every create dialog, modelled for the kinds that have one** —
   OpenShift's "Configure via: Form view / YAML view", with the same difference
   the Routes screen below draws. The document is the source of truth and the

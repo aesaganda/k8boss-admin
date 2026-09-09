@@ -1485,6 +1485,30 @@ trace.
 
    **No starter is a claim that the object will be accepted.** The dry run is.
 
+12. **The console parses every submitted manifest twice, and says so when the
+   two readings differ.** The browser parses with js-yaml (YAML 1.2); the
+   backend parses with PyYAML (YAML 1.1). For a handful of unquoted scalars
+   those disagree — `off` is the text `"off"` to one and the boolean `false` to
+   the other, `010` is ten and eight, `8:30` is a string and 510 — and the
+   editor reports each one by path, with both readings, as a **warning that
+   never blocks**: the document is legal YAML either way and §1.5's dry run is
+   the authority on whether the cluster wants it.
+
+   The diff is not what this protects. `diff.after` is the API server's own
+   projection of what it was actually sent, so it already shows the truth. What
+   is built on the browser's reading is everything *local*: the form view's
+   controls, the fields rule 9 names as unrepresented, and the document-only
+   checks beside them — including the one written for exactly this class, which
+   cannot see `version: yes` because to js-yaml it is a harmless string.
+
+   **The second reading comes from a parser, not from a pattern over the
+   source.** A pattern cannot tell a plain `off` from one inside a `|` block,
+   from a quoted `"off"`, from a continuation line of a multi-line scalar, and
+   a create screen that warned about a config file's contents is one whose
+   warnings stop being read. What is transcribed from the other parser is only
+   its scalar resolvers, and both sides of that transcription are pinned
+   against the real parsers over one shared corpus.
+
 ---
 
 ## 12. Console authentication and users
