@@ -45,6 +45,7 @@ from typing import Any
 import yaml
 from kubernetes.client.rest import ApiException
 
+from app import yaml_dialect
 from app.admin.diff import build_diff
 from app.admin.mutate import mutate
 from app.errors import Conflict, Invalid, Unsupported, UpstreamError, from_api_exception
@@ -196,7 +197,7 @@ def parse_document(text: str) -> dict[str, Any]:
     other three unwritten with nothing in the response to say so.
     """
     try:
-        documents = [doc for doc in yaml.safe_load_all(text) if doc is not None]
+        documents = [doc for doc in yaml_dialect.load_all(text) if doc is not None]
     except yaml.YAMLError as e:
         raise Invalid(
             "The submitted document is not valid YAML.",

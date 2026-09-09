@@ -257,12 +257,20 @@ real parsers, from both sides, over one shared corpus —
 `backend/tests/data/yaml_scalar_corpus.json`. A PyYAML release that moves one of
 those resolvers fails a test rather than quietly restoring the two-reading bug.
 
-**What is still not fixed is stated rather than left to be found.** Nine scalars
-in that corpus reach a cluster differently from this console than from
-`kubectl` — `y`, `n`, `8:30`, `1.0e3` and five others — and two of them the
-warning cannot see, because both parsers here agree about them and the
-disagreement is with a third. ADR-0009 lists all nine with the measurements
-behind them.
+**What is still not fixed is stated rather than left to be found.** Seven scalars
+in that corpus reach a cluster differently from this console than from `kubectl` —
+`08`, `09`, `0o10`, `8:30`, `1:2:3`, `60:30.5` and `1.0e3` — and the warning
+covers every one of them, because YAML 1.2 disagrees with us about each. ADR-0009
+lists them with the measurements behind them.
+
+It was nine, and two of them — `y` and `n` — were the ones nothing could see:
+both parsers here called them text, so there was nothing to compare, while
+`kubectl` sent `true` and `false`. ADR-0010 closed those two by *sending* what
+`kubectl` sends, which is the one change of reading this console has made on
+purpose: PyYAML registers its boolean resolver under `y`, `Y`, `n` and `N` and
+then excludes them from the pattern, so the gap was a type half-implemented
+rather than a dialect chosen. **There is no longer a difference this console
+cannot see** — which matters more than the count.
 
 **One reading can still produce a value that cannot be sent.** `.inf`, `-.Inf`
 and `.nan` are YAML numbers with no JSON spelling, and `parse_document` refuses

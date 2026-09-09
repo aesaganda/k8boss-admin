@@ -25,9 +25,9 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-import yaml
 from kubernetes.client.rest import ApiException
 
+from app import yaml_dialect
 from app.errors import Invalid, Unsupported, UpstreamError, from_api_exception
 from app.resources import catalog
 from app.resources.envelope import envelope
@@ -167,9 +167,7 @@ def to_yaml(obj: dict[str, Any] | None) -> str:
     """
     if obj is None:
         return ""
-    return yaml.safe_dump(
-        obj, sort_keys=False, default_flow_style=False, allow_unicode=True, width=4096,
-    )
+    return yaml_dialect.dump(obj)
 
 
 def list_resource(

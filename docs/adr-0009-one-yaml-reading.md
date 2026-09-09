@@ -1,6 +1,10 @@
 # ADR-0009 — One reading of a manifest, and it is the one that gets sent
 
-**Status.** Accepted.
+**Status.** Accepted. **"What this does not fix" is superseded in part by**
+`docs/adr-0010-single-letter-booleans.md`, which closes `y` and `n` — including
+the claim below that they *cannot* be covered by the warning. That reasoning is
+left standing rather than edited: it was true of the comparison this console had,
+and the way it turned out to be false is the substance of ADR-0010.
 **Context.** `docs/safety-model.md` §4.1, `docs/api-contract.md` §11.12, §4.
 
 ---

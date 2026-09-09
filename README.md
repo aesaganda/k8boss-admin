@@ -776,16 +776,19 @@ version being that there is no undo for a deleted StatefulSet.
   itself.
 * **One reading of your manifest, and the editor tells you where it is not the
   obvious one.** The console reads a document the way it sends it: an unquoted
-  `off` is the boolean `false`, `0755` is 493 and `8:30` is 510 — YAML 1.1, which
-  is also what `kubectl` sends for the first two. YAML 1.2, which is what your
-  editor almost certainly shows you, reads all three differently, so each one is
-  named by path with both readings as a warning that does not block, while
-  quoting it is still free. It is found by parsing the document both ways rather
+  `off` is the boolean `false`, `0755` is 493, `8:30` is 510 and `y` is `true` —
+  YAML 1.1, which is also what `kubectl` sends for three of those four. YAML 1.2,
+  which is what your editor almost certainly shows you, reads every one of them
+  differently, so each is named by path with both readings as a warning that does
+  not block, while quoting it is still free. It is found by parsing the document both ways rather
   than by pattern-matching the text, so an `off` inside a `|` block is what it
   is: part of your config file, and not a warning.
   [`docs/adr-0009-one-yaml-reading.md`](docs/adr-0009-one-yaml-reading.md) has
-  the measurements, including the nine scalars this console and `kubectl` still
-  send differently.
+  the measurements, and
+  [`docs/adr-0010-single-letter-booleans.md`](docs/adr-0010-single-letter-booleans.md)
+  closed the last difference the warning could not see. Seven scalars still reach
+  a cluster differently from here than from `kubectl`, and the editor names every
+  one of them.
 * **A form view on every create dialog, modelled for the kinds that have one** —
   OpenShift's "Configure via: Form view / YAML view", with the same difference
   the Routes screen below draws. The document is the source of truth and the

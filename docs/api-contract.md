@@ -1486,9 +1486,9 @@ trace.
    **No starter is a claim that the object will be accepted.** The dry run is.
 
 12. **The console has one reading of a manifest, and it is the one it sends.**
-   `parse_document` runs PyYAML, whose implicit resolvers are YAML 1.1, and its
-   result leaves as JSON — so `off` is the boolean `false`, `0755` is 493 and
-   `8:30` is 510. The browser reads and re-serialises the same document the same
+   `parse_document` reads through `app/yaml_dialect.py`, whose implicit
+   resolvers are YAML 1.1's, and its result leaves as JSON — so `off` is the
+   boolean `false`, `0755` is 493, `8:30` is 510 and `y` is `true`. The browser reads and re-serialises the same document the same
    way, against a schema mirroring those resolvers. Everything the console says
    about a manifest locally — the form view's controls, the fields rule 9 names
    as unrepresented, and the document-only checks beside them — is therefore a
@@ -1515,6 +1515,13 @@ trace.
    read. What is transcribed across the language boundary is only PyYAML's three
    scalar resolvers, and both sides of that transcription are pinned against the
    real parsers over one shared corpus.
+
+   **`y`, `Y`, `n` and `N` are booleans** (ADR-0010). PyYAML declines the
+   single-letter half of YAML 1.1's boolean type and `kubectl` does not, so
+   `verbose: y` used to reach a cluster as the text `"y"` from here and as
+   `true` from the command line — with nothing saying so, because YAML 1.2 calls
+   it a string too and the comparison above found nothing to report. Sending
+   what `kubectl` sends is what gives the warning something to find.
 
    **A scalar JSON cannot carry is refused rather than sent.** `.inf`, `-.Inf`
    and `.nan` are YAML numbers with no JSON spelling; `parse_document` answers

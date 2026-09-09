@@ -1,25 +1,27 @@
-"""What PyYAML makes of the scalars a YAML 1.2 reader reads differently.
+"""What the backend makes of the scalars a YAML 1.2 reader reads differently.
 
 This console has **one** reading of a manifest and it is the one here:
-:func:`app.admin.apply.parse_document` runs PyYAML, whose implicit resolvers are
-YAML 1.1, and what it returns is what leaves as JSON. ``off`` is the boolean
-``False``, ``0755`` is 493, ``8:30`` is 510. Since ADR-0009 the browser reads the
-same document the same way, so that the form view's controls, ``unrepresented``
-and ``localIssues`` are lenses onto the object that is actually going to be sent.
+:func:`app.admin.apply.parse_document` reads through :mod:`app.yaml_dialect`,
+whose implicit resolvers are YAML 1.1's, and what it returns is what leaves as
+JSON. ``off`` is the boolean ``False``, ``0755`` is 493, ``8:30`` is 510, and
+since ADR-0010 ``y`` is ``True``. Since ADR-0009 the browser reads the same
+document the same way, so that the form view's controls, ``unrepresented`` and
+``localIssues`` are lenses onto the object that is actually going to be sent.
 
 It reads it the same way by *transcription*, not by calling this parser:
-``frontend/src/components/clusterYaml.js`` carries a js-yaml schema whose scalar
-resolvers are copied from PyYAML's ``yaml/resolver.py``. A transcription is a
-claim about another library made from inside a language that cannot call it, so
-this is the test that holds the claim to the library — the same corpus, through
-the real ``parse_document``.
+``frontend/src/components/clusterYaml.js`` carries a js-yaml schema whose
+integer and float resolvers are copied from PyYAML's ``yaml/resolver.py`` and
+whose boolean resolver is that one plus the four single letters. A transcription
+is a claim about another parser made from inside a language that cannot call it,
+so this is the test that holds the claim to the parser — the same corpus,
+through the real ``parse_document``.
 
 **If this test fails, the browser and the API server have gone back to reading
 the same manifest two ways**, which is the defect ADR-0009 exists to remove and
 not a cosmetic one: it is what makes a form control, a diff of unrepresented
 fields, or a local check describe an object nobody is about to write. Update
-``PY_BOOL`` / ``PY_INT`` / ``PY_FLOAT`` in that module and the ``sent`` column of
-the corpus together.
+``SCALAR_BOOL`` / ``SCALAR_INT`` / ``SCALAR_FLOAT`` in that module and the
+``sent`` column of the corpus together.
 """
 
 from __future__ import annotations
@@ -67,12 +69,12 @@ def _same(got, expected) -> bool:
 
 
 @pytest.mark.parametrize("row", _rows(), ids=lambda row: row["scalar"])
-def test_pyyaml_reads_the_scalar_the_corpus_records(row):
+def test_the_backend_reads_the_scalar_the_corpus_records(row):
     """Every ``sent`` value in the corpus is what the backend really parses.
 
-    Through ``parse_document`` rather than ``yaml.safe_load`` directly: the
+    Through ``parse_document`` rather than :mod:`app.yaml_dialect` directly: the
     function is what the write path calls, and a test that bypassed it would go
-    on passing if somebody changed the loader underneath it.
+    on passing if somebody swapped the loader underneath it.
     """
     expected = _expected(row["sent"])
     document = f"apiVersion: v1\nkind: ConfigMap\nvalue: {row['scalar']}\n"
@@ -87,9 +89,9 @@ def test_pyyaml_reads_the_scalar_the_corpus_records(row):
 
     got = parse_document(document)["value"]
     assert _same(got, expected), (
-        f"PyYAML reads `{row['scalar']}` as {got!r} ({type(got).__name__}), and the corpus records "
+        f"The backend reads `{row['scalar']}` as {got!r} ({type(got).__name__}), and the corpus records "
         f"{expected!r}. The mirror schema in frontend/src/components/clusterYaml.js is transcribed "
-        "from PyYAML's resolvers and is now wrong; fix both together."
+        "from these resolvers and is now wrong; fix both together."
     )
 
 
