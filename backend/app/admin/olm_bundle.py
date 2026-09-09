@@ -85,7 +85,7 @@ import pathlib
 from dataclasses import dataclass
 from typing import Any
 
-import yaml
+from app import yaml_dialect
 
 #: Upstream release these manifests were taken from. Bumping it means replacing
 #: **both** files under ``deploy/olm/`` with that release's artifacts and
@@ -255,10 +255,14 @@ def _documents() -> tuple[tuple[str, dict[str, Any]], ...]:
     upstream* documents; :func:`build` deep-copies out of it before labelling,
     so no caller can mutate what the next one reads.
     """
-    loader = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
     documents: list[tuple[str, dict[str, Any]]] = []
     for phase, filename in ((PHASE_CRDS, "crds.yaml"), (PHASE_CORE, "olm.yaml")):
-        for doc in yaml.load_all(_read(filename), Loader=loader):
+        # The console's one reading (ADR-0009, ADR-0010), not a second loader
+        # for the bundle: these documents are written into a cluster through the
+        # same funnel as a pasted manifest, and `kubectl apply -f` on the same
+        # bytes would read them this way too. The SHA-256 pin above is what
+        # guards the bytes; this decides what they mean.
+        for doc in yaml_dialect.load_all(_read(filename), fast=True):
             if doc:
                 documents.append((phase, doc))
     return tuple(documents)

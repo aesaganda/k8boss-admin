@@ -65,7 +65,7 @@ import hashlib
 import logging
 from typing import Any
 
-import yaml
+from app import yaml_dialect
 
 logger = logging.getLogger(__name__)
 
@@ -159,9 +159,7 @@ def _to_yaml(obj: Any) -> str:
         return ""
     if not isinstance(obj, (dict, list)):
         return str(obj)
-    return yaml.safe_dump(
-        obj, sort_keys=False, default_flow_style=False, allow_unicode=True, width=4096,
-    )
+    return yaml_dialect.dump(obj)
 
 
 def _is_core_secret(obj: Any) -> bool:

@@ -8,16 +8,16 @@
  *
  * ## Why there is a module for this at all
  *
- * `app.admin.apply.parse_document` reads the submitted manifest with PyYAML,
- * whose implicit resolvers are YAML 1.1, and sends the result to the API server
- * as JSON. js-yaml's default schema is YAML 1.2's core schema. For a handful of
- * unquoted scalars those two disagree:
+ * `app.admin.apply.parse_document` reads the submitted manifest through
+ * `app/yaml_dialect.py`, whose implicit resolvers are YAML 1.1's, and sends the
+ * result to the API server as JSON. js-yaml's default schema is YAML 1.2's core
+ * schema. For a handful of unquoted scalars those two disagree:
  *
  * ```
  *   enabled: off      YAML 1.2: the text "off"     sent: the boolean false
  *   mode: 0755        YAML 1.2: the number 755     sent: the number 493
  *   port: 8:30        YAML 1.2: the text "8:30"    sent: the number 510
- *   limit: 1_000      YAML 1.2: the text "1_000"   sent: the number 1000
+ *   verbose: y        YAML 1.2: the text "y"       sent: the boolean true
  * ```
  *
  * Until ADR-0009 the browser used the left-hand column and the backend the
@@ -33,7 +33,8 @@
  * adopting js-yaml's would have turned `defaultMode: 0755` from `493` into
  * `755` on every manifest this console had ever accepted, silently, in the
  * direction of a file mode nobody wrote. It is also the reading `kubectl` sends
- * for that scalar — see ADR-0009 for where the two still part company.
+ * for that scalar, and since ADR-0010 for `y` and `n` as well — see ADR-0009 for
+ * the seven scalars where the two still part company.
  *
  * ## Why a schema rather than a pattern over the source
  *
@@ -48,16 +49,20 @@
  *
  * ## What is transcribed, and what holds the transcription honest
  *
- * Only the three scalar resolvers below, copied from PyYAML's own
- * `yaml/resolver.py`. The dump halves of the same three types are js-yaml's
- * own, borrowed unchanged from `yaml.types`, so nothing about how a value is
- * *written* is transcribed — only which strings PyYAML calls numbers.
+ * Only the three scalar resolvers below. The integer and float ones are copied
+ * from PyYAML's own `yaml/resolver.py`; the boolean one is PyYAML's **plus the
+ * four scalars `y`, `Y`, `n` and `N`**, which PyYAML declines and `kubectl`
+ * reads as booleans — ADR-0010, and `backend/app/yaml_dialect.py` is the half of
+ * that decision this file mirrors. The dump halves of the same three types are
+ * js-yaml's own, borrowed unchanged from `yaml.types`, so nothing about how a
+ * value is *written* is transcribed — only which strings the backend calls
+ * numbers and booleans.
  *
- * A transcription is a claim about another library made from inside a language
+ * A transcription is a claim about another parser made from inside a language
  * that cannot call it, so it is pinned from both sides over one corpus:
  * `backend/tests/data/yaml_scalar_corpus.json`.
  * `backend/tests/test_yaml_scalar_reading.py` runs every row through the real
- * PyYAML by way of the real `parse_document`; `frontend/tests/e2e/
+ * backend by way of the real `parse_document`; `frontend/tests/e2e/
  * cluster-yaml.spec.js` runs the same rows through this schema. A PyYAML
  * release that moves a resolver fails a test rather than quietly making this
  * console read a document one way and write it another again.
@@ -66,25 +71,33 @@ import yaml from 'js-yaml';
 
 import { formatPath } from './objectForm';
 
-/* ── PyYAML's implicit resolvers ────────────────────────────────────────── */
+/* ── The backend's implicit resolvers ───────────────────────────────────── */
 
 /*
- * Transcribed from PyYAML's `yaml/resolver.py`, verbatim modulo the `re.X`
- * whitespace. They are the whole of what this module claims to know about the
- * other parser, and they are checked against it by the backend test named in
- * the docstring above.
+ * `SCALAR_INT` and `SCALAR_FLOAT` are transcribed from PyYAML's
+ * `yaml/resolver.py`, verbatim modulo the `re.X` whitespace. `SCALAR_BOOL` is
+ * that file's boolean **plus `y`, `Y`, `n` and `N`** — the four `app/
+ * yaml_dialect.py` adds, because PyYAML registers its boolean resolver under
+ * exactly those first characters and then excludes them from the pattern, and
+ * `kubectl` does not (ADR-0010).
+ *
+ * They are the whole of what this module claims to know about the other side,
+ * and they are checked against it by the backend test named in the docstring
+ * above. The single letters only: `yy` and `Ye` are ordinary strings to every
+ * parser in this system.
  */
-const PY_BOOL = /^(?:yes|Yes|YES|no|No|NO|true|True|TRUE|false|False|FALSE|on|On|ON|off|Off|OFF)$/;
+const SCALAR_BOOL =
+  /^(?:y|Y|n|N|yes|Yes|YES|no|No|NO|true|True|TRUE|false|False|FALSE|on|On|ON|off|Off|OFF)$/;
 
-const PY_INT =
+const SCALAR_INT =
   /^(?:[-+]?0b[0-1_]+|[-+]?0[0-7_]+|[-+]?(?:0|[1-9][0-9_]*)|[-+]?0x[0-9a-fA-F_]+|[-+]?[1-9][0-9_]*(?::[0-5]?[0-9])+)$/;
 
-const PY_FLOAT =
+const SCALAR_FLOAT =
   /^(?:[-+]?(?:[0-9][0-9_]*)\.[0-9_]*(?:[eE][-+][0-9]+)?|\.[0-9][0-9_]*(?:[eE][-+][0-9]+)?|[-+]?[0-9][0-9_]*(?::[0-5]?[0-9])+\.[0-9_]*|[-+]?\.(?:inf|Inf|INF)|\.(?:nan|NaN|NAN))$/;
 
-const PY_TRUE = /^(?:yes|Yes|YES|true|True|TRUE|on|On|ON)$/;
+const SCALAR_TRUE = /^(?:y|Y|yes|Yes|YES|true|True|TRUE|on|On|ON)$/;
 
-/** What PyYAML makes of a scalar its integer resolver matched. */
+/** What the backend makes of a scalar its integer resolver matched. */
 function pyInt(raw) {
   const text = raw.replace(/_/g, '');
   const negative = text[0] === '-';
@@ -111,7 +124,7 @@ function pyInt(raw) {
   return negative ? -value : value;
 }
 
-/** What PyYAML makes of a scalar its float resolver matched. */
+/** What the backend makes of a scalar its float resolver matched. */
 function pyFloat(raw) {
   const text = raw.replace(/_/g, '');
   if (/^[-+]?\.(?:inf|Inf|INF)$/.test(text)) return text[0] === '-' ? -Infinity : Infinity;
@@ -165,19 +178,19 @@ export const CLUSTER_SCHEMA = yaml.DEFAULT_SCHEMA.extend({
     new yaml.Type('tag:yaml.org,2002:bool', {
       ...writerHalfOf(yaml.types.bool),
       kind: 'scalar',
-      resolve: (text) => PY_BOOL.test(text),
-      construct: (text) => PY_TRUE.test(text),
+      resolve: (text) => SCALAR_BOOL.test(text),
+      construct: (text) => SCALAR_TRUE.test(text),
     }),
     new yaml.Type('tag:yaml.org,2002:int', {
       ...writerHalfOf(yaml.types.int),
       kind: 'scalar',
-      resolve: (text) => PY_INT.test(text),
+      resolve: (text) => SCALAR_INT.test(text),
       construct: pyInt,
     }),
     new yaml.Type('tag:yaml.org,2002:float', {
       ...writerHalfOf(yaml.types.float),
       kind: 'scalar',
-      resolve: (text) => PY_FLOAT.test(text),
+      resolve: (text) => SCALAR_FLOAT.test(text),
       construct: pyFloat,
     }),
   ],

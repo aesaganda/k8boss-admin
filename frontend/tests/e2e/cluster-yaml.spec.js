@@ -2,11 +2,11 @@
  * The console's reading of a manifest, held to the parser it is a copy of.
  *
  * `backend/tests/test_yaml_scalar_reading.py` runs the rows below through the
- * real PyYAML — the parser whose reading is what the API server is actually
- * sent. This side runs them through the mirror schema in
- * `src/components/clusterYaml.js`, which claims to reproduce PyYAML from inside
- * a language that cannot call it, and through js-yaml's own default schema,
- * which is the YAML 1.2 reading the warning is about.
+ * real backend — whose reading is what the API server is actually sent. This
+ * side runs them through the mirror schema in `src/components/clusterYaml.js`,
+ * which claims to reproduce `app/yaml_dialect.py` from inside a language that
+ * cannot call it, and through js-yaml's own default schema, which is the YAML
+ * 1.2 reading the warning is about.
  *
  * Neither test can see the other's parser, which is the whole reason there is
  * one corpus and two tests rather than two corpora: the file is what makes a
@@ -64,7 +64,7 @@ test.describe('the corpus, from the browser side', () => {
       expect(readPlain(row.scalar)).toEqual(expected(row.yaml12));
     });
 
-    test(`this console reads \`${row.scalar}\` the way PyYAML does`, () => {
+    test(`this console reads \`${row.scalar}\` the way the backend does`, () => {
       // The claim the whole module rests on. Its other half is the backend
       // test, which runs the same string through the parser being mirrored.
       expect(readSent(row.scalar)).toEqual(expected(row.sent));
@@ -184,6 +184,46 @@ data:
     // A warning that fired on those is one that gets dismissed on the day it is
     // right.
     expect(divergenceNote(POD)).toBeNull();
+  });
+});
+
+test.describe('the four letters', () => {
+  // ADR-0010. `kubectl` reads `y`, `Y`, `n` and `N` as booleans and this console
+  // did not, and the warning could not see it: both parsers here called them
+  // text, so there was nothing to compare. Closing the gap in what is *sent* is
+  // what gives the warning something to find.
+  for (const [scalar, sent] of [
+    ['y', true],
+    ['Y', true],
+    ['n', false],
+    ['N', false],
+  ]) {
+    test(`\`${scalar}\` is sent as ${sent}, and the editor says so`, () => {
+      expect(load(`value: ${scalar}\n`).value).toBe(sent);
+
+      const note = divergenceNote(`apiVersion: v1\nkind: ConfigMap\ndata:\n  verbose: ${scalar}\n`);
+      expect(note.text).toContain(
+        `\`data.verbose\` looks like the text "${scalar}" and will be sent as the boolean ${sent}`,
+      );
+    });
+  }
+
+  test('two letters are two letters', () => {
+    // The resolver is anchored. `kubectl` reads every one of these as text and
+    // so does YAML 1.2, so a wider mirror would not close a gap — it would open
+    // one, and the warning would fire on a document nobody disagrees about.
+    for (const scalar of ['yy', 'Ye', 'ny', 'yn', 'Nn', 'no_quotes']) {
+      expect(load(`value: ${scalar}\n`).value, scalar).toBe(scalar);
+      expect(divergences(`value: ${scalar}\n`), scalar).toEqual([]);
+    }
+  });
+
+  test('a string that is only the letter comes back as the letter', () => {
+    // js-yaml quotes all four on dump — it treats YAML 1.1's booleans as unsafe
+    // plain scalars — so this passes today. It is asserted because the day it
+    // stops, a form edit turns somebody's ConfigMap value into a boolean.
+    const text = toYaml({ a: 'y', b: 'Y', c: 'n', d: 'N' });
+    expect(load(text)).toEqual({ a: 'y', b: 'Y', c: 'n', d: 'N' });
   });
 });
 
