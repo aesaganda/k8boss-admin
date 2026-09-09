@@ -15,6 +15,14 @@
  * have taught the operator to distrust the tick, and a console whose validation
  * cannot be trusted is a console whose diffs will not be read either.
  *
+ * **One note is not about the cluster's opinion but about this editor's own.**
+ * The browser parses with js-yaml (YAML 1.2) and the backend with PyYAML
+ * (YAML 1.1), and for a handful of unquoted scalars — `off`, `010`, `8:30` —
+ * those two disagree about what the text means. `yamlDivergence.js` finds them
+ * by parsing twice and comparing, and the warning is here rather than in the
+ * dialog because it is true of every manifest this editor edits, a `PUT` as
+ * much as a `POST`.
+ *
  * **A parse error blocks the preview.** Not because the backend cannot handle
  * it — it would answer `422 invalid` perfectly well — but because a round trip
  * to learn about a missing colon on line 40 is a round trip that also writes an
@@ -60,6 +68,7 @@ import { Alert, Split, SplitItem } from '@patternfly/react-core';
 import yaml from 'js-yaml';
 
 import { HIGHLIGHT_MAX_LINES, tokenizeYaml } from './yamlSyntax';
+import { divergenceNote } from './yamlDivergence';
 
 const INDENT = '  ';
 
@@ -144,6 +153,11 @@ export function validateYaml(text) {
       });
     }
   }
+
+  // Last, and never blocking: the document is legal YAML whichever parser reads
+  // it, and what this reports is that the two do not agree about what it says.
+  const divergence = divergenceNote(source);
+  if (divergence) notes.push(divergence);
 
   const blocking = notes.some((n) => n.severity === 'error');
   return {

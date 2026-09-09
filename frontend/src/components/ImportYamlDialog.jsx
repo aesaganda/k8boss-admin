@@ -83,6 +83,7 @@ import { Alert, Button, Radio, Tooltip } from '@patternfly/react-core';
 import MutationDialog from './MutationDialog';
 import ObjectForm from './ObjectForm';
 import YamlEditor, { validateYaml } from './YamlEditor';
+import { divergenceNote } from './yamlDivergence';
 import {
   FORM_MODELS,
   containsCycle,
@@ -245,6 +246,11 @@ export function ImportYamlDialog({
     () => (view === 'form' ? rewriteLosses(text) : { comments: 0, anchors: 0, merges: 0 }),
     [view, text],
   );
+  // Only in form view. `YamlEditor` renders this note itself, so showing it here
+  // as well would say the same thing twice on the same screen — and the form is
+  // the view that needs it most, because every control in it is a lens onto the
+  // browser's reading of a document the API server reads differently.
+  const divergence = useMemo(() => (view === 'form' ? divergenceNote(text) : null), [view, text]);
 
   // Rule 11.4 on the view switch itself: Form view stays visible and says what
   // it is waiting for, rather than appearing only for the kinds that have one —
@@ -488,6 +494,19 @@ export function ImportYamlDialog({
           </Alert>
         );
       })}
+
+      {divergence && (
+        // The note's own sentence, as the title and nothing else — the same way
+        // `YamlEditor` renders it. Two renderings of one warning that worded it
+        // differently would read as two different problems.
+        <Alert
+          isInline
+          variant="warning"
+          className="admin-confirm__alert"
+          data-testid="create-divergence-warning"
+          title={divergence.text}
+        />
+      )}
 
       {view === 'form' && (losses.comments > 0 || losses.anchors > 0 || losses.merges > 0) && (
         <Alert

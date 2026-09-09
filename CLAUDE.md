@@ -57,7 +57,7 @@ of [K8Boss](https://github.com/aesaganda/k8boss) and shares no code with it —
 | `backend/app/audit/` | Append-only, hash-chained trail: `record()`, `query()`, `verify()`, export | `docs/api-contract.md` §10 |
 | `backend/app/identity/` | Local password hashing, opaque sessions, LDAP search-and-bind, sign-in throttling, and four single sign-on providers behind one registry (`sso.py`) and one pair of routes: OIDC (`oidc.py`), a plain OAuth 2.0 server (`oauth.py`), the cluster's own OAuth server (`openshift.py`), and SAML 2.0 (`saml.py`) | `docs/api-contract.md` §12 |
 | `backend/tests/` | pytest on SQLite. The fake Kubernetes client **raises** on an unstubbed call | — |
-| `frontend/src/` | React 19 / Vite / PatternFly 6 SPA. `components/ImportYamlDialog.jsx` is the **one** create dialog behind every `Create <Kind>…` button and the masthead's `+`; `components/templates.js` holds the starters, and the skeleton for the kinds it ships none for | `docs/api-contract.md` §11 (§11.4, §11.9–§11.11) |
+| `frontend/src/` | React 19 / Vite / PatternFly 6 SPA. `components/ImportYamlDialog.jsx` is the **one** create dialog behind every `Create <Kind>…` button and the masthead's `+`; `components/templates.js` holds the starters, and the skeleton for the kinds it ships none for; `components/yamlDivergence.js` is the second parse that catches the scalars js-yaml and PyYAML read differently | `docs/api-contract.md` §11 (§11.4, §11.9–§11.12) |
 | `deploy/` | Namespace, RBAC, Deployments, Services, Ingress, kustomization | `docs/rbac.md` |
 | `docs/` | Design docs and ADRs. **`api-contract.md` is normative** — where it and the code disagree, the code is the defect report | — |
 
