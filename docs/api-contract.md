@@ -373,13 +373,47 @@ is dropped from list responses (kept in the single-object read):
 → `text/plain` YAML, ready for the editor. Same trimming.
 
 ### `POST /api/resources/{group}/{version}/{plural}`
-Body `{"yaml": "...", "namespace": "prod", "dryRun": true}` → mutation response (§1.5).
-The console's create dialog has a form view (§11.9) and it does not change this
-body: the form edits the parsed document and the document is re-serialised into
-`yaml`, so there is no second mode here and no form model for this endpoint to
-reassemble. A create screen that posted a structured spec instead would be a
-second write path for the same object, and the first one to stop matching would
-do it silently.
+Body `{"yaml": "...", "namespace": "prod", "dryRun": true}` → mutation response
+(§1.5). `diff.before` is `null` and the unified diff is the whole projected
+object as an addition, because that is what a create is.
+
+**This is the only create path in the console, and every resource listing
+reaches it.** Each listing offers `Create <Kind>…` for the kind discovery names
+behind it, CRD-backed kinds included (§11.10), and that dialog posts the body
+above — the same body as the masthead's blank import. The create dialog has a
+form view (§11.9) and it does not change this body: the form edits the parsed
+document and the document is re-serialised into `yaml`, so there is no second
+mode here and no form model for this endpoint to reassemble. A create screen
+that posted a structured spec instead would be a second write path for the same
+object, and the first one to stop matching would do it silently.
+
+**`create` is a property of the resource before it is a property of the
+caller.** A resource whose catalog `verbs` do not list `create` is
+`501 unsupported`, naming the verbs discovery does advertise — never `403`. The
+API server would answer 405 and §1.3 would map that to `unsupported` anyway;
+refusing here makes the sentence actionable ("bindings can be created, not
+deleted") where "method not allowed" is not. A resource advertising **no** verbs
+at all is not second-guessed: some aggregated APIs report an empty list and
+serve the verb.
+
+**The document's namespace wins; the request's `namespace` is the fallback**,
+and `target.namespace` in the response is the one that was used. Namespace is
+the one field a create's diff does not make obvious — there is no `before`, so
+the whole object renders as an addition and the reader's eye goes to the spec,
+not to `metadata.namespace` in a wall of green. A namespaced resource with
+neither is `422 invalid`. A cluster-scoped one ignores the request's
+`namespace`, which is only ever the scope the browser happened to be filtered
+to; a `metadata.namespace` inside the document is `422 invalid` rather than
+dropped, because the API server drops it silently and the operator goes on
+believing they created something namespaced.
+
+**A document with neither `metadata.name` nor `metadata.generateName` is
+`422 invalid`**, naming both, before the cluster is touched.
+
+**One document per request.** A body carrying several YAML documents is
+`422 invalid` and is never split into N requests: a create that lands three
+objects and fails the fourth, reported as one result, is exactly the
+confidently wrong answer §0 exists to rule out.
 
 ### `PUT /api/resources/{group}/{version}/{plural}/{name}`
 Body `{"yaml": "...", "namespace": "prod", "resourceVersion": "884213", "dryRun": true}`
@@ -963,7 +997,11 @@ it asks for them, produced by the shaping layer.
 The Storage, Network and Configuration pages also carry tabs for resources with
 no typed row above: the generic §4 endpoint returns the trimmed manifest
 (`shape=raw`), and the frontend renders Name/Namespace/Age plus a YAML detail
-panel, nothing shape-specific. This is a UI/nav decision, not a new contract —
+panel, nothing shape-specific in the table itself. The one shape-specific thing
+on these tabs is rule 11.10's `Create <Kind>…` button, and its shape comes from
+discovery rather than from a shaper — the kind, the verbs and the namespacing
+are read off §4's catalog entry, so a tab gains a correct create button without
+anybody writing it one. This is a UI/nav decision, not a new contract —
 each is reachable exactly as any resource is through §4, just given a tab in
 the console's own navigation rather than only through §4's catalog/explorer:
 
@@ -1370,9 +1408,9 @@ trace.
    an unopened tab would start an audited exec session nobody asked for. The URL
    half is not cosmetic: a panel an operator cannot link to is a panel they have
    to describe over the phone.
-9. A screen offering **both a form and a document** — the create dialog (§4), the
-   exposure screen (§13.5) — makes the **document authoritative and the form a
-   projection of it**. A form edit is patched *into* the current document rather
+9. A screen offering **both a form and a document** — every create dialog (§4,
+   and §11.10's button on every listing), the exposure screen (§13.5) — makes
+   the **document authoritative and the form a projection of it**. A form edit is patched *into* the current document rather
    than regenerating it, and the form **names, by path, every field it is not
    showing**. Both halves are load-bearing. Without the first, a `spec.affinity`
    somebody hand-wrote disappears the moment they touch an unrelated control, and
@@ -1383,6 +1421,69 @@ trace.
    there means three different objects; the create dialog computes both in the
    browser, because a create is one object and no round trip is involved — which
    also means nothing on the wire attests to it and only a test can.
+
+   The form is offered on every kind and **modelled** on some of them: where no
+   model exists — most CRDs, and every kind nobody has written controls for —
+   the view control is **present, disabled and says so** (rule 4), and the
+   dialog opens in YAML view. Hiding it instead would make "this kind has no
+   form" and "this console has no forms" the same screen, and a form
+   regenerated from a kind it does not understand would drop the half of the
+   spec it never had a control for.
+
+10. **Every resource listing offers `Create <Kind>…`, and the button answers two
+   questions in that order.** First, whether the *API* serves a create for this
+   resource — §4's catalog `verbs`, and the answer is a property of the cluster.
+   Second, whether *this caller* may use it — §9's preflight, batched once per
+   page, in the namespace the masthead has selected. **The two are never
+   merged.** "This cluster does not serve a create for these" and "you may not
+   create one" send an operator to two different places, and answering the first
+   with the second sends them to widen a ClusterRole that was already correct. A
+   catalog still in flight is a third answer and stays one: until discovery
+   answers, the button reads `Create…`, is disabled, and says it does not know
+   yet — not "unsupported", which is a fact about a cluster nobody has finished
+   asking. The preflight carries the selected namespace: a check with no
+   namespace asks whether the caller may create the resource *anywhere*, and an
+   operator holding a grant in one namespace would be told they cannot do what
+   they can.
+
+   **The kind comes from discovery, never from the tab's title.** Titles are
+   display strings — "Endpoint Slices", "Network Policies", "HPAs" — and
+   trimming an `s` off them produces "Endpoint Slice", "Network Policie" and
+   "HPA", none of which is a kind. A button offering to create a kind that does
+   not exist is the defect standard with a click target on it.
+
+   All four states are rule 4's disabled-with-the-reason. None is a hidden
+   button.
+
+11. **A create dialog opened from a listing is seeded with a starter; the
+   masthead's `+` opens empty.** A starter is a named, minimal, *valid* manifest
+   for that one kind, and several kinds carry more than one because the shapes
+   an operator picks between are different objects — a headless Service and a
+   LoadBalancer share a kind and almost nothing else. Three properties are
+   contract, because each has a failure behind it: a starter carrying a pod
+   template **applies under the restricted Pod Security Standard**, since an
+   admission rejection on the console's own starter reads as a broken console
+   rather than as a cluster policy; a starter **never sets
+   `metadata.namespace`**, because the masthead selection is the fallback (§4)
+   and a hardcoded namespace goes stale the moment an operator switches scope
+   mid-edit; and a starter **carries no comments**, because a form edit
+   re-serialises the parsed document and nothing carries a comment across a
+   parse — a commented starter would warn the operator it was about to lose
+   lines the console itself wrote, on the first click, before they had typed
+   anything. What a comment would have said is the starter's own description,
+   which is on screen beside it and survives the rewrite.
+
+   **A kind this console ships no starter for gets a skeleton** — `apiVersion`,
+   `kind`, `metadata.name` — labelled as exactly that. Inventing a body for
+   somebody's CRD means guessing at a schema nobody here has read, and a guess
+   presented as a starting point is a wrong answer with a Create button under
+   it.
+
+   Switching starters **replaces the document**, so it is confirmed — and only
+   once there is something to lose: confirming a swap out of a document nobody
+   has typed into is a dialog about nothing.
+
+   **No starter is a claim that the object will be accepted.** The dry run is.
 
 ---
 

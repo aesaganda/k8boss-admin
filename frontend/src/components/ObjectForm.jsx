@@ -68,6 +68,8 @@ import {
   integerOrUndefined,
   intOrString,
   isMapping,
+  rowFieldId,
+  rowKeyPath,
   scalarBlocker,
   setIn,
   shapeFor,
@@ -104,15 +106,27 @@ function Reasoned({ reason, children }) {
  * on which machine the console was open on. The row shows what is there and
  * says why it is not editable here, exactly as an `env` entry with a
  * `valueFrom` does.
+ *
+ * **A string holding newlines is kept the same way, and that is not fussiness.**
+ * A `ConfigMap`'s `data` and a `Secret`'s `stringData` routinely hold whole
+ * files, and a single-line `<input>` shows one line of a forty-line value while
+ * accepting an edit that writes back exactly what is in the box. The operator
+ * would be looking at a nginx.conf, editing one word of it, and creating a
+ * ConfigMap holding one line — with a diff that faithfully shows what the form
+ * produced. Shown as what it is and left alone instead.
  */
 function toRows(mapping) {
   if (!isMapping(mapping)) return [];
-  return Object.entries(mapping).map(([key, value]) => ({
-    key,
-    value: typeof value === 'string' ? value : '',
-    original: value,
-    literal: value != null && typeof value !== 'string',
-  }));
+  return Object.entries(mapping).map(([key, value]) => {
+    const multiline = typeof value === 'string' && value.includes('\n');
+    return {
+      key,
+      value: typeof value === 'string' && !multiline ? value : '',
+      original: value,
+      literal: (value != null && typeof value !== 'string') || multiline,
+      multiline,
+    };
+  });
 }
 
 /**
@@ -187,15 +201,23 @@ function KeyValueRows({ value, onChange, idPrefix, noun, isDisabled }) {
           <GridItem span={5}>
             <Reasoned
               reason={
-                row.literal
-                  ? `This value is ${describeShape(row.original)} in the document rather than text, so it is kept exactly as written. The API server requires a string here; quote it in YAML view.`
-                  : null
+                row.multiline
+                  ? `This value is ${String(row.original).split('\n').length} lines long, and a single-line box would show one of them while writing back only what fits. It is kept exactly as written; edit it in YAML view.`
+                  : row.literal
+                    ? `This value is ${describeShape(row.original)} in the document rather than text, so it is kept exactly as written. The API server requires a string here; quote it in YAML view.`
+                    : null
               }
             >
               <TextInput
                 aria-label={`${noun} ${index + 1} value`}
                 data-testid={`${idPrefix}-value-${index}`}
-                value={row.literal ? describeShape(row.original) : row.value}
+                value={
+                  row.multiline
+                    ? `(${String(row.original).split('\n').length} lines)`
+                    : row.literal
+                      ? describeShape(row.original)
+                      : row.value
+                }
                 isDisabled={isDisabled || row.literal}
                 placeholder="value"
                 onChange={(_e, next) =>
@@ -744,6 +766,307 @@ function ContainersEditor({ document: doc, onDocument, path, isDisabled }) {
   );
 }
 
+/* ── Rows of objects ────────────────────────────────────────────────────── */
+
+/**
+ * One declared field inside one row of an `objectList`.
+ *
+ * It is a lens like every other control here — `setIn` into the row's own path,
+ * `unsetIn` when the operator empties it — so a key this row does not declare
+ * (a Service port's `nodePort`, a subject's `apiGroup` on a kind that has one)
+ * is copied through untouched and named by `unrepresented()` rather than lost.
+ *
+ * The shape check is the same one `Field` makes and it matters more here: a
+ * document can put a string where a row field expects a list, and a control
+ * that rendered that empty would be showing the operator a row the document
+ * does not contain.
+ */
+function RowControl({ sub, rowPath, index, noun, document: doc, onDocument, isDisabled, testId }) {
+  const path = [...rowPath, ...rowKeyPath(sub)];
+  const value = getIn(doc, path);
+  const shape = shapeFor(sub.control);
+  const blocker = scalarBlocker(doc, path);
+  const reason = blocker
+    ? `"${formatPath(blocker)}" holds a single value rather than a block, so this control cannot write inside it. Edit it in YAML view.`
+    : value != null && !shape.ok(value)
+      ? `"${formatPath(path)}" is ${describeShape(value)}, and this control expects ${shape.wants}. It is left exactly as written; edit it in YAML view.`
+      : null;
+  const inert = isDisabled || Boolean(reason);
+  const label = `${noun} ${index + 1} ${sub.label}`;
+  const put = (next) => onDocument(next === undefined ? unsetIn(doc, path) : setIn(doc, path, next));
+
+  let control;
+  switch (sub.control) {
+    case 'text':
+      control = (
+        <TextInput
+          id={testId}
+          data-testid={testId}
+          aria-label={label}
+          value={value == null ? '' : String(value)}
+          isDisabled={inert}
+          placeholder={sub.placeholder}
+          onChange={(_e, next) => put(next === '' ? undefined : next)}
+        />
+      );
+      break;
+
+    case 'number':
+      control = (
+        <NumberField
+          id={testId}
+          // `NumberField` names the path in its own error text, so the field it
+          // is handed has to be the one inside this row rather than the array.
+          field={{ ...sub, label, path }}
+          value={value}
+          isDisabled={inert}
+          onPut={put}
+        />
+      );
+      break;
+
+    case 'intOrString':
+      control = (
+        <TextInput
+          id={testId}
+          data-testid={testId}
+          aria-label={label}
+          value={value == null ? '' : String(value)}
+          isDisabled={inert}
+          placeholder={sub.placeholder}
+          onChange={(_e, next) => put(intOrString(next))}
+        />
+      );
+      break;
+
+    case 'select': {
+      const current = value == null ? '' : String(value);
+      control = (
+        <FormSelect
+          id={testId}
+          data-testid={testId}
+          aria-label={label}
+          value={current}
+          isDisabled={inert}
+          onChange={(_e, next) => put(next === '' ? undefined : next)}
+        >
+          {selectOptions(sub.options, current).map((option) => (
+            <FormSelectOption key={option.value} value={option.value} label={option.label} />
+          ))}
+        </FormSelect>
+      );
+      break;
+    }
+
+    case 'triBool':
+      control = (
+        <FormSelect
+          id={testId}
+          data-testid={testId}
+          aria-label={label}
+          value={triValue(value)}
+          isDisabled={inert}
+          onChange={(_e, next) => put(next === '' ? undefined : next === 'true')}
+        >
+          <FormSelectOption value="" label="Not set" />
+          <FormSelectOption value="true" label="true" />
+          <FormSelectOption value="false" label="false" />
+        </FormSelect>
+      );
+      break;
+
+    case 'stringLines':
+      control = (
+        <StringLines
+          id={testId}
+          ariaLabel={label}
+          placeholder={sub.placeholder}
+          value={value}
+          isDisabled={inert}
+          onChange={(next) => put(next)}
+        />
+      );
+      break;
+
+    default:
+      // The same refusal `Field` makes, for the same reason: the model claims
+      // this key *is* covered, so `unrepresented()` will not report it, and a
+      // silent blank would be the one field the form hides while saying it
+      // hides nothing.
+      control = (
+        <p style={MUTED} data-testid={`${testId}-unrenderable`}>
+          {CONTROLS.includes(sub.control)
+            ? `This console knows the "${sub.control}" control but does not render it in a row.`
+            : `"${sub.control}" is not a control this console has.`}{' '}
+          Edit {formatPath(path)} in YAML view.
+        </p>
+      );
+  }
+
+  return <Reasoned reason={reason}>{control}</Reasoned>;
+}
+
+/**
+ * An array of small flat objects, as rows: a Service's ports, a RoleBinding's
+ * subjects, a Role's rules.
+ *
+ * The generic half of `ContainersEditor`. A container row is hand-written
+ * because it is six field groups deep and two of them are their own editors; a
+ * row here is a declared list of keys, which is what most of Kubernetes' list
+ * fields actually are — and declaring it is what lets `objectListCoverage()`
+ * derive what the row represents instead of a second list in another file
+ * claiming it.
+ *
+ * **`generation` is part of every row key, and it is not cosmetic.** Rows are
+ * index-keyed, so removing one hands every later row a key that already has a
+ * mounted subtree — and a `stringLines` cell holds its own text. Without the
+ * bump the survivor's box goes on showing the deleted row's list, and the next
+ * keystroke in it writes that onto the survivor: a manifest nobody wrote, with
+ * a diff that looks fine. This is the same failure the container editor has,
+ * fixed the same way and scoped the same way — bumping this editor rather than
+ * remounting the form, so removing a rule does not discard a half-typed label
+ * somewhere else on the screen.
+ *
+ * **Labels appear on the first row only.** They are the same words on every
+ * row, and a Role with four rules would otherwise repeat sixteen of them; the
+ * control on every row carries the full sentence as its `aria-label`, so
+ * nothing is lost to anyone reading the form through anything but the screen.
+ */
+function ObjectListEditor({ field, document: doc, onDocument, isDisabled }) {
+  const current = getIn(doc, field.path);
+  const rows = Array.isArray(current) ? current : [];
+  const [generation, setGeneration] = useState(0);
+  const noun = field.rowNoun ?? field.label.replace(/s$/, '');
+  const subs = field.fields ?? [];
+  const span = Math.max(2, Math.floor(10 / Math.max(subs.length, 1)));
+
+  const write = (next) => {
+    setGeneration((n) => n + 1);
+    onDocument(next.length ? setIn(doc, field.path, next) : unsetIn(doc, field.path));
+  };
+
+  return (
+    <>
+      {rows.map((row, index) => {
+        const rowPath = [...field.path, index];
+        // A list can hold anything — a bare string where a block belongs is the
+        // classic paste error. The row is shown, said to be what it is, and
+        // left alone rather than being overwritten by controls that would each
+        // write a key into a scalar.
+        const notAnObject = !isMapping(row);
+        return (
+          <Grid
+            hasGutter
+            key={`${generation}:${index}`}
+            style={{ marginBlockEnd: '0.5rem' }}
+            data-testid={`create-${field.id}-row-${index}`}
+          >
+            {notAnObject ? (
+              <GridItem span={10}>
+                <p style={MUTED} data-testid={`create-${field.id}-opaque-${index}`}>
+                  {`${noun} ${index + 1} is ${describeShape(row)} rather than a block of keys, so this form leaves it exactly as written. Edit ${formatPath(rowPath)} in YAML view.`}
+                </p>
+              </GridItem>
+            ) : (
+              subs.map((sub) => {
+                const testId = `create-${field.id}-${rowFieldId(sub)}-${index}`;
+                const control = (
+                  <RowControl
+                    sub={sub}
+                    rowPath={rowPath}
+                    index={index}
+                    noun={noun}
+                    document={doc}
+                    onDocument={onDocument}
+                    isDisabled={isDisabled}
+                    testId={testId}
+                  />
+                );
+                return (
+                  <GridItem key={rowFieldId(sub)} span={sub.span ?? span}>
+                    {index === 0 ? (
+                      <FormGroup label={sub.label} fieldId={testId} isRequired={Boolean(sub.required)}>
+                        {control}
+                        <Help text={sub.help} />
+                      </FormGroup>
+                    ) : (
+                      control
+                    )}
+                  </GridItem>
+                );
+              })
+            )}
+            <GridItem span={2}>
+              {index === 0 ? (
+                <FormGroup label="&nbsp;" fieldId={`create-${field.id}-remove-${index}`} role="group">
+                  <Button
+                    variant="link"
+                    isDanger
+                    isDisabled={isDisabled}
+                    data-testid={`create-${field.id}-remove-${index}`}
+                    onClick={() => write(rows.filter((_item, i) => i !== index))}
+                  >
+                    Remove
+                  </Button>
+                </FormGroup>
+              ) : (
+                <Button
+                  variant="link"
+                  isDanger
+                  isDisabled={isDisabled}
+                  aria-label={`Remove ${noun.toLowerCase()} ${index + 1}`}
+                  data-testid={`create-${field.id}-remove-${index}`}
+                  onClick={() => write(rows.filter((_item, i) => i !== index))}
+                >
+                  Remove
+                </Button>
+              )}
+            </GridItem>
+          </Grid>
+        );
+      })}
+      <Button
+        variant="secondary"
+        isDisabled={isDisabled}
+        data-testid={`create-${field.id}-add`}
+        // Seeded from the model where a row has a key the API server requires
+        // and no sensible blank — a RoleBinding subject with no `kind` is
+        // refused outright — so what the operator gets is a row they can finish
+        // rather than one they have to know to repair.
+        onClick={() => write([...rows, { ...(field.rowSeed ?? {}) }])}
+      >
+        {field.addLabel ?? `Add ${noun.toLowerCase()}`}
+      </Button>
+    </>
+  );
+}
+
+/**
+ * The options a select offers, with whatever the document actually holds among
+ * them.
+ *
+ * A document can hold a value this form does not offer — an enum from a newer
+ * API, or an absent field on a kind where absent is not a legal choice (a Job's
+ * `restartPolicy` is the one that matters: the API server fills in "Always" and
+ * then refuses the object for it). A `FormSelect` whose value matches no option
+ * renders as its *first* option, which would show the operator a setting the
+ * document does not contain. So the actual state is listed, said to be the
+ * actual state, and left selectable.
+ */
+function selectOptions(declared, current) {
+  if (declared.some((option) => option.value === current)) return declared;
+  return [
+    {
+      value: current,
+      label:
+        current === ''
+          ? 'Not set — this kind has no default you would want'
+          : `${current} — in the document; not a value this form offers`,
+    },
+    ...declared,
+  ];
+}
+
 /** A three-state boolean as the string a `FormSelect` can hold. */
 function triValue(value) {
   if (value === true) return 'true';
@@ -827,7 +1150,7 @@ function Help({ text }) {
 /** Controls that are several inputs rather than one, so a `<label for>` on the
  *  group would point at an id nothing carries. PatternFly renders the label as
  *  a span and wires `aria-labelledby` instead when it is told the group is one. */
-const COMPOSITE_CONTROLS = new Set(['keyValue', 'checkboxSet', 'containers']);
+const COMPOSITE_CONTROLS = new Set(['keyValue', 'checkboxSet', 'containers', 'objectList']);
 
 function Field({ field, model, document: doc, onDocument, isDisabled }) {
   const id = `create-${field.id}`;
@@ -887,24 +1210,8 @@ function Field({ field, model, document: doc, onDocument, isDisabled }) {
       break;
 
     case 'select': {
-      // A document can hold a value this form does not offer — an enum from a
-      // newer API, or an absent field on a kind where absent is not a legal
-      // choice (a Job's `restartPolicy` is the one that matters: the API server
-      // fills in "Always" and then refuses the object for it). A select whose
-      // value matches no option renders as its *first* option, which would show
-      // the operator a setting the document does not contain. So the actual
-      // state is listed, said to be the actual state, and left selectable.
       const current = value == null ? '' : String(value);
-      const known = field.options.some((option) => option.value === current);
-      const options = known
-        ? field.options
-        : [
-            {
-              value: current,
-              label: current === '' ? 'Not set — this kind has no default you would want' : `${current} — in the document; not a value this form offers`,
-            },
-            ...field.options,
-          ];
+      const options = selectOptions(field.options, current);
       control = (
         <FormSelect
           id={id}
@@ -1023,6 +1330,12 @@ function Field({ field, model, document: doc, onDocument, isDisabled }) {
     case 'containers':
       control = (
         <ContainersEditor document={doc} onDocument={onDocument} path={field.path} isDisabled={inert} />
+      );
+      break;
+
+    case 'objectList':
+      control = (
+        <ObjectListEditor field={field} document={doc} onDocument={onDocument} isDisabled={inert} />
       );
       break;
 

@@ -742,20 +742,47 @@ version being that there is no undo for a deleted StatefulSet.
   nothing — no chain, no revocation, no handshake — and says so above the table
   rather than under it. Only `tls.crt`, only from `kubernetes.io/tls` Secrets,
   and no PEM ever reaches the browser. See §32.
-* Create, edit and delete NetworkPolicies, from a default-deny starter manifest —
-  through the same dry-run-then-confirm funnel as every other write, so the diff
+* **`Create <Kind>…` on every listing, including your CRDs.** Every resource
+  table in the console — the typed pages, the browsable tabs, the Custom
+  Resources page and the API explorer — carries a create button for the kind
+  that listing holds, and all of them open the same dialog and post the same
+  YAML to the same endpoint. The kind is read from the cluster's own discovery,
+  never from the tab's title, so the button never offers a kind that does not
+  exist.
+* **Starter manifests, not an empty editor.** Opening `Create Service…` seeds a
+  valid minimal Service; kinds whose shapes really differ get more than one
+  starter to pick between, and picking another one is confirmed once you have
+  typed something. Every starter carrying a pod template applies under the
+  restricted Pod Security Standard, so the first click is a diff and not an
+  admission rejection. For a kind this console has never heard of — yours — the
+  seed is a labelled skeleton of `apiVersion`, `kind` and a name: guessing at
+  your CRD's schema would be a wrong answer with a Create button under it.
+* **A button you cannot use is disabled with the reason, and the reason is the
+  true one.** "This cluster does not serve a create for this resource" (its
+  discovery says so), "the console's ServiceAccount may not create these" (the
+  preflight says so), "we could not establish whether you may" (the review
+  itself failed) and "this deployment is read-only" are four different
+  sentences, and the console will not print one of them for another: the second
+  sends you to a ClusterRole, the fourth to an environment variable, and the
+  first nowhere at all.
+* Create, edit and delete NetworkPolicies, from a default-deny starter — the
+  same funnel and the same starter mechanism as every other kind, so the diff
   is shown before a segmentation change reaches a cluster.
-* Create, replace and delete any resource from YAML, with optimistic concurrency.
-  The manifest editor numbers its lines and colours its syntax, so the line a
-  parse error names is the line you can see.
-* **A form view on every create**, for Pods, the six workload kinds and
-  NetworkPolicies — OpenShift's "Configure via: Form view / YAML view", with the
-  same difference the Routes screen below draws. The document is the source of
-  truth and the form is a projection of it, so an `affinity` block or an
-  annotation you hand-wrote survives a trip through the form; and rather than
-  warning that *some fields may not be represented*, the form lists the ones it
-  is not showing, by path. Anything without a form is still created from YAML,
-  and the control says which kinds have one.
+* Create, replace and delete any resource from YAML, with optimistic
+  concurrency. The manifest editor numbers its lines and colours its syntax, so
+  the line a parse error names is the line you can see. One document per create:
+  a paste holding four objects is refused rather than split, because a create
+  that lands three of them and fails the fourth has no honest way to report
+  itself.
+* **A form view on every create dialog, modelled for the kinds that have one** —
+  OpenShift's "Configure via: Form view / YAML view", with the same difference
+  the Routes screen below draws. The document is the source of truth and the
+  form is a projection of it, so an `affinity` block or an annotation you
+  hand-wrote survives a trip through the form; and rather than warning that
+  *some fields may not be represented*, the form lists the ones it is not
+  showing, by path. On a kind with no model the control is still there and
+  disabled, saying which kinds have one: a hidden control would make "no form
+  for this kind" and "no forms in this console" look identical.
 * Every object's YAML, rendered the same way, wherever the object is — including
   a pod's, from the row you clicked. Each panel says when it was read, re-reads
   on a timer, and has a Reload button for when a timer is not fast enough. A
@@ -801,6 +828,21 @@ version being that there is no undo for a deleted StatefulSet.
   both tables.
 
 ---
+
+### Creating an object, wherever you are looking at one
+
+Every listing creates its own kind. There is one dialog behind all of them and
+one endpoint behind that — the same `POST` the masthead's `+` has always used —
+so there is no second write path to drift, and a create is preflighted,
+dry-run, diffed, confirmed and audited exactly like an edit. What each listing
+adds is the kind and a starter for it, both read from the cluster's own
+discovery rather than from anything written down here.
+
+**This is not a template engine.** Starters live in the browser, are seeds
+rather than stored state, and nothing reconciles what you create afterwards.
+Editing a starter and creating twice creates two unrelated objects, which is
+what `kubectl apply` of a file you edited does too. `docs/adr-0006-projects.md`
+draws the same line from the other side.
 
 ### Routes — exposing a Service to the outside world
 

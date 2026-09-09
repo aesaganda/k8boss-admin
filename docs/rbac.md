@@ -265,8 +265,8 @@ these grants.
 | `get,patch,update apps/deployments/scale`, `statefulsets/scale`, `replicasets/scale` | §6 scale | The Scale button is disabled with the reason. **A separate RBAC resource from the workload itself** — which is the whole reason the console patches the subresource: a ServiceAccount can be allowed to resize a workload without being allowed to edit it. Grant this pair alone for a resize-only console |
 | `patch apps/deployments,statefulsets,daemonsets` | §6 restart (a pod-template annotation, the `kubectl rollout restart` mechanism) and §6 rollback (an RFC 6902 replace of `/spec/template`) | Restart and Rollback disabled with the reason |
 | `patch batch/jobs,cronjobs` | §6 suspend | Suspend disabled with the reason. Only Jobs and CronJobs have `spec.suspend`; other kinds are refused at `422 invalid` naming the kind, before RBAC is consulted at all |
-| `create,update,patch,delete` on the §4/§8 resources | The YAML editor and the delete button on those pages | Those actions are disabled with the reason; the editor still opens read-only and the diff still renders |
-| `create,update,patch,delete networking.k8s.io/networkpolicies` | §8.3 New network policy, Edit YAML and Delete on the Network Policies tab | Those three are disabled with the reason and the tab stays readable. Withholding this while keeping the read grant is a sensible posture: the isolation view is the reason to open the tab, and it needs no write verb |
+| `create,update,patch,delete` on the §4/§8 resources | The YAML editor, the delete button, **and the `Create <Kind>…` button on those listings** | All three are disabled with the reason; the editor still opens read-only and the diff still renders. The create half is now the visible half — a button on the listing rather than a `403` after somebody pasted a manifest |
+| `create,update,patch,delete networking.k8s.io/networkpolicies` | §8.3 Create NetworkPolicy, Edit YAML and Delete on the Network Policies tab | Those three are disabled with the reason and the tab stays readable. Withholding this while keeping the read grant is a sensible posture: the isolation view is the reason to open the tab, and it needs no write verb |
 | `patch,update ""/nodes` | §5 cordon and drain; §24 taints and labels | All four disabled with the reason. Note this grants cordon of **any** node, control-plane included — and that §24 needs no grant of its own, which is worth reading twice: the same verb that cordons a node writes a `NoExecute` taint, and that taint **deletes** the pods that do not tolerate it. Unlike drain it does not use `pods/eviction`, so no PodDisruptionBudget refuses it and `create ""/pods/eviction` below is no part of the permission. An account trusted to cordon is, on this API, already trusted to empty the machine |
 | `update certificates.k8s.io/certificatesigningrequests/approval` | §25 approving and denying | Both actions disabled with the reason, and the tab stays readable — which is the half worth keeping: what a request asks to become is a read |
 | `approve certificates.k8s.io/signers`, **named for the signerName** | §25, and the rule people miss | Without it the console's own preflight on the rule above **passes** and the API server refuses the write anyway: its `CertificateApproval` admission plugin checks this separately. §25 preflights it by name, so the denial says which signer rather than telling an operator they cannot approve certificates at all. `resourceNames` makes it per-signer, which is why §25 has no deployment switch of its own — a boolean would be a coarser copy of a control RBAC already expresses exactly. **The shipped role grants the two node-lifecycle signers and not `kubernetes.io/kube-apiserver-client`**: that is the signer a `system:masters` certificate comes through, and adding it is the most consequential line in this file |
@@ -290,7 +290,7 @@ these grants.
 | `create,update,patch apiextensions.k8s.io/customresourcedefinitions` | §33 installing Operator Lifecycle Manager — phase one of two | The portal's "OLM is not installed" panel reports the install as denied with the reason. The plan and its manifests stay readable — a pure render, no cluster touched — and §16 keeps working exactly as before on every cluster that already runs OLM. **No `delete`, deliberately.** Deleting a CRD deletes every custom resource made from it across every namespace with no second confirmation, so granting it here would put an "Uninstall OLM" button one refactor away from taking out every operator's Subscription and ClusterServiceVersion on the cluster. §33 installs and does not uninstall |
 | `create,update,patch operators.coreos.com/{olmconfigs,operatorgroups,catalogsources,clusterserviceversions}` | §33 phase two — OLM's own objects, which are instances of the CRDs above | The same degradation, and it lands mid-install rather than up front: phase one succeeds and phase two reports eighteen denials. These four are written **only** by §33; §16 reads them and writes none of them |
 | **(what makes §33 work at all)** `escalate` and `bind` from the §14 block | §33 creating OLM's ClusterRole, which grants `apiGroups: ['*']`, `resources: ['*']` with every verb including `escalate` and `bind` | **This is the row to read before enabling §33.** Without `escalate`, the preflight on `create clusterroles` answers *yes* and the API server then refuses at admission — Kubernetes will not let an identity create a role granting more than it holds, and no `SelfSubjectAccessReview` can see that coming. §33 rewrites the hint to name escalation prevention rather than sending somebody to grant a verb the review just confirmed. What the grant does not bound is the same point as the Subscription row above, one layer larger: what this creates is cluster-admin plus the ability to grant cluster-admin, held by OLM. It is inherent to OLM rather than chosen here, and that is an explanation, not a mitigation. Needs `ADMIN_OLM_INSTALL_ENABLED`, a deployment gate RBAC cannot express |
-| `create ""/pods` | §5.5 node debug pods, §15 CLI pods, and §4's create from the YAML editor | All three, together — RBAC cannot separate them. **This is the grant to think hardest about, and the one RBAC is worst at describing.** A `SelfSubjectAccessReview` has no field-level granularity: there is no verb for `hostPath`, `hostPID` or `privileged`, so `create pods` for an nginx pod is the same permission as `create pods` for one that mounts the node's root filesystem. PodSecurityPolicy used to gate that and was removed in 1.25; its replacement, Pod Security admission, is namespace-label-based. The controls that really apply are `ADMIN_NODE_DEBUG_ENABLED` (off by default) and the `pod-security.kubernetes.io/enforce` label on `ADMIN_NODE_DEBUG_NAMESPACE`. Withholding this rule disables node debug pods, CLI pods *and* object creation from the editor. §15 adds a second thing RBAC cannot express here: there is no verb covering which **ServiceAccount** a pod may bind, so this grant lets the console create a pod bound to an account more privileged than the console itself — and a shell in that pod then holds that account's permissions. `ADMIN_CLI_ENABLED` and `ADMIN_CLI_SERVICE_ACCOUNT` are the only controls over it, and neither lives in RBAC |
+| `create ""/pods` | §5.5 node debug pods, §15 CLI pods, and §4's create from the YAML editor | All three, together — RBAC cannot separate them. **This is the grant to think hardest about, and the one RBAC is worst at describing.** A `SelfSubjectAccessReview` has no field-level granularity: there is no verb for `hostPath`, `hostPID` or `privileged`, so `create pods` for an nginx pod is the same permission as `create pods` for one that mounts the node's root filesystem. PodSecurityPolicy used to gate that and was removed in 1.25; its replacement, Pod Security admission, is namespace-label-based. The controls that really apply are `ADMIN_NODE_DEBUG_ENABLED` (off by default) and the `pod-security.kubernetes.io/enforce` label on `ADMIN_NODE_DEBUG_NAMESPACE`. Withholding this rule disables node debug pods, CLI pods *and* object creation from the editor and from the `Create Pod…` button on the Pods listing. §15 adds a second thing RBAC cannot express here: there is no verb covering which **ServiceAccount** a pod may bind, so this grant lets the console create a pod bound to an account more privileged than the console itself — and a shell in that pod then holds that account's permissions. `ADMIN_CLI_ENABLED` and `ADMIN_CLI_SERVICE_ACCOUNT` are the only controls over it, and neither lives in RBAC |
 
 ### §20 — expanding a persistent volume claim
 
@@ -322,12 +322,43 @@ granted**, or hold `escalate`/`bind` on the role. That check is the API server's
 and is not preflighted: it is per-role and per-caller, and the refusal it
 produces arrives as `403 rbac_denied` naming the write.
 
+### §4 — creating an object from a listing
+
+Every listing in the console offers `Create <Kind>…` (rule 11.10), so the
+`create` verb is now asked about on **every resource the cluster serves**, not
+only the ones with a typed page. Nothing new is granted by that: the button is
+one preflight and one `POST` through the same funnel, and the shipped roles are
+unchanged. What changes is where a withheld grant becomes visible — a disabled
+button on the listing rather than a `403` after somebody pasted a manifest.
+
+| Permission | Feature | Withheld |
+|---|---|---|
+| `create ""/configmaps,secrets,serviceaccounts,services,persistentvolumeclaims,resourcequotas,limitranges` | The Create button on Configuration's, Storage's and Access's core tabs | Each button is disabled with the reason (§11.4) and its tab stays readable. Granted per resource, not per page: a console that may create ConfigMaps and not Secrets shows exactly that, one button at a time |
+| `create networking.k8s.io/ingresses,ingressclasses` | Network's Ingress and Ingress Class buttons | Disabled with the reason. §13's exposures already need the Ingress verb, which is the row above this section |
+| `create rbac.authorization.k8s.io/roles,rolebindings,clusterroles,clusterrolebindings` | The Access page's four Create buttons | Disabled with the reason. **Read this one before granting it**: `create rolebindings` lets whoever holds it bind anything this ServiceAccount holds, which is why §30 names the powers a binding confers on screen. The API server additionally refuses a role granting more than the caller holds — enforced at admission, invisible to a `SelfSubjectAccessReview`, and the same escalation-prevention refusal §14 rewrites the hint for |
+| `create apps/deployments,statefulsets,daemonsets,replicasets`, `create batch/jobs,cronjobs` | `Create Deployment…` and its five siblings on the Workloads page | Disabled with the reason; every read on that page is unaffected. These are **not** in the shipped writer role: it carries `patch` for scale, restart and rollback and no `create`, so a deployment that has never created a workload from the console keeps working exactly as before and the buttons say why |
+| `create` on any other group/resource, **including every CRD** | The Create button on Custom Resources, on the API explorer, and on any tab for a kind with no typed page | Disabled with the reason naming the exact group/resource. This is the expected steady state on the shipped roles — see the next section, which is now the section that explains most disabled Create buttons in the console |
+
+**Two refusals that are not this table.** A resource whose discovery `verbs` do
+not include `create` disables the button as `unsupported` — a fact about the API
+rather than about a grant, and widening a role does not change it. A console
+with `ADMIN_ALLOW_MUTATIONS=false` disables every Create button as
+`mutations_disabled`. Neither is `rbac_denied`, and printing this table's
+degradation for either sends an operator to edit a role that was already
+correct.
+
 ### The generic write is deliberately not granted
 
-§4 lets the resource browser *display* everything the cluster serves. The shipped
-writer role covers write only on the resources the console has typed pages for.
-Editing anything outside that set returns `403 rbac_denied` naming the exact
-verb/group/resource — a sentence an operator can act on.
+§4 lets the resource browser *display* everything the cluster serves, and every
+one of those listings now offers to create into it. The shipped writer role
+covers write only on the resources the console has typed pages for, so on an
+unmodified deployment **most Create buttons in the console are disabled, each
+naming the exact verb/group/resource it would need** — a sentence an operator
+can act on, and the honest picture of what this role grants. Creating or editing
+anything outside that set returns `403 rbac_denied` with the same sentence.
+
+That is the design, not a gap: a create affordance on every listing is a
+navigation decision and grants nothing. The permission boundary is this file.
 
 `deploy/rbac.yaml` carries a commented `apiGroups: ["*"] / resources: ["*"]`
 block for people who need the editor to reach everything. It is cluster-admin

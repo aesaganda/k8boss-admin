@@ -57,7 +57,7 @@ of [K8Boss](https://github.com/aesaganda/k8boss) and shares no code with it —
 | `backend/app/audit/` | Append-only, hash-chained trail: `record()`, `query()`, `verify()`, export | `docs/api-contract.md` §10 |
 | `backend/app/identity/` | Local password hashing, opaque sessions, LDAP search-and-bind, sign-in throttling, and four single sign-on providers behind one registry (`sso.py`) and one pair of routes: OIDC (`oidc.py`), a plain OAuth 2.0 server (`oauth.py`), the cluster's own OAuth server (`openshift.py`), and SAML 2.0 (`saml.py`) | `docs/api-contract.md` §12 |
 | `backend/tests/` | pytest on SQLite. The fake Kubernetes client **raises** on an unstubbed call | — |
-| `frontend/src/` | React 19 / Vite / PatternFly 6 SPA | `docs/api-contract.md` §11 |
+| `frontend/src/` | React 19 / Vite / PatternFly 6 SPA. `components/ImportYamlDialog.jsx` is the **one** create dialog behind every `Create <Kind>…` button and the masthead's `+`; `components/templates.js` holds the starters, and the skeleton for the kinds it ships none for | `docs/api-contract.md` §11 (§11.4, §11.9–§11.11) |
 | `deploy/` | Namespace, RBAC, Deployments, Services, Ingress, kustomization | `docs/rbac.md` |
 | `docs/` | Design docs and ADRs. **`api-contract.md` is normative** — where it and the code disagree, the code is the defect report | — |
 
@@ -219,6 +219,11 @@ establish who scaled the payments service to zero.
 `mutate()`** — plus a `FeatureGate` if it has a switch of its own. If that feels like it does not fit, the answer is almost never a
 second path — say so in your report instead.
 
+The inverse holds too: a **new place to click** is not a new write. The create
+button on every resource listing adds no `apply_fn`, no gate and no endpoint —
+it is §4's `POST` reached from more toolbars, and a create dialog that grew a
+backend of its own would be the second path this paragraph exists to refuse.
+
 ---
 
 ## The error vocabulary
@@ -239,7 +244,7 @@ detail cannot carry that and a 500 carries nothing.
 | `invalid` | 422 | Schema, admission or request validation |
 | `mutations_disabled` | 403 | The *deployment* is read-only. **Not** `rbac_denied` — the operator's permissions are irrelevant, and telling them otherwise sends them to fix the wrong system |
 | `impersonation_unavailable` | 403 | ADR-0007: the cluster acts as the signed-in operator and this session cannot supply a cluster identity. **Not `rbac_denied`** — the operator's permissions are what could not be *established*, and reporting a denial sends them to widen a ClusterRole that was already correct |
-| `unsupported` | 501 | The cluster does not serve that API. **Not an error in the UI** — no Ingress CRDs and no `metrics.k8s.io` are ordinary facts, and rendering them red trains people to ignore red |
+| `unsupported` | 501 | The cluster does not serve that API — **or serves the resource and not that verb** (discovery's `verbs` lack `create`; bindings cannot be deleted). **Not an error in the UI** — no Ingress CRDs, no `metrics.k8s.io` and a resource that cannot be created are ordinary facts, and rendering them red trains people to ignore red. It is never `rbac_denied` either: no grant changes it |
 | `upstream_error` | 502 | Anything else, including 401 (the cluster answered — it refused us) |
 
 `from_api_exception` maps by **HTTP status, not `Status.reason`**: the reason

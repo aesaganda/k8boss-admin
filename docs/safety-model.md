@@ -552,8 +552,9 @@ orthogonality rather than a count of switches, and this is orthogonal in exactly
 the way that section means: a deployment can want every other write and not this.
 Preflight still runs — the operator may lack `create pods` — but nobody should
 mistake it for the boundary. Withholding `create pods` from the console's
-ServiceAccount is the only RBAC answer, and it also removes the YAML editor's
-ability to create anything at all.
+ServiceAccount is the only RBAC answer, and it removes the console's ability to
+create a pod anywhere — the YAML editor, the masthead's `+`, and the
+`Create Pod…` button on the Pods listing alike.
 
 **The dry run is refused too, uniquely.** Everywhere else in this document a
 projection is a read and is permitted in read-only mode. Here the projection is a

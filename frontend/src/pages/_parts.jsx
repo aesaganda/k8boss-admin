@@ -51,6 +51,7 @@ import {
 } from '@patternfly/react-core';
 import SyncAltIcon from '@patternfly/react-icons/dist/esm/icons/sync-alt-icon';
 import {
+  ActionButton,
   AgeCell,
   CodeBlock,
   DataTable,
@@ -64,13 +65,25 @@ import {
   Toolbar,
 } from '../components/ui';
 import DebugPanel from '../components/DebugPanel';
+import ImportYamlDialog from '../components/ImportYamlDialog';
 import LogViewer from '../components/LogViewer';
 import MutationDialog from '../components/MutationDialog';
 import PodTerminal from '../components/PodTerminal';
 import YamlEditor from '../components/YamlEditor';
+import { templatesFor } from '../components/templates';
 import { realGroup, resources } from '../api/client';
+import { useCluster } from '../contexts/ClusterContext';
 import { useNamespace } from '../contexts/NamespaceContext';
-import { useAsync, useLiveYaml, useResourceList, entriesOf, objectAgeSeconds, objectName, objectNamespace } from './_data';
+import {
+  useAsync,
+  useGates,
+  useLiveYaml,
+  useResourceList,
+  entriesOf,
+  objectAgeSeconds,
+  objectName,
+  objectNamespace,
+} from './_data';
 
 /* ── Cluster scope ──────────────────────────────────────────────────────── */
 
@@ -111,7 +124,10 @@ function ClusterSettingsLink(props) {
 // would make this module and that one import each other, and a cycle across a
 // lazy chunk boundary is the class of mistake this repo builds for production
 // before it tests.
-export { ActionButton, menuAction } from '../components/ui';
+// `ActionButton` is also imported above, because `ResourceTabBody` renders one
+// itself: the create button every listing tab carries.
+export { menuAction } from '../components/ui';
+export { ActionButton };
 
 /* ── Small cells ────────────────────────────────────────────────────────── */
 
@@ -674,21 +690,57 @@ export function PodConsoleModal({ pod, initialTab = 'logs', execGate, debugGate,
  * Only the active tab fetches. Rendering all of them and hiding the inactive
  * ones issued five listings on mount — five chances to be denied, five banners,
  * and four of them describing a table nobody is looking at.
+ *
+ * Two reads are the page's rather than the tab's, and both are here because
+ * this is the only component that knows all the tabs. The §4 catalog answers
+ * the same thing for every one of them, so fetching it in the body would be a
+ * round trip per tab switch for an answer that does not change. The §9 create
+ * preflight is one batched call for every listing on the page rather than one
+ * per tab — which is what §9's batch endpoint is for, and what keeps switching
+ * tabs from being a permission check each time.
  */
-export function ResourceTabsPage({ title, subtitle, actions, tabs, initialTab }) {
+export function ResourceTabsPage({ title, subtitle, tabs, initialTab }) {
   const [activeKey, setActiveKey] = useState(initialTab ?? tabs[0]?.key);
   const active = tabs.find((tab) => tab.key === activeKey) ?? tabs[0];
+  const { activeClusterId } = useCluster();
+  const { selected: namespace } = useNamespace();
 
-  // `actions` may be a function of the active tab. A page-level button that is
-  // only meaningful on one listing — "New network policy" while the operator is
-  // reading Services — is not harmless clutter: it is an action whose target the
-  // header does not name, and the obvious guess about what it applies to is the
-  // tab in front of them.
-  const headerActions = typeof actions === 'function' ? actions(active?.key) : actions;
+  // Read once for the page rather than once per tab body. `useAsync` holds no
+  // cross-component cache — its `key` decides when to blank the previous answer,
+  // nothing more — so a catalog fetched inside `ResourceTabBody` would be a
+  // fresh round trip on every tab switch and every `refreshToken` bump, for an
+  // answer that is the same each time. Keyed by cluster because the answer is
+  // about that cluster: `Layout` already remounts this subtree when it changes,
+  // and depending on that rather than saying so is how the dependency gets lost
+  // in the next refactor.
+  const catalog = useAsync(() => resources.catalog(), {
+    key: `catalog:${activeClusterId}`,
+    enabled: activeClusterId != null,
+  });
+
+  // One batched §9 preflight for every listing on the page, asked here because
+  // only this component knows all the tabs — the body knows one. The namespace
+  // is the masthead's, not absent: a check with no namespace asks whether the
+  // caller may create the resource *anywhere*, and an operator holding a grant
+  // in one namespace would be told they cannot do something they can.
+  const createChecks = useMemo(
+    () =>
+      tabs
+        .filter((tab) => !tab.render && tab.plural)
+        .map((tab) => ({
+          id: `create:${tab.key}`,
+          verb: 'create',
+          group: tab.group,
+          resource: tab.plural,
+          namespace: tab.namespaced ? namespace : null,
+        })),
+    [tabs, namespace],
+  );
+  const { gate: createGate } = useGates(createChecks, { enabled: activeClusterId != null });
 
   return (
     <>
-      <PageHeader title={title} subtitle={subtitle} actions={headerActions} />
+      <PageHeader title={title} subtitle={subtitle} />
       <Tabs
         activeKey={active?.key}
         onSelect={(_event, key) => setActiveKey(key)}
@@ -707,8 +759,12 @@ export function ResourceTabsPage({ title, subtitle, actions, tabs, initialTab })
           // A tab whose rows are not a §4 listing renders itself. The escape
           // hatch is narrow on purpose: everything that *is* a listing goes
           // through `ResourceTabBody`, which is where the partial banner, the
-          // truncation footer and the namespace-column rule live — three things
-          // a hand-rolled tab would have to remember and would eventually not.
+          // truncation footer, the namespace-column rule and the create button
+          // live — four things a hand-rolled tab would have to remember and
+          // would eventually not. It is also why the two tabs that are not
+          // listings — Pod Isolation, Access review — get no create button
+          // without anybody having to exclude them: they have no resource to
+          // create one of.
           <CustomTabBody key={active.key} render={active.render} />
         ) : (
           // `refreshToken` is part of the key so a page that has just written to
@@ -717,7 +773,12 @@ export function ResourceTabsPage({ title, subtitle, actions, tabs, initialTab })
           // page-level button has no row and therefore no listing to call
           // `reload` on, and a table still showing the object somebody just
           // deleted is the moment a console stops being believed.
-          <ResourceTabBody key={`${active.key}:${active.refreshToken ?? ''}`} tab={active} />
+          <ResourceTabBody
+            key={`${active.key}:${active.refreshToken ?? ''}`}
+            tab={active}
+            catalog={catalog}
+            createGate={createGate}
+          />
         ))}
     </>
   );
@@ -729,40 +790,84 @@ function CustomTabBody({ render }) {
 }
 
 /**
- * The version a `resolveVersion` tab actually reads. Gateway API's kinds
- * still move between release channels on a live cluster (`ReferenceGrant` at
- * `v1beta1`, `BackendTLSPolicy` at `v1alpha2`/`v1alpha3` depending on which CRD
- * bundle is installed) — `resolve()` on the backend matches a version exactly,
- * so a tab that pinned one the way every other tab in this console does would
- * 501 on any cluster running a different channel than the one this code was
- * written against. Looked up from the same catalog the API explorer already
- * fetches (`GET /resources/catalog`), preferring the version the cluster marks
- * `preferred`. Until the catalog answers — or if this group/plural isn't in it
- * at all — this falls back to the tab's own hardcoded guess, so the first
- * request Phase 0 already renders calmly as "not present" if that guess is
- * wrong, rather than waiting on a second round trip before showing anything.
+ * The catalog entry behind one tab: its `kind`, its `apiVersion`, the verbs the
+ * API advertises for it, and — for the tabs that ask — the version it is
+ * actually served at.
+ *
+ * The version half is why this started existing. Gateway API's kinds still move
+ * between release channels on a live cluster (`ReferenceGrant` at `v1beta1`,
+ * `BackendTLSPolicy` at `v1alpha2`/`v1alpha3` depending on which CRD bundle is
+ * installed) — `resolve()` on the backend matches a version exactly, so a tab
+ * that pinned one the way every other tab in this console does would 501 on any
+ * cluster running a different channel than the one this code was written
+ * against. A `resolveVersion` tab therefore takes the version the cluster marks
+ * `preferred`; every other tab keeps the one it pinned, and its entry is looked
+ * up at that exact version, so a tab pinned to an API this cluster does not
+ * serve finds nothing rather than quietly binding to a different version of it.
+ *
+ * The rest is what a create button needs. **`kind` is read from discovery and
+ * never derived from the tab's title.** `genericTab` already does
+ * `title.replace(/s$/, '')` for its drawer heading, and on the tabs that matter
+ * it produces "Endpoint Slice", "Network Policie" and "HPA" — none of which is
+ * a kind. A button offering to create a kind that does not exist is the defect
+ * standard with a click target on it; discovery is the only thing here that
+ * knows the answer.
  */
-function useResolvedVersion(tab) {
-  const enabled = Boolean(tab.resolveVersion);
-  const catalog = useAsync(() => resources.catalog(), { key: 'catalog', enabled });
-  const entry = useMemo(() => {
-    if (!enabled || !catalog.data?.items) return null;
+function useCatalogEntry(tab, catalog) {
+  return useMemo(() => {
+    const items = catalog?.data?.items;
+    if (!items) return null;
     const real = realGroup(tab.group);
-    const matches = catalog.data.items.filter(
-      (item) => realGroup(item.group) === real && item.resource === tab.plural,
-    );
-    return matches.find((item) => item.preferred) ?? matches[0] ?? null;
-  }, [enabled, catalog.data, tab.group, tab.plural]);
-  return entry?.version || tab.version;
+    const matches = items.filter((item) => realGroup(item.group) === real && item.resource === tab.plural);
+    if (tab.resolveVersion) return matches.find((item) => item.preferred) ?? matches[0] ?? null;
+    return matches.find((item) => item.version === tab.version) ?? null;
+  }, [catalog?.data, tab.group, tab.plural, tab.version, tab.resolveVersion]);
 }
 
-function ResourceTabBody({ tab }) {
+/**
+ * Why this listing cannot be created into, as a property of the **API** rather
+ * than of the caller — or `null` when it can.
+ *
+ * Asked before the permission gate and never merged into it. "This cluster does
+ * not serve a create for this resource" and "you may not create one" send an
+ * operator to two different places, and answering the first with the second
+ * sends them to widen a ClusterRole that was already correct. The same order
+ * `capabilityGate` uses for workload actions, for the same reason.
+ *
+ * "We have not looked yet" is a third answer and stays one. A catalog still in
+ * flight is not a cluster without the resource.
+ */
+function createCapability(tab, catalog, entry, version) {
+  if (catalog?.error) {
+    return (
+      `The API catalog could not be read (${catalog.error.message}), so whether this cluster serves a ` +
+      'create for this resource is not something this console can say.'
+    );
+  }
+  if (!catalog?.data) {
+    return 'Discovery has not answered yet, so whether one of these can be created is still unknown.';
+  }
+  if (!entry) {
+    return `This cluster does not serve ${tab.plural} in ${realGroup(tab.group) || 'core'}/${version}.`;
+  }
+  if (!(entry.verbs ?? []).includes('create')) {
+    return (
+      `Discovery reports the verbs ${(entry.verbs ?? []).join(', ') || '(none)'} for this resource, and ` +
+      '"create" is not among them. This is a property of the API, not a permission problem.'
+    );
+  }
+  return null;
+}
+
+function ResourceTabBody({ tab, catalog, createGate }) {
   const { selected } = useNamespace();
   const namespace = tab.namespaced ? selected : null;
   const [search, setSearch] = useState('');
   const [detailRow, setDetailRow] = useState(null);
+  const [creating, setCreating] = useState(false);
 
-  const version = useResolvedVersion(tab);
+  const entry = useCatalogEntry(tab, catalog);
+  const version = (tab.resolveVersion && entry?.version) || tab.version;
   const listing = useResourceList(tab.group, version, tab.plural, {
     namespace,
     shape: tab.shape,
@@ -780,6 +885,15 @@ function ResourceTabBody({ tab }) {
   );
 
   const onRowClick = tab.detail ? (row) => setDetailRow(row) : tab.onRowClick;
+
+  // The kind the button offers to create. Never guessed from the title: until
+  // discovery answers, the button says "Create…" and the gate says why, which
+  // is the honest version of not knowing yet.
+  const kind = entry?.kind ?? null;
+  const capability = createCapability(tab, catalog, entry, version);
+  const createAllowed = capability
+    ? { allowed: false, reason: capability }
+    : createGate(`create:${tab.key}`);
 
   const table = (
     <>
@@ -800,6 +914,22 @@ function ResourceTabBody({ tab }) {
           </Muted>
         </Toolbar.Item>
         <Toolbar.Spacer />
+        <Toolbar.Item>
+          <ActionButton
+            variant="primary"
+            gate={createAllowed}
+            onClick={() => setCreating(true)}
+            // Labelled only when the visible text does not name what it makes.
+            // An `aria-label` replaces the text for anything reading the
+            // accessible name, so one repeating it would just be a second copy
+            // to keep in step — and one differing from it is the "label in
+            // name" failure, where the words on screen are not the words a
+            // voice control can say.
+            ariaLabel={kind ? undefined : `Create a ${tab.title.toLowerCase()} object`}
+          >
+            {kind ? `Create ${kind}…` : 'Create…'}
+          </ActionButton>
+        </Toolbar.Item>
         <Toolbar.Item>
           <Button variant="plain" aria-label={`Refresh ${tab.title}`} icon={<SyncAltIcon />} onClick={listing.reload} />
         </Toolbar.Item>
@@ -830,9 +960,7 @@ function ResourceTabBody({ tab }) {
     </>
   );
 
-  if (!tab.detail) return table;
-
-  const panel = (
+  const panel = tab.detail ? (
     <DrawerPanelContent widths={{ default: 'width_50' }} isResizable>
       <DrawerHead>
         <Title headingLevel="h2" size="lg">
@@ -846,14 +974,38 @@ function ResourceTabBody({ tab }) {
         {detailRow && tab.detail(detailRow, { close, namespace, reload: listing.reload, version })}
       </DrawerPanelBody>
     </DrawerPanelContent>
-  );
+  ) : null;
 
   return (
-    <Drawer isExpanded={Boolean(detailRow)} onExpand={() => {}} isInline>
-      <DrawerContent panelContent={panel}>
-        <DrawerContentBody>{table}</DrawerContentBody>
-      </DrawerContent>
-    </Drawer>
+    <>
+      {tab.detail ? (
+        <Drawer isExpanded={Boolean(detailRow)} onExpand={() => {}} isInline>
+          <DrawerContent panelContent={panel}>
+            <DrawerContentBody>{table}</DrawerContentBody>
+          </DrawerContent>
+        </Drawer>
+      ) : (
+        table
+      )}
+
+      {/* `listing.reload` rather than the page's `refreshToken`: the button is
+          inside the component that owns the listing, so the remount that token
+          exists to force is not needed — and a remount would throw away the
+          search text, the open drawer and every `continue` page the operator
+          loaded, to show one new row that is on the first page anyway. */}
+      {creating && (
+        <ImportYamlDialog
+          isOpen
+          title={`Create ${kind}`}
+          templates={templatesFor(entry)}
+          onClose={() => setCreating(false)}
+          onApplied={() => {
+            setCreating(false);
+            listing.reload();
+          }}
+        />
+      )}
+    </>
   );
 }
 

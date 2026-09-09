@@ -18,6 +18,15 @@
  * able to tell "this cluster does not have cert-manager" from "cert-manager's
  * APIService is down and we could not enumerate it".
  *
+ * The create button in a listing's toolbar is the same one every tabbed page
+ * carries (rule 11.10), reached here for a resource nobody wrote a page for. It
+ * asks discovery first and the caller second — a CRD whose `verbs` do not
+ * include `create` is a property of that API, and reporting it as a permission
+ * problem would send somebody to widen a ClusterRole that was already correct —
+ * and it seeds the dialog with whatever starter this console has for the kind,
+ * which for most CRDs is the labelled skeleton and not a guess at somebody
+ * else's schema.
+ *
  * Listings here ask for `shape: raw` deliberately. The generic endpoint returns
  * a typed §8 row where one is defined and a trimmed manifest otherwise; a table
  * that had to cope with both would read `row.name ?? row.metadata.name` in every
@@ -49,6 +58,8 @@ import {
   Toolbar,
 } from '../components/ui';
 import DeleteDialog from '../components/DeleteDialog';
+import ImportYamlDialog from '../components/ImportYamlDialog';
+import { templatesFor } from '../components/templates';
 import { realGroup, resources as resourcesApi, wireGroup } from '../api/client';
 import { useCluster } from '../contexts/ClusterContext';
 import { useNamespace } from '../contexts/NamespaceContext';
@@ -207,6 +218,7 @@ export function Listing({ group, version, plural, catalog, initialName, initialN
   );
   const [editTarget, setEditTarget] = useState(null);
   const [deleteTarget, setDeleteTarget] = useState(null);
+  const [creating, setCreating] = useState(false);
 
   const real = realGroup(group);
   const entry = (catalog.data?.items ?? []).find(
@@ -227,12 +239,31 @@ export function Listing({ group, version, plural, catalog, initialName, initialN
 
   const checks = useMemo(
     () => [
+      { id: 'create', verb: 'create', group, resource: plural, namespace },
       { id: 'update', verb: 'update', group, resource: plural, namespace },
       { id: 'delete', verb: 'delete', group, resource: plural, namespace },
     ],
     [group, plural, namespace],
   );
   const { gate } = useGates(checks);
+
+  // Capability before permission, the same order `ResourceTabBody` uses: an API
+  // that does not serve a create and an operator who may not perform one send
+  // somebody to two different places, and answering the first with the second
+  // sends them to widen a ClusterRole that was already correct. "Discovery has
+  // not answered" stays a third state rather than being read as either.
+  const createGate = !catalog.data
+    ? { allowed: false, reason: 'Discovery has not answered yet, so whether one of these can be created is still unknown.' }
+    : !entry
+      ? { allowed: false, reason: `This cluster does not serve ${plural} in ${real || 'core'}/${version}.` }
+      : !(entry.verbs ?? []).includes('create')
+        ? {
+            allowed: false,
+            reason:
+              `Discovery reports the verbs ${(entry.verbs ?? []).join(', ') || '(none)'} for this resource, ` +
+              'and "create" is not among them. This is a property of the API, not a permission problem.',
+          }
+        : gate('create');
 
   if (catalog.data && !entry) {
     return (
@@ -331,6 +362,16 @@ export function Listing({ group, version, plural, catalog, initialName, initialN
         </Toolbar.Item>
         <Toolbar.Spacer />
         <Toolbar.Item>
+          <ActionButton
+            variant="primary"
+            gate={createGate}
+            onClick={() => setCreating(true)}
+            ariaLabel={entry?.kind ? undefined : `Create a ${plural} object`}
+          >
+            {entry?.kind ? `Create ${entry.kind}…` : 'Create…'}
+          </ActionButton>
+        </Toolbar.Item>
+        <Toolbar.Item>
           <Button variant="plain" aria-label="Refresh" icon={<SyncAltIcon />} onClick={listing.reload} />
         </Toolbar.Item>
       </Toolbar>
@@ -376,6 +417,19 @@ export function Listing({ group, version, plural, catalog, initialName, initialN
           <DrawerContentBody>{table}</DrawerContentBody>
         </DrawerContent>
       </Drawer>
+
+      {creating && (
+        <ImportYamlDialog
+          isOpen
+          title={`Create ${entry?.kind}`}
+          templates={templatesFor(entry)}
+          onClose={() => setCreating(false)}
+          onApplied={() => {
+            setCreating(false);
+            listing.reload();
+          }}
+        />
+      )}
 
       {editTarget && (
         <EditYamlDialog
