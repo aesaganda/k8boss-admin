@@ -21,7 +21,6 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import yaml from 'js-yaml';
 import {
   Alert,
   Button,
@@ -66,6 +65,7 @@ import {
 } from '../components/ui';
 import DebugPanel from '../components/DebugPanel';
 import ImportYamlDialog from '../components/ImportYamlDialog';
+import { load } from '../components/clusterYaml';
 import LogViewer from '../components/LogViewer';
 import MutationDialog from '../components/MutationDialog';
 import PodTerminal from '../components/PodTerminal';
@@ -505,7 +505,7 @@ export function EditYamlDialog({ isOpen, group, version, plural, name, namespace
   const resourceVersion = useMemo(() => {
     if (!base) return null;
     try {
-      return yaml.load(base)?.metadata?.resourceVersion ?? null;
+      return load(base)?.metadata?.resourceVersion ?? null;
     } catch {
       // Unparseable YAML from our own backend is a defect, but it must not stop
       // the operator seeing it: PUT without a resourceVersion is refused by the

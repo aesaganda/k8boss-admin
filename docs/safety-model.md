@@ -204,37 +204,50 @@ be unreachable.
 change" instead of a confirm button. A no-op write that reports success is a
 small lie that teaches people the console's success messages are decorative.
 
-### 4.1 The diff is honest, and it is not the only thing reading the document
+### 4.1 One reading of the document, and it is the one that gets sent
 
-The console parses every submitted manifest **twice, with two parsers that do
-not agree**. The browser uses js-yaml, which is YAML 1.2. `parse_document` uses
-PyYAML, which is YAML 1.1. For a handful of unquoted scalars those differ:
+The console used to parse every submitted manifest **twice, with two parsers
+that did not agree**. The browser used js-yaml, which is YAML 1.2.
+`parse_document` uses PyYAML, which is YAML 1.1. For a handful of unquoted
+scalars those differ, and the two readings went to two different places:
 
 ```
-  enabled: off      browser: the text "off"     API server: the boolean false
-  version: 010      browser: the number 10      API server: the number 8
-  port: 8:30        browser: the text "8:30"    API server: the number 510
-  limit: 1_000      browser: the text "1_000"   API server: the number 1000
+  enabled: off      YAML 1.2: the text "off"     sent: the boolean false
+  mode: 0755        YAML 1.2: the number 755     sent: the number 493
+  port: 8:30        YAML 1.2: the text "8:30"    sent: the number 510
+  limit: 1_000      YAML 1.2: the text "1_000"   sent: the number 1000
 ```
 
-**The diff is not what this endangers, and saying otherwise would overstate
+**The diff was never what this endangered, and saying otherwise would overstate
 it.** `diff.after` is the API server's own projection of what it was actually
-sent, so the operator confirming a diff is confirming the truth. What is built
+sent, so the operator confirming a diff was confirming the truth. What was built
 on the *browser's* reading is everything local: the form view's controls are
 lenses onto it, §11.9's list of fields the form is not showing is computed from
 it, and so is every document-only check beside them — including the one written
 for precisely this class of mistake, *"a label value that parsed as a number or
-a boolean is the one mistake YAML makes on the operator's behalf"*, which cannot
-see `version: yes` because to js-yaml that is an ordinary string.
+a boolean is the one mistake YAML makes on the operator's behalf"*, which could
+not see `version: yes` because to js-yaml that is an ordinary string.
 
-So the console reports it, by path, with both readings, before any of that: a
-warning in the editor and in the form view, which **never blocks**. The document
-is legal YAML whichever parser reads it, and §3's dry run remains the authority
+**ADR-0009 made it one reading, and the one that survived is PyYAML's** — not
+because YAML 1.1 is better, but because it is what was already on the wire, so
+adopting it changed what no manifest means. Adopting the other would have turned
+`defaultMode: 0755` from 493 into 755 on every manifest this console had ever
+accepted, silently, and away from what `kubectl` sends for the same line. The
+browser now reads *and re-serialises* through a schema mirroring PyYAML's scalar
+resolvers, so a form control, a list of unrepresented fields and a local check
+all describe the object that is about to be written.
+
+**The warning stayed, and it is now about the document.** `off` is `false` to
+this console, to `kubectl` and to YAML 1.1, and the text `"off"` to the YAML 1.2
+specification and to the operator's editor. Which of those is right is not this
+console's to settle; which one it will send is, and that is what the editor and
+the form view report, by path, as a warning that **never blocks**. The document
+is legal YAML whichever version reads it, and §3's dry run remains the authority
 on whether the cluster wants it. What an operator gets is the chance to quote a
 scalar while quoting it is still free.
 
-*Why a second parse rather than a pattern over the text.* A pattern cannot tell
-a plain `off` from an `off` inside a `|` block, from a quoted `"off"`, from a
+*Why a parse rather than a pattern over the text.* A pattern cannot tell a plain
+`off` from an `off` inside a `|` block, from a quoted `"off"`, from a
 continuation line of a multi-line scalar — and a console that warned about the
 contents of a ConfigMap holding an nginx config would be teaching operators to
 dismiss the warning on the day it was right. Both readings therefore come from a
@@ -242,11 +255,19 @@ parser. The only thing transcribed across the language boundary is PyYAML's
 three scalar resolvers, and both halves of that transcription are held to the
 real parsers, from both sides, over one shared corpus —
 `backend/tests/data/yaml_scalar_corpus.json`. A PyYAML release that moves one of
-those resolvers fails a test rather than quietly making the warning wrong.
+those resolvers fails a test rather than quietly restoring the two-reading bug.
 
-**The deeper fix is not this one.** Making the two parsers agree means changing
-what every manifest this console has ever accepted *means*, which is a decision
-with an ADR behind it and not a warning. This says what is true today.
+**What is still not fixed is stated rather than left to be found.** Nine scalars
+in that corpus reach a cluster differently from this console than from
+`kubectl` — `y`, `n`, `8:30`, `1.0e3` and five others — and two of them the
+warning cannot see, because both parsers here agree about them and the
+disagreement is with a third. ADR-0009 lists all nine with the measurements
+behind them.
+
+**One reading can still produce a value that cannot be sent.** `.inf`, `-.Inf`
+and `.nan` are YAML numbers with no JSON spelling, and `parse_document` refuses
+them by path rather than letting the API server reject the body with a syntax
+error at a character offset.
 
 ---
 

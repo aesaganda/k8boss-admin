@@ -71,7 +71,7 @@
  * makes a form possible enables the control and does not press it.
  *
  * **Re-serialising rewrites the text, and that is said before it happens.** A
- * form edit writes `yaml.dump` of the parsed object, and three things live in
+ * form edit writes `toYaml` of the parsed object, and three things live in
  * the text rather than in the object: comments, which no parse carries; anchors
  * and merge keys, which a parse resolves. The first is lost and the other two
  * are expanded — different enough to be reported differently — and both are on
@@ -83,7 +83,7 @@ import { Alert, Button, Radio, Tooltip } from '@patternfly/react-core';
 import MutationDialog from './MutationDialog';
 import ObjectForm from './ObjectForm';
 import YamlEditor, { validateYaml } from './YamlEditor';
-import { divergenceNote } from './yamlDivergence';
+import { divergenceNote, toYaml } from './clusterYaml';
 import {
   FORM_MODELS,
   containsCycle,
@@ -91,7 +91,6 @@ import {
   formatPath,
   localIssues,
   rewriteLosses,
-  toYaml,
   unrepresented,
 } from './objectForm';
 import { PartialBanner } from './ui';
