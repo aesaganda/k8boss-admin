@@ -132,11 +132,24 @@ spec:
 // the kind of code nobody can eyeball-verify. Six literals are more lines and
 // zero risk of a template that silently reindents itself wrong.
 //
-// The Job and CronJob starters carry the same server, and a server does not
-// exit: run one unedited and the Job stays incomplete until it is deleted.
-// That was equally true of `pause` and is not what a Job is for — the image
-// and a `command` are the two lines to replace, which is the whole reason the
-// dialog seeds an editor rather than a form.
+// The Job and CronJob starters override the image's own command, because a Job
+// is defined by finishing and the image these starters share is a server. Left
+// to its entrypoint, NGINX runs until something kills it: the Job never reaches
+// Complete, its pod is never garbage collected, and a CronJob doing that every
+// five minutes accumulates pods until the namespace's quota refuses the next
+// one. `sh -c echo` exits 0, which is the whole of what completion is — and it
+// is the line to replace with the actual work, not the line to keep.
+//
+// They keep the same image rather than reaching for a smaller one. It is the
+// only image already established here as non-root by *numeric* UID, which is
+// what the restricted profile above needs, and it carries a shell. A second
+// image would mean making that argument twice, and `busybox` or `alpine` — the
+// obvious small choices — would fail it: both run as root and would be admitted
+// and then refused by the kubelet, exactly as the header describes.
+//
+// They also drop the `containerPort: 8080` the long-running starters carry. It
+// documents where NGINX listens, and nothing listens here; a port declared by a
+// container that exits is a field an operator could write a Service against.
 export const WORKLOAD_TEMPLATES = {
   deployments: `apiVersion: apps/v1
 kind: Deployment
@@ -282,8 +295,10 @@ spec:
       containers:
         - name: example
           image: docker.io/nginxinc/nginx-unprivileged:1.30-alpine
-          ports:
-            - containerPort: 8080
+          command:
+            - /bin/sh
+            - -c
+            - echo "example ran at $(date -u)"
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
@@ -313,8 +328,10 @@ spec:
           containers:
             - name: example
               image: docker.io/nginxinc/nginx-unprivileged:1.30-alpine
-              ports:
-                - containerPort: 8080
+              command:
+                - /bin/sh
+                - -c
+                - echo "example ran at $(date -u)"
               securityContext:
                 allowPrivilegeEscalation: false
                 capabilities:
@@ -398,22 +415,24 @@ starters('apps/v1', 'ReplicaSet', [
 
 starters('batch/v1', 'Job', [
   {
-    id: 'server',
+    id: 'one-run',
     label: 'One run',
     description:
-      'A single run to completion. The image below is a server and a server does not exit, so this Job ' +
-      'stays incomplete until it is deleted — the image and a command are the two lines to replace.',
+      'A single run to completion: the container exits 0 and the Job reports Complete. The command below ' +
+      'overrides the image’s own, which would otherwise run a server and never finish — it is the line ' +
+      'to replace with the work. A non-zero exit is a failed run, retried up to spec.backoffLimit.',
     text: WORKLOAD_TEMPLATES.jobs,
   },
 ]);
 
 starters('batch/v1', 'CronJob', [
   {
-    id: 'server',
+    id: 'scheduled-run',
     label: 'On a schedule',
     description:
       'A Job created on a schedule, in the cluster’s own timezone unless spec.timeZone says otherwise. ' +
-      'The same caveat as a Job: the starter image is a server and will not exit on its own.',
+      'Each run exits 0 and completes, which is what keeps finished pods from accumulating every five ' +
+      'minutes; the schedule and the command are the two lines to replace.',
     text: WORKLOAD_TEMPLATES.cronjobs,
   },
 ]);
