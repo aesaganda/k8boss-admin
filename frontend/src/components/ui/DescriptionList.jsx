@@ -52,6 +52,20 @@ export function DescriptionList({ items = [], columns = 1, isHorizontal = true, 
   return (
     <PFDescriptionList
       isHorizontal={isHorizontal}
+      // PatternFly pins the horizontal term column at a flat 12ch, and a term
+      // longer than that is broken mid-word by its own `overflow-wrap`:
+      // "CustomResourceDefinitions" rendered as "CustomResourc / eDefinitions"
+      // on the OLM panel. `isFluid` is PatternFly's own modifier for this — the
+      // column sizes to the longest term instead of a fixed width. Set here
+      // rather than at one call site: every panel in this console labels its
+      // rows with Kubernetes kind names, and most are longer than twelve
+      // characters.
+      isFluid={isHorizontal}
+      // `isFluid` caps at 20ch, which lands one character short of
+      // "CustomResourceDefinitions" — the longest term the console renders, and
+      // the one that motivated this. 26ch fits it with room for the next kind
+      // name; it is a cap, not a width, so shorter terms still shrink to fit.
+      termWidth={isHorizontal ? 'fit-content(26ch)' : undefined}
       isCompact={isCompact}
       columnModifier={columns > 1 ? { default: `${columns}Col` } : undefined}
       className={className}
