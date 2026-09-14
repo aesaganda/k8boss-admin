@@ -353,11 +353,18 @@ chunk-splitting mistake is invisible in dev and caught there.
 
 ## What CI gates
 
-`.github/workflows/ci.yml`, three jobs, all required, none needing a cluster:
+`.github/workflows/ci.yml`, four jobs, all required, none needing a cluster:
 
 * **backend** — `pytest` on SQLite.
 * **frontend** — `npm ci`, `npm run build`, `npm run lint`.
 * **e2e** — Playwright against the production build, every `/api/**` mocked.
+* **image** — builds `backend/Dockerfile` and asserts §33's vendored OLM release
+  is inside the result and loads, then that the container reaches its own
+  `healthy`. The other three all pass on an image that cannot serve §33, because
+  none of them builds one: `deploy/olm` is a sibling of `backend/`, so a build
+  context of `./backend` omitted it in silence and only a deployed container
+  ever said so — `GET /api/portal/olm`, 500, `FileNotFoundError`. **Packaging is
+  a thing that can be wrong, so it is a thing that gets built here.**
 
 **Lint is NOT `continue-on-error`, and that is a decision.** K8Boss runs its
 frontend lint advisory, and real errors accumulated behind a green check because
