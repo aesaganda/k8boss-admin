@@ -85,7 +85,15 @@ EXPOSE 8020
 # cluster appears in `degraded[]` and leaves `status` at 200. Probing anything
 # that touches a cluster here would restart a healthy pod because someone else's
 # API server went down.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD python -c "import httpx,sys; sys.exit(0 if httpx.get('http://127.0.0.1:8020/api/health', timeout=4).status_code==200 else 1)"
+# Timings sized for a loaded host, not an idle one. The probe spawns a cold
+# interpreter and imports httpx before it makes a request, which is tens of
+# milliseconds on an idle machine and seconds on a busy one — and a deployment
+# running the `autoheal` sidecar (see docker-compose.yml) restarts whatever
+# Docker marks unhealthy. At timeout=5s that turned a load spike into a restart
+# of a console that was answering every request, and every restart made the next
+# probe more likely to time out. The generous start_period covers the same thing
+# during boot, where failing probes do not count against the retries at all.
+HEALTHCHECK --interval=30s --timeout=15s --start-period=45s --retries=3 \
+  CMD python -c "import httpx,sys; sys.exit(0 if httpx.get('http://127.0.0.1:8020/api/health', timeout=10).status_code==200 else 1)"
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8020", "--log-level", "info"]
