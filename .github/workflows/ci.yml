@@ -1,6 +1,6 @@
 # k8boss-admin CI.
 #
-# Three jobs, all of which must pass, and none of which needs a Kubernetes
+# Four jobs, all of which must pass, and none of which needs a Kubernetes
 # cluster. That is deliberate: a gate that depends on a live cluster is a gate
 # that is red for reasons unrelated to the change, and a gate people learn to
 # ignore is not a gate.
@@ -11,6 +11,11 @@
 #             which is what makes "empty is never blind" testable at all.
 #   frontend  npm ci, build, lint.
 #   e2e       Playwright against the production build, every /api/** intercepted.
+#   image     Builds backend/Dockerfile and asserts the vendored OLM release is
+#             inside the result and loads. The three jobs above all pass on an
+#             image that cannot serve §33, because none of them builds one:
+#             `deploy/olm` sits outside a `./backend` build context, so it was
+#             omitted silently and only a deployed container ever said so.
 #
 # Dev runs SQLite and a production deployment runs PostgreSQL, and this workflow
 # only ever exercises SQLite. Anything engine-divergent — a raw SQL fragment, a
@@ -143,3 +148,59 @@ jobs:
           name: playwright-report
           path: frontend/playwright-report/
           retention-days: 7
+
+  image:
+    name: Backend image (packaging)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the backend image
+        # From the repository ROOT, which is the whole point of this job. The
+        # image needs `deploy/olm` — §33's vendored Operator Lifecycle Manager
+        # release, read at run time and pinned by SHA-256 — and that directory is
+        # a sibling of `backend/`, so a build context of `./backend` cannot see
+        # it. Built that way the files were silently absent: nothing failed,
+        # `docker build` was green, the suites below were green, and
+        # `GET /api/portal/olm` answered 500 with a FileNotFoundError for
+        # `/deploy/olm/crds.yaml` on every deployment of that image.
+        run: docker build -f backend/Dockerfile -t k8boss-admin-backend:ci .
+
+      - name: The vendored OLM release is in the image, and it is upstream's
+        # Not `ls`. `crd_names()` reads both manifests, checks each against the
+        # SHA-256 pinned in `olm_bundle.FILE_DIGESTS`, and parses them through the
+        # console's one YAML reading — so this asserts the bundle is present,
+        # unaltered and loadable in one call, which is exactly what the endpoint
+        # needs of it. The counts are the shape §33 promises: eight
+        # CustomResourceDefinitions, twenty-six objects in two phases.
+        run: |
+          docker run --rm k8boss-admin-backend:ci /opt/venv/bin/python -c "
+          from app.admin import olm_bundle as bundle
+          directory = bundle._manifest_dir()
+          crds, objects = bundle.crd_names(), bundle.build()
+          print(f'{directory}: {len(crds)} CRDs, {len(objects)} objects')
+          assert len(crds) == 8, crds
+          assert len(objects) == 26, len(objects)
+          "
+
+      - name: The application starts and answers its own health check
+        # The image's HEALTHCHECK is what `autoheal` acts on in a compose
+        # deployment, and nothing else in this workflow runs the application as
+        # it is actually shipped — wrong CMD, missing runtime dependency, a
+        # module that imports cleanly on a laptop and not under the container's
+        # interpreter. `--health-start-period` mirrors the Dockerfile so a slow
+        # runner is not read as a failure.
+        run: |
+          docker run -d --name backend-ci k8boss-admin-backend:ci
+          for _ in $(seq 1 30); do
+            state=$(docker inspect -f '{{.State.Health.Status}}' backend-ci)
+            [ "$state" = healthy ] && break
+            [ "$state" = unhealthy ] && break
+            sleep 5
+          done
+          docker logs backend-ci
+          test "$(docker inspect -f '{{.State.Health.Status}}' backend-ci)" = healthy
+
+      - name: Stop the container
+        if: always()
+        run: docker rm -f backend-ci || true
