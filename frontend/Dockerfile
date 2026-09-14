@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # k8boss-admin frontend: Vite build, nginx runtime.
 #
 # ── Stage 1: build ───────────────────────────────────────────────────────────
@@ -15,7 +16,11 @@ WORKDIR /app
 # layer. `npm ci` and not `npm install`: ci installs exactly the lockfile, which
 # is what makes the image reproducible and what CI runs.
 COPY package.json package-lock.json ./
-RUN npm ci
+# The cache mount is npm's download cache, kept between builds. `npm ci` still
+# deletes node_modules and installs exactly the lockfile — the cache only spares
+# it the network, which is most of what this layer costs when the lockfile
+# changes. Nothing from the mount lands in the image.
+RUN --mount=type=cache,target=/root/.npm,sharing=locked npm ci
 
 COPY . .
 RUN npm run build

@@ -164,6 +164,13 @@ jobs:
         # `docker build` was green, the suites below were green, and
         # `GET /api/portal/olm` answered 500 with a FileNotFoundError for
         # `/deploy/olm/crds.yaml` on every deployment of that image.
+        # BuildKit explicitly: the Dockerfile uses `RUN --mount=type=cache` for
+        # pip, which the legacy builder does not understand — it fails with a
+        # parse error rather than ignoring it. Default-on for current Docker, and
+        # stated here so a runner image that changes its default cannot turn a
+        # working Dockerfile into a broken job.
+        env:
+          DOCKER_BUILDKIT: "1"
         run: docker build -f backend/Dockerfile -t k8boss-admin-backend:ci .
 
       - name: The vendored OLM release is in the image, and it is upstream's
