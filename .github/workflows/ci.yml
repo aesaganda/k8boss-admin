@@ -190,12 +190,19 @@ jobs:
         # module that imports cleanly on a laptop and not under the container's
         # interpreter. `--health-start-period` mirrors the Dockerfile so a slow
         # runner is not read as a failure.
+        #
+        # The waiting is written with `if`, not `[ x = y ] && break`. Steps run
+        # under `bash -e`, and a `&&` chain that ends a loop body non-zero takes
+        # the whole step with it — which is how the first version of this job
+        # failed on its first poll, a second after the container started, and
+        # reported it as an unhealthy image.
         run: |
           docker run -d --name backend-ci k8boss-admin-backend:ci
-          for _ in $(seq 1 30); do
+          for _ in $(seq 1 40); do
             state=$(docker inspect -f '{{.State.Health.Status}}' backend-ci)
-            [ "$state" = healthy ] && break
-            [ "$state" = unhealthy ] && break
+            if [ "$state" = healthy ] || [ "$state" = unhealthy ]; then
+              break
+            fi
             sleep 5
           done
           docker logs backend-ci

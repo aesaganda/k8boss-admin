@@ -76,6 +76,18 @@ COPY --chown=k8boss:k8boss deploy/olm/ ./deploy/olm/
 # with no volume at all.
 RUN mkdir -p /app/data && chown -R k8boss:k8boss /app/data
 
+# Point the default database at that directory, because the sentence above was
+# not true without it. `app.config`'s default is `sqlite:///./k8boss_admin.db` —
+# relative to the working directory, which is `/app`, which is owned by root
+# while this process runs as 10001. A plain `docker run` of this image therefore
+# died at startup with "unable to open database file", and the only reason
+# nobody saw it is that docker-compose.yml overrides DATABASE_URL to this exact
+# value. An image that cannot start without the compose file around it is not a
+# shipped artifact, it is half of one. `app.crypto` persists its generated key
+# beside the database, so this also keeps the key and the rows it protects in
+# the one directory a volume is mounted on — capture both or neither.
+ENV DATABASE_URL=sqlite:////app/data/k8boss_admin.db
+
 USER 10001:10001
 
 EXPOSE 8020
