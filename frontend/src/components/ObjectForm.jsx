@@ -1,7 +1,7 @@
 /**
  * ObjectForm — the create dialog's Form view.
  *
- * `objectForm.js` holds the model and the lenses and explains why the document
+ * `objectFormModel.js` holds the model and the lenses and explains why the document
  * is authoritative; this file is the rendering of it, and it has exactly one
  * rule of its own:
  *
@@ -74,7 +74,7 @@ import {
   setIn,
   shapeFor,
   unsetIn,
-} from './objectForm';
+} from './objectFormModel';
 
 const MUTED = { color: 'var(--admin-muted, #6a6e73)' };
 

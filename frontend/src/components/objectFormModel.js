@@ -1,5 +1,5 @@
 /**
- * objectForm — the field model behind the create dialog's Form view, and the
+ * objectFormModel — the field model behind the create dialog's Form view, and the
  * lenses that let it edit a manifest without owning it.
  *
  * The OpenShift console offers "Configure via: Form view / YAML view" on every

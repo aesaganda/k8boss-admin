@@ -861,7 +861,7 @@ document and the model rather than written down — so it cannot go stale, and a
 control removed from a model puts its path straight back on screen.
 
 One input to that list is not derived: a container's coverage is a table in
-`objectForm.js` describing a renderer in `ObjectForm.jsx`, and a control deleted
+`objectFormModel.js` describing a renderer in `ObjectForm.jsx`, and a control deleted
 without its pattern would move that field silently into the set the form hides
 while saying it hides nothing — the one way this list can lie. The two are
 checked against each other by a test, which is the same answer this document
