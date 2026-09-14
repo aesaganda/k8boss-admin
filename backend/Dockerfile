@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # k8boss-admin backend.
 #
 # Two stages for one reason: the wheels for cryptography and psycopg2-binary
@@ -34,9 +35,17 @@ COPY backend/requirements.txt .
 # Install into a self-contained prefix that the runtime stage copies wholesale.
 # A virtualenv rather than --user: the path is explicit, so the runtime stage's
 # PATH is one line and does not depend on which user ends up running the process.
-RUN python -m venv /opt/venv \
-    && /opt/venv/bin/pip install --no-cache-dir --upgrade pip \
-    && /opt/venv/bin/pip install --no-cache-dir -r requirements.txt
+# The cache mount holds pip's HTTP/wheel cache between builds, so editing
+# requirements.txt re-downloads the line that changed rather than all eighty —
+# cryptography, lxml, psycopg2-binary and kubernetes are tens of megabytes of
+# wheel on their own. It is a BuildKit cache, not an image layer: nothing from
+# it is in the result, and `--mount=type=cache` is why `--no-cache-dir` is gone
+# from the install below. The lockfile stays authoritative either way; a cached
+# wheel is only ever reused for a version this file already pins.
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    python -m venv /opt/venv \
+    && /opt/venv/bin/pip install --upgrade pip \
+    && /opt/venv/bin/pip install -r requirements.txt
 
 # ── Stage 2: runtime ─────────────────────────────────────────────────────────
 FROM python:3.12-slim
