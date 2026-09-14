@@ -247,7 +247,7 @@ def test_the_vendored_manifests_match_their_pinned_digests(filename):
     change nobody reviewed against upstream, so it fails the build here and
     :func:`app.admin.olm_bundle._read` refuses to load it at run time.
     """
-    path = olm_bundle._MANIFEST_DIR / filename
+    path = olm_bundle._manifest_dir() / filename
     actual = hashlib.sha256(path.read_bytes()).hexdigest()
 
     assert actual == olm_bundle.FILE_DIGESTS[filename], (

@@ -7,6 +7,16 @@
 # is thrown away, and the final layer contains an interpreter, the installed
 # packages, and the application. Nothing else.
 
+# **The build context is the repository root, not `backend/`.** Docker cannot
+# COPY from outside its context, and this image needs one thing that is not
+# under `backend/`: the vendored Operator Lifecycle Manager release in
+# `deploy/olm`, which §33 reads at run time and pins by SHA-256. Built from
+# `backend/` it was silently absent, and the symptom was a 500 from
+# `GET /api/portal/olm` for a path that is nobody's layout (`/deploy/olm`) while
+# every other endpoint worked. Build it as:
+#
+#     docker build -f backend/Dockerfile -t k8boss-admin-backend .
+#
 # ── Stage 1: build the dependency tree ───────────────────────────────────────
 FROM python:3.12-slim AS builder
 
@@ -19,7 +29,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
-COPY requirements.txt .
+COPY backend/requirements.txt .
 
 # Install into a self-contained prefix that the runtime stage copies wholesale.
 # A virtualenv rather than --user: the path is explicit, so the runtime stage's
@@ -50,7 +60,14 @@ ENV PATH="/opt/venv/bin:$PATH" \
 COPY --from=builder /opt/venv /opt/venv
 
 WORKDIR /app
-COPY --chown=k8boss:k8boss . .
+COPY --chown=k8boss:k8boss backend/ .
+
+# Upstream's OLM manifests, byte for byte, beside the application rather than at
+# the repository path — `app.admin.olm_bundle` looks in both. Their digests are
+# pinned in `olm_bundle.FILE_DIGESTS` and checked on every read, so a file that
+# arrived here altered refuses to load rather than installing something nobody
+# reviewed.
+COPY --chown=k8boss:k8boss deploy/olm/ ./deploy/olm/
 
 # The data directory holds the SQLite database and, next to it, the generated
 # Fernet key that encrypts stored cluster tokens (app/crypto.key_file_path puts

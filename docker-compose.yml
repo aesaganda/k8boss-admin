@@ -11,8 +11,11 @@
 services:
   backend:
     build:
-      context: ./backend
-      dockerfile: Dockerfile
+      # The root, not ./backend: the image needs `deploy/olm` (§33's vendored
+      # OLM release), which a context of ./backend cannot see. See the comment
+      # at the top of backend/Dockerfile.
+      context: .
+      dockerfile: backend/Dockerfile
     image: k8boss-admin-backend:local
     container_name: k8boss-admin-backend
     # `restart: unless-stopped` only fires on container EXIT — a wedged event

@@ -100,7 +100,46 @@ UPSTREAM_RELEASE = (
     f"download/v{OLM_VERSION}"
 )
 
-_MANIFEST_DIR = pathlib.Path(__file__).resolve().parents[3] / "deploy" / "olm"
+def _manifest_dir() -> pathlib.Path:
+    """Where the vendored release lives, in a checkout and in the image.
+
+    Two layouts, because the bundle is a runtime dependency of this module and
+    the two ways this code runs put it in different places. In a checkout,
+    ``deploy/olm`` is a sibling of ``backend/``. In the container, the image is
+    built from the repository root and the bundle is copied in beside the
+    application, because ``backend/Dockerfile`` cannot reach a directory outside
+    its own build context.
+
+    Resolved on first use rather than at import: a build that left the bundle
+    out is a defect, and it should cost §33 its own surface — the two endpoints
+    that read the manifests — rather than refusing to start a console whose
+    other forty features do not touch them. The failure this replaces
+    was an image built with the bundle left out: `GET /api/portal/olm` answered
+    500 with a `FileNotFoundError` for `/deploy/olm/crds.yaml` — a path that is
+    nobody's layout, from a `parents[3]` that walked off the top of `/app` — and
+    the portal's OLM card rendered blank while every other read on the page
+    worked. A packaging mistake has to say it is one.
+    """
+    here = pathlib.Path(__file__).resolve()
+    candidates = (
+        here.parents[3] / "deploy" / "olm",  # a checkout: backend/ is parents[2]
+        here.parents[2] / "deploy" / "olm",  # the image: /app/deploy/olm
+    )
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate
+    raise RuntimeError(
+        "The vendored Operator Lifecycle Manager release is not present. "
+        f"Looked in: {', '.join(str(c) for c in candidates)}. These files ship "
+        "with the application — in a checkout they are deploy/olm, and the "
+        "container image copies them to /app/deploy/olm — so this is a build "
+        "that left them out, not a cluster or configuration problem."
+    )
+
+
+#: Resolved once, on the first read. `functools.cache` rather than a module
+#: constant so that import-time cost and import-time failure both stay out of it.
+_manifest_dir = functools.cache(_manifest_dir)
 
 #: SHA-256 of each vendored file, as downloaded. Pinned here rather than only in
 #: a test fixture so that the constant a reviewer reads and the constant the
@@ -231,7 +270,7 @@ def _read(filename: str) -> str:
     Refusing to install is the only safe answer to "these bytes are not the bytes
     that were vendored".
     """
-    path = _MANIFEST_DIR / filename
+    path = _manifest_dir() / filename
     text = path.read_text(encoding="utf-8")
     actual = hashlib.sha256(text.encode("utf-8")).hexdigest()
     expected = FILE_DIGESTS[filename]
