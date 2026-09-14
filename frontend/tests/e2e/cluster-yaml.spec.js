@@ -26,7 +26,7 @@ import {
   loadAll,
   toYaml,
 } from '../../src/components/clusterYaml.js';
-import { formModelFor, localIssues } from '../../src/components/objectForm.js';
+import { formModelFor, localIssues } from '../../src/components/objectFormModel.js';
 import { mockApi } from './fixtures.js';
 
 const CORPUS = JSON.parse(

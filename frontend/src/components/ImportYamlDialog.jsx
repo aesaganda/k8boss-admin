@@ -92,7 +92,7 @@ import {
   localIssues,
   rewriteLosses,
   unrepresented,
-} from './objectForm';
+} from './objectFormModel';
 import { PartialBanner } from './ui';
 import { resources as resourcesApi } from '../api/client';
 import { useNamespace } from '../contexts/NamespaceContext';

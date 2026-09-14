@@ -69,7 +69,7 @@
  */
 import yaml from 'js-yaml';
 
-import { formatPath } from './objectForm';
+import { formatPath } from './objectFormModel';
 
 /* ── The backend's implicit resolvers ───────────────────────────────────── */
 

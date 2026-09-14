@@ -11,7 +11,7 @@
 import { expect, test } from '@playwright/test';
 
 import { divergences, load, loadAll } from '../../src/components/clusterYaml.js';
-import { rewriteLosses } from '../../src/components/objectForm.js';
+import { rewriteLosses } from '../../src/components/objectFormModel.js';
 import { allStarters, skeletonStarter, templatesFor } from '../../src/components/templates.js';
 
 const starters = allStarters();

@@ -309,6 +309,43 @@ test.describe('installing OLM from the empty portal (§33)', () => {
     // it is: you cannot decide to open it without reading what it allows.
     await expect(page.getByTestId('olm-plan-open')).toBeEnabled();
   });
+
+  test('a status read that failed says why, and is never read as "no OLM here"', async ({
+    page,
+  }) => {
+    await mockApi(page, { preflight: ALLOW_ALL, portalCatalog: NO_OLM });
+    // Registered after mockApi so it wins: Playwright matches routes in reverse
+    // order of registration.
+    await page.route(
+      (url) => url.pathname.endsWith('/api/portal/olm'),
+      async (route) => {
+        if (route.request().method() !== 'GET') return route.fallback();
+        return route.fulfill({
+          status: 502,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            error: 'cluster_unreachable',
+            message: 'The cluster did not answer within 10s.',
+            hint: 'Check the API server endpoint on the Clusters page.',
+          }),
+        });
+      },
+    );
+    await openPortal(page);
+
+    // The reason is on the card. Four grey "Unknown" badges with the error
+    // thrown away is the same unanswered question asked four times.
+    await expect(page.getByTestId('olm-status-error')).toContainText('did not answer');
+
+    // And unknown is not a no: an install offered here could land on top of an
+    // OLM that is running.
+    await expect(page.getByTestId('olm-install')).toBeDisabled();
+    await page.getByTestId('olm-install').hover();
+    await expect(page.getByText(/could not be read, so this is not an offer/)).toBeVisible();
+
+    // The plan reads no cluster, so it is still readable.
+    await expect(page.getByTestId('olm-plan-open')).toBeEnabled();
+  });
 });
 
 test.describe('a Subscription listing that did not answer', () => {

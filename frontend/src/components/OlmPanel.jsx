@@ -17,7 +17,12 @@
  *
  * Both are tri-states. `null` is "a read failed", never `false`: a panel that
  * reported "OLM is not installed" during an API outage would offer an install on
- * top of a running one.
+ * top of a running one. So Install is offered against a real `false` only —
+ * `null` disables it with the sentence saying why — and `null` from a request
+ * still in flight says "Checking…" rather than claiming a failure that has not
+ * happened. When the read does fail, the error and the endpoint's own
+ * `unavailable[]` are on the card: four grey badges with no reason beside them
+ * is the same unanswered question asked four times.
  *
  * **The plan is readable with both gates shut**, and that is the point rather
  * than a convenience. What the plan contains is a ClusterRole granting OLM every
@@ -39,21 +44,21 @@ import MutationDialog from './MutationDialog';
 import DiffView from './DiffView';
 import ConsequenceChecklist from './ConsequenceChecklist';
 import { useAcknowledgements, blockedByConsequences } from './consequences';
-import { CodeBlock, DescriptionList, SectionHeader, StatusBadge } from './ui';
+import { CodeBlock, DescriptionList, PartialBanner, SectionHeader, StatusBadge } from './ui';
 import { portal } from '../api/client';
 import { useAsync } from '../pages/_data';
 
 /**
  * A tri-state as a badge. `null` is grey and says so — it is not a "no".
  */
-function TriBadge({ value, yes, no, unknown }) {
+function TriBadge({ value, yes, no, unknown, unknownTooltip }) {
   if (value === true) return <StatusBadge status="Ready" label={yes} />;
   if (value === false) return <StatusBadge status="NotReady" label={no} />;
   return (
     <StatusBadge
       status="Unknown"
       label={unknown}
-      tooltip="A read failed, so this is unknown rather than false."
+      tooltip={unknownTooltip ?? 'A read failed, so this is unknown rather than false.'}
     />
   );
 }
@@ -79,6 +84,17 @@ export default function OlmPanel({ gate, onChanged }) {
 
   const status = useAsync(() => portal.olmStatus(), { key: 'olm-status' });
   const data = status.data;
+
+  // A request still in flight is not a failed read. Labelling it one is the
+  // defect standard pointed at this console instead of the cluster: the panel
+  // spent every load telling the operator four reads had failed, and when one
+  // actually did it said exactly the same thing and never said why —
+  // `status.error` was rendered nowhere at all.
+  const pending = !data && status.loading;
+  const unknownLabel = pending ? 'Checking…' : 'Unknown — a read failed';
+  const unknownTooltip = pending
+    ? 'Still reading this cluster. Nothing has failed.'
+    : undefined;
 
   const body = useMemo(() => ({ communityCatalog }), [communityCatalog]);
 
@@ -107,9 +123,30 @@ export default function OlmPanel({ gate, onChanged }) {
       value={data?.installed}
       yes="Objects are on the cluster"
       no="Not installed"
-      unknown="Unknown — a read failed"
+      unknown={unknownLabel}
+      unknownTooltip={unknownTooltip}
     />
   );
+
+  // Install is offered only against a real `false`. `null` is "we could not
+  // look", and an install offered over an OLM that may be running is the exact
+  // thing the two tri-states exist to prevent — the ownership scan would refuse
+  // it, but being caught by the second line of defence is not the same as being
+  // right.
+  let installBlocked = null;
+  if (data?.installed === true) {
+    installBlocked =
+      'This console does not write over an OLM that is already there — installing ' +
+      `${data.shippedVersion} over a running OLM would restart every ` +
+      'operator on the cluster.';
+  } else if (data?.installed == null) {
+    installBlocked = pending
+      ? 'Still reading whether this cluster already runs OLM.'
+      : 'Whether this cluster already runs OLM could not be read, so this is not an offer to ' +
+        'install one. Fix the read above and press Re-check.';
+  } else if (!gate?.allowed) {
+    installBlocked = gate?.reason;
+  }
 
   let previewBlocked;
   if (!gate?.allowed) previewBlocked = undefined; // the gate blocks Confirm, not Preview
@@ -129,6 +166,24 @@ export default function OlmPanel({ gate, onChanged }) {
           }
         />
 
+        {status.error && (
+          <Alert
+            isInline
+            variant="danger"
+            className="admin-confirm__alert"
+            data-testid="olm-status-error"
+            title="This cluster's OLM state could not be read"
+          >
+            {status.error.message}
+            {status.error.hint ? <div style={{ fontWeight: 600 }}>{status.error.hint}</div> : null}
+          </Alert>
+        )}
+
+        {/* The endpoint answers partially: one unreadable listing costs a row,
+            not the response. Dropping `unavailable[]` here left those rows
+            saying "Unknown" with the reason discarded. */}
+        <PartialBanner unavailable={data?.unavailable} />
+
         <DescriptionList
           items={[
             { label: 'Shipped version', value: data?.shippedVersion ?? null },
@@ -141,7 +196,8 @@ export default function OlmPanel({ gate, onChanged }) {
                     value={data?.ready}
                     yes="Yes — the portal can read catalogs"
                     no="Not yet"
-                    unknown="Unknown — a read failed"
+                    unknown={unknownLabel}
+                    unknownTooltip={unknownTooltip}
                   />{' '}
                   <span style={{ color: 'var(--admin-muted, #6a6e73)' }}>
                     A separate question from the row above. OLM registers
@@ -182,28 +238,18 @@ export default function OlmPanel({ gate, onChanged }) {
             What this installs
           </Button>
 
-          {data?.installed === true ? (
-            <Tooltip content="This console does not write over an OLM that is already there — installing 0.35.0 over a running OLM would restart every operator on the cluster.">
-              <span>
-                <Button variant="primary" isAriaDisabled data-testid="olm-install">
-                  Install
-                </Button>
-              </span>
-            </Tooltip>
-          ) : (
-            <Tooltip content={gate?.allowed ? 'Twenty-six writes, nothing until you confirm.' : gate?.reason}>
-              <span>
-                <Button
-                  variant="primary"
-                  isAriaDisabled={!gate?.allowed}
-                  data-testid="olm-install"
-                  onClick={() => setInstallOpen(true)}
-                >
-                  Install Operator Lifecycle Manager
-                </Button>
-              </span>
-            </Tooltip>
-          )}
+          <Tooltip content={installBlocked || 'Twenty-six writes, nothing until you confirm.'}>
+            <span>
+              <Button
+                variant="primary"
+                isAriaDisabled={Boolean(installBlocked)}
+                data-testid="olm-install"
+                onClick={() => setInstallOpen(true)}
+              >
+                {data?.installed === true ? 'Install' : 'Install Operator Lifecycle Manager'}
+              </Button>
+            </span>
+          </Tooltip>
 
           <Button
             variant="link"

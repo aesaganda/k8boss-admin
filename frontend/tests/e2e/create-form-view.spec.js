@@ -22,7 +22,7 @@
  */
 import { expect, test } from '@playwright/test';
 
-import { FORM_MODELS, containerControlTestIds, objectListControlTestIds } from '../../src/components/objectForm.js';
+import { FORM_MODELS, containerControlTestIds, objectListControlTestIds } from '../../src/components/objectFormModel.js';
 import { FIXTURES, mockApi } from './fixtures.js';
 
 /** Answer every §9 check as allowed, so RBAC is not what is under test. */
@@ -233,7 +233,7 @@ test.describe('the create dialog form view', () => {
     page,
   }) => {
     // The other direction of the same claim. `CONTAINER_COVERAGE` is described
-    // in objectForm.js as "the *whole* claim this form makes about containers",
+    // in objectFormModel.js as "the *whole* claim this form makes about containers",
     // and a pattern widened to cover the container wholesale would make this
     // list say "Nothing" while showing none of these fields — the OpenShift
     // failure this feature exists to fix, asserted with more confidence than
@@ -268,7 +268,7 @@ test.describe('the create dialog form view', () => {
   });
 
   test('every container field the model counts as covered has a control on screen', async ({ page }) => {
-    // `CONTAINER_COVERAGE` is a claim made in objectForm.js about a renderer in
+    // `CONTAINER_COVERAGE` is a claim made in objectFormModel.js about a renderer in
     // another file, and it is the one input to the "not shown" list that is
     // written down rather than derived. If a control is deleted and its pattern
     // is not, its field moves silently into the set the form hides while saying
