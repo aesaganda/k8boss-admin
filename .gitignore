@@ -88,3 +88,7 @@ playwright/.cache/
 *~
 .DS_Store
 Thumbs.db
+
+# /graphify output: a regenerable knowledge-graph artifact (graph.json,
+# graph.html, GRAPH_REPORT.md, cache/), not a source change worth tracking.
+graphify-out/
