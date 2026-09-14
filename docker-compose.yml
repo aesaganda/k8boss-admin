@@ -11,8 +11,11 @@
 services:
   backend:
     build:
-      context: ./backend
-      dockerfile: Dockerfile
+      # The root, not ./backend: the image needs `deploy/olm` (§33's vendored
+      # OLM release), which a context of ./backend cannot see. See the comment
+      # at the top of backend/Dockerfile.
+      context: .
+      dockerfile: backend/Dockerfile
     image: k8boss-admin-backend:local
     container_name: k8boss-admin-backend
     # `restart: unless-stopped` only fires on container EXIT — a wedged event
@@ -222,12 +225,19 @@ services:
       # decoration: this file is a set of live cluster credentials.
       - ${KUBECONFIG:-~/.kube/config}:/home/k8boss/.kube/config:ro
     restart: unless-stopped
+    # Overrides the image's HEALTHCHECK; keep the two in step. The timings are
+    # sized for a loaded host: this probe starts a cold interpreter and imports
+    # httpx before it asks anything, and `autoheal` below restarts whatever
+    # Docker marks unhealthy. At timeout: 5s a busy machine restarted a backend
+    # that was serving every request — and each restart made the next probe
+    # likelier to time out, so the console flapped while nothing was wrong with
+    # it. Long enough that only a genuinely stuck process fails three in a row.
     healthcheck:
-      test: ["CMD", "python", "-c", "import httpx,sys; sys.exit(0 if httpx.get('http://127.0.0.1:8020/api/health', timeout=4).status_code==200 else 1)"]
+      test: ["CMD", "python", "-c", "import httpx,sys; sys.exit(0 if httpx.get('http://127.0.0.1:8020/api/health', timeout=10).status_code==200 else 1)"]
       interval: 30s
-      timeout: 5s
+      timeout: 15s
       retries: 3
-      start_period: 10s
+      start_period: 45s
 
   frontend:
     build:

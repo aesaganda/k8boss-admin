@@ -7,6 +7,16 @@
 # is thrown away, and the final layer contains an interpreter, the installed
 # packages, and the application. Nothing else.
 
+# **The build context is the repository root, not `backend/`.** Docker cannot
+# COPY from outside its context, and this image needs one thing that is not
+# under `backend/`: the vendored Operator Lifecycle Manager release in
+# `deploy/olm`, which §33 reads at run time and pins by SHA-256. Built from
+# `backend/` it was silently absent, and the symptom was a 500 from
+# `GET /api/portal/olm` for a path that is nobody's layout (`/deploy/olm`) while
+# every other endpoint worked. Build it as:
+#
+#     docker build -f backend/Dockerfile -t k8boss-admin-backend .
+#
 # ── Stage 1: build the dependency tree ───────────────────────────────────────
 FROM python:3.12-slim AS builder
 
@@ -19,7 +29,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
-COPY requirements.txt .
+COPY backend/requirements.txt .
 
 # Install into a self-contained prefix that the runtime stage copies wholesale.
 # A virtualenv rather than --user: the path is explicit, so the runtime stage's
@@ -50,7 +60,14 @@ ENV PATH="/opt/venv/bin:$PATH" \
 COPY --from=builder /opt/venv /opt/venv
 
 WORKDIR /app
-COPY --chown=k8boss:k8boss . .
+COPY --chown=k8boss:k8boss backend/ .
+
+# Upstream's OLM manifests, byte for byte, beside the application rather than at
+# the repository path — `app.admin.olm_bundle` looks in both. Their digests are
+# pinned in `olm_bundle.FILE_DIGESTS` and checked on every read, so a file that
+# arrived here altered refuses to load rather than installing something nobody
+# reviewed.
+COPY --chown=k8boss:k8boss deploy/olm/ ./deploy/olm/
 
 # The data directory holds the SQLite database and, next to it, the generated
 # Fernet key that encrypts stored cluster tokens (app/crypto.key_file_path puts
@@ -68,7 +85,15 @@ EXPOSE 8020
 # cluster appears in `degraded[]` and leaves `status` at 200. Probing anything
 # that touches a cluster here would restart a healthy pod because someone else's
 # API server went down.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD python -c "import httpx,sys; sys.exit(0 if httpx.get('http://127.0.0.1:8020/api/health', timeout=4).status_code==200 else 1)"
+# Timings sized for a loaded host, not an idle one. The probe spawns a cold
+# interpreter and imports httpx before it makes a request, which is tens of
+# milliseconds on an idle machine and seconds on a busy one — and a deployment
+# running the `autoheal` sidecar (see docker-compose.yml) restarts whatever
+# Docker marks unhealthy. At timeout=5s that turned a load spike into a restart
+# of a console that was answering every request, and every restart made the next
+# probe more likely to time out. The generous start_period covers the same thing
+# during boot, where failing probes do not count against the retries at all.
+HEALTHCHECK --interval=30s --timeout=15s --start-period=45s --retries=3 \
+  CMD python -c "import httpx,sys; sys.exit(0 if httpx.get('http://127.0.0.1:8020/api/health', timeout=10).status_code==200 else 1)"
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8020", "--log-level", "info"]
