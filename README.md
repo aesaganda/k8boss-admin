@@ -50,10 +50,11 @@ clusters, built on the assumption that the dangerous part is not reading.
   reachability between pods, models no attack paths, and cannot tell you whether
   a policy is *enforced*, because enforcement belongs to the CNI plugin and no
   API this console can reach reports on it. No service mesh awareness, no
-  runtime process intelligence. That is
-  [K8Boss](https://github.com/aesaganda/k8boss), which this console was split out
-  of; see [`docs/adr-0002-lineage.md`](docs/adr-0002-lineage.md) for what was
-  carried over and what deliberately was not.
+  runtime process intelligence. That is K8Boss, a separate, closed-source
+  product this console was split out of — not itself open source, so there is
+  no public repository to link to; see
+  [`docs/adr-0002-lineage.md`](docs/adr-0002-lineage.md) for what was carried
+  over and what deliberately was not.
 * **Not an identity authority.** Built-in authentication is optional and supports
   local accounts plus LDAP. When it is disabled, the legacy authenticating-proxy
   mode remains available and `X-K8Boss-User` is advisory.

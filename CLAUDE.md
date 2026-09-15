@@ -41,9 +41,10 @@ controller.
 
 Optional local, LDAP, OpenID Connect, OAuth 2.0, OpenShift or SAML 2.0
 authentication protects the console; legacy proxy mode remains available when it
-is disabled. It was split out
-of [K8Boss](https://github.com/aesaganda/k8boss) and shares no code with it —
-`docs/adr-0002-lineage.md` says what came across and what deliberately did not.
+is disabled. It was split out of K8Boss — a separate, closed-source product by
+the same author, with no public repository — and shares no code with it:
+`docs/adr-0002-lineage.md` says what came across and what deliberately did
+not.
 
 ## Subsystem map
 

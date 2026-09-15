@@ -8,11 +8,11 @@
 
 ## Context
 
-k8boss-admin was written inside the [K8Boss](https://github.com/aesaganda/k8boss)
-monorepo, by the same author, in the same house style, and it ships as its own
-repository. This is the second such split — the K8Boss operator went the same way
-so it could be published on OperatorHub without opening a tree that carries a
-commercial licensing module.
+k8boss-admin was written inside the K8Boss monorepo — a separate, closed-source
+product by the same author, not itself public — in the same house style, and
+it ships as its own repository. This is the second such split — the K8Boss
+operator went the same way so it could be published on OperatorHub without
+opening a tree that carries a commercial licensing module.
 
 Two questions follow from that, and both get asked by everyone who sees the two
 repositories: *what did you reuse?* and *why is this not a K8Boss feature?*
