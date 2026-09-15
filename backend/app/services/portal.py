@@ -345,6 +345,48 @@ def _categories(channel: Any) -> list[str]:
     return [part.strip() for part in raw.split(",") if part.strip()]
 
 
+#: The image types §16.10 will hand back, and the only ones ``icon_of`` reports.
+#:
+#: An allowlist rather than the catalog's own ``mediatype``, because that string
+#: is written by whoever published the operator and ends up in a ``Content-Type``
+#: header on this console's own origin. A catalog naming ``text/html`` there
+#: would otherwise get the console to serve somebody else's markup as its own.
+ICON_MEDIA_TYPES = frozenset({
+    "image/svg+xml",
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "image/webp",
+})
+
+#: Refuse to serve a decoded icon larger than this.
+#:
+#: A logo is kilobytes. This bound exists because the bytes come from a registry
+#: image the cluster pulled, not because any real icon approaches it — an
+#: operator whose publisher embedded a megabyte of PNG gets the placeholder
+#: tile rather than making every catalog tile wait on it.
+ICON_MAX_BYTES = 1024 * 1024
+
+
+def icon_of(channel: Any) -> dict[str, str] | None:
+    """The channel CSV's first usable icon, as ``{mediatype, base64data}``.
+
+    ``None`` when the catalog published none, when it published one in a type
+    this console will not serve, or when the entry is missing its data. Filtering
+    here rather than at the endpoint is deliberate: ``hasIcon`` on a §16.3 row is
+    built from this, so a row claiming an icon is a row whose icon §16.10 will
+    actually hand back. The alternative is a tile that requests an image, gets a
+    404 and falls back — a promise the list made and the endpoint broke.
+    """
+    icons = get_field(channel, "currentCSVDesc", "icon", default=[]) or []
+    for entry in icons:
+        media = get_field(entry, "mediatype")
+        data = get_field(entry, "base64data")
+        if media in ICON_MEDIA_TYPES and data:
+            return {"mediatype": media, "base64data": data}
+    return None
+
+
 def channels_of(package: Any) -> list[Any]:
     """``status.channels``, or an empty list.
 
@@ -489,6 +531,14 @@ def package_row(package: Any, *, installations: list[dict[str, Any]] | None) -> 
         "capabilityLevel": _annotation(channel, "capabilities") if channel else None,
         "certified": _csv_bool(_annotation(channel, "certified")) if channel else None,
         "installModes": supported_modes(channel) if channel else None,
+        # Whether §16.10 has an icon to serve for this package — not the icon.
+        # The bytes stay off this row for the reason `description` does: a logo
+        # is kilobytes, a catalog is hundreds of packages, and inlining both
+        # would make the listing a response nobody can use. A plain bool rather
+        # than a tri-state because nothing acts on it: the catalog either
+        # published an icon or it did not, and a package with no CSV description
+        # published none. The cost of being wrong is a placeholder tile.
+        "hasIcon": icon_of(channel) is not None,
         "installed": None if installations is None else bool(installations),
         "installations": installations,
     }

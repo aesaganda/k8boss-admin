@@ -32,13 +32,22 @@
  * and the `PartialBanner` reports them, so they are not repeated here.
  */
 import { useMemo, useState } from 'react';
-import { Alert, Button, Tab, Tabs, TabTitleText, Tooltip } from '@patternfly/react-core';
+import {
+  Alert,
+  Button,
+  Tab,
+  Tabs,
+  TabTitleText,
+  ToggleGroup,
+  ToggleGroupItem,
+  Tooltip,
+} from '@patternfly/react-core';
 import { Link } from 'react-router-dom';
 import SyncAltIcon from '@patternfly/react-icons/dist/esm/icons/sync-alt-icon';
 import {
   AgeCell,
   DataTable,
-  menuAction,
+  EmptyState,
   NullableCell,
   PageHeader,
   PartialBanner,
@@ -49,6 +58,15 @@ import {
 } from '../components/ui';
 import SubscribeDialog from '../components/SubscribeDialog';
 import OlmPanel from '../components/OlmPanel';
+import { CatalogFilters, PackageIcon, PackageTiles } from '../components/OperatorCatalog';
+import {
+  EMPTY_FILTERS,
+  INSTALLED_STATES,
+  catalogFacets,
+  installedState,
+  matchesFilters,
+  matchesSearch,
+} from '../components/operatorCatalogFacets';
 import { portal } from '../api/client';
 import { useCluster } from '../contexts/ClusterContext';
 import { useNamespace } from '../contexts/NamespaceContext';
@@ -58,13 +76,14 @@ import { ChipList, Muted, NoClusterState } from './_parts';
 /**
  * §9, asked once for the page.
  *
- * One check, because this feature makes exactly one kind of object. The write
- * still preflights for the specific namespace it is going into; this only
- * decides whether the console offers the action at all, disabled with the
- * reason (rule 11.4) rather than offered and then refused with a 403.
+ * One check, and it is §33's install rather than §16's subscribe. Subscribing is
+ * not asked here because nothing on this page decides anything from the answer:
+ * both entry points open a dialog whose own preflight is the one that matters —
+ * it is asked for the namespace the operator actually picked, which this page
+ * does not know, and a page-level answer would be a different question wearing
+ * the same name.
  */
 const CHECKS = [
-  { id: 'portal-subscribe', verb: 'create', group: 'operators.coreos.com', resource: 'subscriptions' },
   // §33. Asked against the CustomResourceDefinition create, which is phase one
   // of the install and the first thing it would do. It is deliberately NOT the
   // ClusterRole create: that one's review answers yes on almost every cluster
@@ -79,19 +98,10 @@ const CHECKS = [
   },
 ];
 
-const INSTALLED_STATES = ['Installed', 'Not installed', 'Unknown'];
-
 const INSTALLED_UNKNOWN_REASON =
   'The Subscription listing did not answer, so whether this operator is already installed is ' +
   'unknown. This is NOT "not installed" — subscribing now could put a second Subscription on top ' +
   'of one that already exists.';
-
-/** The tri-state a catalog row's `installed` field is in, as one word. */
-function installedState(row) {
-  if (row.installed === true) return 'Installed';
-  if (row.installed === false) return 'Not installed';
-  return 'Unknown';
-}
 
 /**
  * What a bounded read left out, under the table it left it out of.
@@ -196,6 +206,10 @@ export default function Portal() {
   const [tab, setTab] = useState('catalog');
   const [search, setSearch] = useState('');
   const [subscribing, setSubscribing] = useState(null);
+  // Tiles first: picking an operator out of several hundred is a scan, and the
+  // table is what you switch to once you know which one you are comparing.
+  const [view, setView] = useState('tiles');
+  const [filters, setFilters] = useState(EMPTY_FILTERS);
 
   const catalog = useAsync(() => portal.catalog(), {
     key: `portal-catalog:${activeClusterId}`,
@@ -217,32 +231,20 @@ export default function Portal() {
     installed.reload();
   };
 
-  // The deployment gate first, then RBAC — the same order as §5.5's node debug
-  // panel, and for the same reason: both are "you cannot do this", they send an
-  // operator to different systems, and the deployment one is the one they can
-  // answer without a cluster admin. `enabled == null` is a third state: nothing
-  // has told us yet, which is not permission.
-  const enabled = catalog.data?.enabled ?? installed.data?.enabled;
-  const enabledDetail = catalog.data?.enabledDetail ?? installed.data?.enabledDetail;
-  const subscribeGate = useMemo(() => {
-    if (enabled === false) return { allowed: false, reason: enabledDetail };
-    if (enabled == null) {
-      return {
-        allowed: false,
-        reason: 'Whether this deployment permits subscribing has not been read yet.',
-      };
-    }
-    return gate('portal-subscribe');
-  }, [enabled, enabledDetail, gate]);
-
-  // §33's gate, and it is a *different* switch from the one above:
-  // ADMIN_OLM_INSTALL_ENABLED, not ADMIN_PORTAL_INSTALL_ENABLED. Reading the
-  // subscribe gate here would offer an install on a deployment that permits
-  // subscribing and forbids installing, and disable it on one that does the
-  // reverse — both of which send an operator to edit the wrong line of the same
-  // file. It rides along on the catalog envelope for the reason `enabled` does:
-  // the panel must paint disabled-with-the-reason on first render, not correct
-  // itself a round trip later.
+  // §33's gate, and there is deliberately no second one beside it for
+  // subscribing. Both entry points to the one §16 write — a tile and the
+  // table's row menu — open `SubscribeDialog` unconditionally, because the plan
+  // it opens on is an ungated pure read and is the thing somebody needs
+  // *because* the switch is off. What refuses the write is inside: the dialog
+  // names the switch from `plan.enabled`, `MutationDialog` disables Confirm on
+  // the read-only console, and the backend refuses anything that gets past both
+  // with `mutations_disabled` or `rbac_denied` — each rendered there with the
+  // specific switch or permission named.
+  //
+  // This gate is a different switch and a different act: ADMIN_OLM_INSTALL_ENABLED,
+  // not ADMIN_PORTAL_INSTALL_ENABLED. It rides along on the catalog envelope so
+  // the install panel paints disabled-with-the-reason on first render rather
+  // than correcting itself a round trip later.
   const olmEnabled = catalog.data?.olmInstall ?? installed.data?.olmInstall;
   const olmGate = useMemo(() => {
     if (olmEnabled?.enabled === false) return { allowed: false, reason: olmEnabled.detail };
@@ -269,11 +271,16 @@ export default function Portal() {
         title: 'Package',
         sortable: true,
         value: (row) => `${row.displayName ?? ''} ${row.name ?? ''}`,
+        // The same icon the tile draws, at row height: switching views should
+        // not change what an operator is recognising the package by.
         cell: (row) => (
-          <>
-            <div>{row.displayName || row.name}</div>
-            {row.displayName && row.displayName !== row.name ? <Muted>{row.name}</Muted> : null}
-          </>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <PackageIcon row={row} size={24} />
+            <div style={{ minWidth: 0 }}>
+              <div>{row.displayName || row.name}</div>
+              {row.displayName && row.displayName !== row.name ? <Muted>{row.name}</Muted> : null}
+            </div>
+          </div>
         ),
       },
       {
@@ -491,6 +498,21 @@ export default function Portal() {
   const catalogRows = catalog.data?.items ?? [];
   const installedRows = installed.data?.items ?? [];
 
+  // Facets are counted off every row, not off the filtered set: a rail whose
+  // counts moved as you ticked boxes would make an unticked option look like it
+  // had disappeared from the cluster.
+  const facets = catalogFacets(catalogRows);
+  // Sorted by name, which the listing is not. The package server returns
+  // packages in whatever order it assembled them, and a grid with no sort
+  // control would rearrange itself on every refresh — the table can be sorted
+  // by a column, a tile wall can only be scanned, and scanning a wall that
+  // moves is how you look twice for something you already passed.
+  const tileRows = catalogRows
+    .filter((row) => matchesSearch(row, search) && matchesFilters(row, filters))
+    .sort((a, b) =>
+      (a.displayName || a.name || '').localeCompare(b.displayName || b.name || ''),
+    );
+
   return (
     <>
       <PageHeader
@@ -569,6 +591,29 @@ export default function Portal() {
           </Muted>
         </Toolbar.Item>
         <Toolbar.Spacer />
+        {tab === 'catalog' && (
+          <Toolbar.Item>
+            {/* Both views read the same rows; neither is a different answer.
+                The table keeps sorting, column management and the version
+                comparison a grid cannot do, so it stays one click away. */}
+            <ToggleGroup aria-label="Catalog view">
+              <ToggleGroupItem
+                text="Tiles"
+                buttonId="portal-view-tiles"
+                isSelected={view === 'tiles'}
+                onChange={() => setView('tiles')}
+                data-testid="portal-view-tiles"
+              />
+              <ToggleGroupItem
+                text="Table"
+                buttonId="portal-view-table"
+                isSelected={view === 'table'}
+                onChange={() => setView('table')}
+                data-testid="portal-view-table"
+              />
+            </ToggleGroup>
+          </Toolbar.Item>
+        )}
         <Toolbar.Item>
           <Button
             variant="plain"
@@ -589,33 +634,87 @@ export default function Portal() {
               olmAbsent={olmAbsent}
             />
           )}
-          <DataTable
-            ariaLabel="Operator catalog"
-            tableId="portal-catalog"
-            manageableColumns
-            columns={catalogColumns}
-            rows={catalogRows}
-            rowKey="id"
-            loading={catalog.loading}
-            error={catalog.error}
-            onRetry={catalog.reload}
-            filterText={search}
-            actions={(row) => [
-              menuAction('Subscribe…', subscribeGate, () => setSubscribing(row)),
-            ]}
-            emptyTitle="No packages"
-            emptyDescription={
-              olmAbsent
-                ? 'The listing succeeded. This cluster does not serve PackageManifests, so there is nothing here to install.'
-                : 'The listing succeeded and this cluster’s catalogs offer no packages.'
-            }
-            footer={
-              <TruncationFooter
-                truncated={catalog.data?.truncated}
-                testId="portal-catalog-truncated"
-              />
-            }
-          />
+          {view === 'tiles' ? (
+            <>
+              {/* Loading and error keep going through the table, which owns
+                  both states and the retry. The grid renders rows or the empty
+                  state and nothing else — two components painting "could not
+                  load" differently is how one of them ends up saying it about
+                  a read that succeeded. */}
+              {catalog.loading || catalog.error ? (
+                <DataTable
+                  ariaLabel="Operator catalog"
+                  tableId="portal-catalog-status"
+                  columns={catalogColumns}
+                  rows={[]}
+                  rowKey="id"
+                  loading={catalog.loading}
+                  error={catalog.error}
+                  onRetry={catalog.reload}
+                />
+              ) : (
+                <div className="admin-catalog">
+                  <CatalogFilters
+                    facets={facets}
+                    filters={filters}
+                    onChange={setFilters}
+                    total={catalogRows.length}
+                    shown={tileRows.length}
+                  />
+                  <div>
+                    {tileRows.length === 0 ? (
+                      <EmptyState
+                        title="No packages"
+                        description={
+                          catalogRows.length === 0
+                            ? olmAbsent
+                              ? 'The listing succeeded. This cluster does not serve PackageManifests, so there is nothing here to install.'
+                              : 'The listing succeeded and this cluster’s catalogs offer no packages.'
+                            : 'The listing succeeded and these filters match none of its packages.'
+                        }
+                      />
+                    ) : (
+                      <PackageTiles rows={tileRows} onSelect={setSubscribing} />
+                    )}
+                    <TruncationFooter
+                      truncated={catalog.data?.truncated}
+                      testId="portal-catalog-truncated"
+                    />
+                  </div>
+                </div>
+              )}
+            </>
+          ) : (
+            <DataTable
+              ariaLabel="Operator catalog"
+              tableId="portal-catalog"
+              manageableColumns
+              columns={catalogColumns}
+              rows={catalogRows}
+              rowKey="id"
+              loading={catalog.loading}
+              error={catalog.error}
+              onRetry={catalog.reload}
+              filterText={search}
+              // Ungated, exactly as a tile click is: this opens the plan, and
+              // the plan is a read. Disabling it here would withhold the dry
+              // run from the console where reading it matters most — the one
+              // whose operator is deciding whether to turn the switch on.
+              actions={(row) => [{ title: 'Subscribe…', onClick: () => setSubscribing(row) }]}
+              emptyTitle="No packages"
+              emptyDescription={
+                olmAbsent
+                  ? 'The listing succeeded. This cluster does not serve PackageManifests, so there is nothing here to install.'
+                  : 'The listing succeeded and this cluster’s catalogs offer no packages.'
+              }
+              footer={
+                <TruncationFooter
+                  truncated={catalog.data?.truncated}
+                  testId="portal-catalog-truncated"
+                />
+              }
+            />
+          )}
         </>
       ) : (
         <>

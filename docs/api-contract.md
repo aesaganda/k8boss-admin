@@ -2612,6 +2612,7 @@ A `PackageRow`:
   "capabilityLevel": "Deep Insights",
   "certified": null,
   "installModes": ["OwnNamespace", "SingleNamespace", "AllNamespaces"],
+  "hasIcon": true,
   "installed": true,
   "installations": [ SubscriptionRow ]
 }
@@ -2631,6 +2632,15 @@ A `PackageRow`:
   `[]` — when the catalog published no `installModes` block. An empty list would
   read as "this operator supports no install mode", which is a claim no
   PackageManifest makes.
+- `hasIcon` says whether §16.10 has an icon to serve for this package — it is
+  **not** the icon. The bytes stay off this row for the reason `description`
+  does: a logo is kilobytes, a catalog is hundreds of packages, and a listing
+  that inlined one apiece is a response nobody can use. It is a plain boolean
+  rather than a tri-state because nothing acts on it: a package whose catalog
+  published no CSV description published no icon either, and the cost of being
+  wrong is a placeholder tile. **It is also a promise:** `true` means the media
+  type is one §16.10 will actually hand back, so a row never sends a client to
+  fetch an image the endpoint then refuses.
 - `installations` is every Subscription on the cluster naming this package, keyed
   on `spec.name` alone rather than on the catalog triple: an operator installed
   from a mirror is still installed.
@@ -3034,6 +3044,48 @@ and `packages.operators.coreos.com` PackageManifests. OLM v1's
 `olm.operatorframework.io` `ClusterExtension` is a different API with a different
 model, and a cluster running only it gets `state: "unsupported"` across §16.2 and
 a calm empty portal. That is the correct answer today and a gap that will grow.
+
+### 16.10 `GET /api/portal/catalog/icon?package=&catalog=&catalogNamespace=`
+
+One package's icon, as image bytes — `Content-Type` from the catalog's own
+`mediatype`, body the decoded `base64data` off the default channel's CSV
+description. Not an envelope: the response **is** the image, so a client can
+point an `<img>` at it.
+
+A request per icon rather than base64 on every §16.3 row, for the reason that
+row carries no `description`. The browser asks for the ones it is painting and
+caches them; the listing stays the size it was.
+
+`catalog` and `catalogNamespace` narrow the same way §16.5's do. Two catalogs may
+offer one package name and ship different logos for it, and the icon that
+appears on a tile has to be the icon of the package that tile subscribes to.
+
+**The bytes are somebody else's**, decoded out of an image the cluster pulled
+from a registry this console does not control, and three things bound what
+leaves here:
+
+- **The media type is an allowlist**, never the catalog's own string echoed into
+  a header: `image/svg+xml`, `image/png`, `image/jpeg`, `image/gif`,
+  `image/webp`. A catalog naming `text/html` would otherwise get this console to
+  serve third-party markup from its own origin. An icon outside the allowlist is
+  a `404` and — because §16.3's `hasIcon` is built from the same allowlist — was
+  never advertised in the first place.
+- **The decoded size is capped** (1 MiB). A logo is kilobytes; the cap exists
+  because the input is untrusted, not because a real icon approaches it.
+- **The response refuses to execute.** `X-Content-Type-Options: nosniff` and
+  `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline';
+  sandbox`. SVG is in the allowlist because operator logos overwhelmingly are
+  SVG, and an SVG can carry script — so it is served in a way that cannot run
+  any, and a client renders these in an `<img>`, which does not execute script.
+  This is the §16.9 "no markdown" rule applied to the other third-party asset on
+  the page.
+
+`404 not_found` when the catalog published no icon. **Not an error state for the
+operator**: catalogs routinely ship none — operatorhub.io's community catalog
+publishes an icon for not one of its packages — and a client draws its own
+placeholder rather than a broken image. `Cache-Control` is `private, max-age=300`
+rather than immutable: a catalog can be re-pointed at a new image under the same
+package name, and a long cache would pin a logo the cluster has stopped serving.
 
 ---
 

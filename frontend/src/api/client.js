@@ -878,6 +878,30 @@ export const portal = {
   installed: (params) => api.get('/portal/subscriptions', params),
 
   /**
+   * §16.10 — the URL of one package's icon, for an `<img>` to fetch.
+   *
+   * A URL rather than a fetch: the browser is better at this than we are. It
+   * caches, it only asks for tiles actually painted (with `loading="lazy"`),
+   * and one request per logo is what keeps the §16.3 listing from carrying a
+   * few hundred base64 images.
+   *
+   * Only ever called for a row whose `hasIcon` is true — the contract makes
+   * that a promise that this URL returns an image rather than a 404. The
+   * catalog triple is carried because two catalogs can offer one package name
+   * with different logos, and the tile has to show the one it subscribes to.
+   *
+   * An `<img>`, specifically: these bytes are third-party, the allowlist that
+   * gates them permits SVG, and an `<img>` is the one element that renders SVG
+   * without executing script in it.
+   */
+  iconUrl: (row) =>
+    buildUrl('/portal/catalog/icon', {
+      package: row.name,
+      catalog: row.catalog,
+      catalogNamespace: row.catalogNamespace,
+    }),
+
+  /**
    * The Subscription that would be created, and what will stop it. **Writes
    * nothing** and is ungated, like §14's router plan: deciding whether to set
    * `ADMIN_PORTAL_INSTALL_ENABLED` means reading what it would let the console
