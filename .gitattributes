@@ -10,3 +10,23 @@
 *.jsx diff
 *.css diff
 *.md  diff
+
+# Line endings are LF in the tree, whatever a checkout writes.
+#
+# Without this, an editor or tool on Windows rewrites a file as CRLF and git
+# reports every line as changed. Twenty files sat in `git status` for weeks that
+# way, from branches whose work had already merged — a one-line edit to
+# api-contract.md showed as 11,806 changed lines, and nobody could say which of
+# the "modified" files held real work. `core.autocrlf` is a per-clone setting
+# and cannot be relied on to be off on the next machine; this is the half the
+# repository controls.
+#
+# It also protects §33. `deploy/olm/*.yaml` is upstream's release vendored byte
+# for byte and pinned by SHA-256 in olm_bundle.py, which refuses to load them if
+# the bytes change. A checkout that wrote them CRLF would break that hash — the
+# OLM install would fail at load with a message about a build that left the
+# files out, on a clone where nothing was wrong except the line endings.
+#
+# `text=auto`, not `text`: git's own binary heuristic still decides, so images
+# and fonts are left alone.
+* text=auto eol=lf
