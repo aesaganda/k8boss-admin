@@ -25,6 +25,8 @@ a value:
 
 from __future__ import annotations
 
+import base64
+
 import pytest
 import yaml
 from kubernetes.client.rest import ApiException
@@ -196,6 +198,7 @@ def _channel(
     version="1.0.0",
     supports=("AllNamespaces",),
     publishes_modes=True,
+    icon=None,
 ):
     """One ``status.channels[]`` entry, as the package server publishes it.
 
@@ -215,6 +218,11 @@ def _channel(
             "containerImage": "quay.io/example/prometheus:1.0.0",
         },
     }
+    # Absent by default, which is what the real operatorhub.io catalog publishes:
+    # not one of its packages carries an icon, so "no icon" is the ordinary case
+    # the fixtures should default to rather than the exception.
+    if icon is not None:
+        csv_description["icon"] = list(icon)
     if publishes_modes:
         csv_description["installModes"] = [
             {"type": mode, "supported": mode in supports}
@@ -1197,3 +1205,173 @@ def test_subscribing_through_the_api_is_refused_with_the_gate_off(
 
     assert response.status_code == 403
     assert response.json()["error"] == "mutations_disabled"
+
+
+# --------------------------------------------------------------------------- #
+# §16.10 icons
+#
+# The catalog this console was built against publishes none — not one of
+# operatorhub.io's 452 packages carries an icon — so the case these tests spend
+# most of their weight on is the absent one, and the rule they hold is that the
+# listing never promises an icon the endpoint will not hand back.
+# --------------------------------------------------------------------------- #
+
+#: A 1x1 PNG. Small enough to read, real enough to decode.
+_PNG_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+)
+
+
+def test_a_package_with_no_icon_says_so_rather_than_promising_one(monkeypatch, fake_k8s):
+    """The ordinary case, and the one the whole community catalog is in."""
+    stub_olm(monkeypatch, lists={"packagemanifests": [_package()]})
+
+    row = portal_service.catalog()["items"][0]
+
+    assert row["hasIcon"] is False
+
+
+def test_a_published_icon_is_reported_on_the_row_without_the_bytes(monkeypatch, fake_k8s):
+    """`hasIcon`, never the base64.
+
+    The bytes stay off the listing for the reason `description` does: one logo
+    apiece across several hundred packages is a response nobody can use.
+    """
+    stub_olm(
+        monkeypatch,
+        lists={
+            "packagemanifests": [
+                _package(channels=[_channel(icon=[{"mediatype": "image/png", "base64data": _PNG_B64}])])
+            ]
+        },
+    )
+
+    row = portal_service.catalog()["items"][0]
+
+    assert row["hasIcon"] is True
+    assert "base64data" not in repr(row)
+
+
+def test_an_icon_in_a_type_this_console_will_not_serve_is_not_advertised(monkeypatch, fake_k8s):
+    """A row claiming an icon is a row whose icon §16.10 will actually return.
+
+    The media type is the catalog's own string and ends up in a Content-Type on
+    this console's origin, so it is allowlisted. Reporting `hasIcon: true` for
+    one that is filtered out would have every such tile request an image, get a
+    refusal and fall back — a promise the listing made and the endpoint broke.
+    """
+    stub_olm(
+        monkeypatch,
+        lists={
+            "packagemanifests": [
+                _package(
+                    channels=[_channel(icon=[{"mediatype": "text/html", "base64data": _PNG_B64}])]
+                )
+            ]
+        },
+    )
+
+    row = portal_service.catalog()["items"][0]
+
+    assert row["hasIcon"] is False
+
+
+def test_the_icon_endpoint_serves_the_bytes_and_refuses_to_let_them_run(
+    client, cluster_id, monkeypatch, fake_k8s,
+):
+    """The bytes come back as an image, hardened.
+
+    SVG is in the allowlist because operator logos overwhelmingly are SVG, and
+    an SVG can carry script — so the response says, in headers, that nothing in
+    it may execute.
+    """
+    stub_olm(
+        monkeypatch,
+        lists={
+            "packagemanifests": [
+                _package(channels=[_channel(icon=[{"mediatype": "image/png", "base64data": _PNG_B64}])])
+            ]
+        },
+    )
+
+    response = client.get(
+        "/api/portal/catalog/icon",
+        params={"cluster_id": cluster_id, "package": "prometheus"},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("image/png")
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert "default-src 'none'" in response.headers["content-security-policy"]
+    assert "sandbox" in response.headers["content-security-policy"]
+    assert response.content == base64.b64decode(_PNG_B64)
+
+
+def test_the_icon_endpoint_is_a_404_when_the_catalog_published_none(
+    client, cluster_id, monkeypatch, fake_k8s,
+):
+    """Not an error state for the operator: the console draws a placeholder."""
+    stub_olm(monkeypatch, lists={"packagemanifests": [_package()]})
+
+    response = client.get(
+        "/api/portal/catalog/icon",
+        params={"cluster_id": cluster_id, "package": "prometheus"},
+    )
+
+    assert response.status_code == 404
+    assert response.json()["error"] == "not_found"
+
+
+def test_the_icon_endpoint_will_not_serve_a_type_outside_the_allowlist(
+    client, cluster_id, monkeypatch, fake_k8s,
+):
+    """The second half of the allowlist, at the endpoint rather than the shaper.
+
+    A catalog naming `text/html` must not get this console to serve somebody
+    else's markup from its own origin, whatever the listing said.
+    """
+    stub_olm(
+        monkeypatch,
+        lists={
+            "packagemanifests": [
+                _package(
+                    channels=[
+                        _channel(
+                            icon=[{"mediatype": "text/html", "base64data": _PNG_B64}]
+                        )
+                    ]
+                )
+            ]
+        },
+    )
+
+    response = client.get(
+        "/api/portal/catalog/icon",
+        params={"cluster_id": cluster_id, "package": "prometheus"},
+    )
+
+    assert response.status_code == 404
+    assert "text/html" not in response.headers["content-type"]
+
+
+def test_an_oversized_icon_is_refused_rather_than_served(
+    client, cluster_id, monkeypatch, fake_k8s,
+):
+    """A logo is kilobytes; the bytes come from an image the cluster pulled."""
+    oversized = base64.b64encode(b"\x89PNG" + b"\x00" * (portal_service.ICON_MAX_BYTES + 1)).decode()
+    stub_olm(
+        monkeypatch,
+        lists={
+            "packagemanifests": [
+                _package(channels=[_channel(icon=[{"mediatype": "image/png", "base64data": oversized}])])
+            ]
+        },
+    )
+
+    response = client.get(
+        "/api/portal/catalog/icon",
+        params={"cluster_id": cluster_id, "package": "prometheus"},
+    )
+
+    assert response.status_code == 404
+    assert "larger than" in response.json()["message"]

@@ -89,8 +89,20 @@ async function openPortal(page) {
   await expectPageRendered(page, 'Operator portal');
 }
 
+/**
+ * Switch the catalog to the table.
+ *
+ * The catalog opens as tiles — picking one operator out of several hundred is a
+ * scan, not a sort. The table is one toggle away and is what the assertions
+ * about columns, tri-state cells and the row menu below are written against.
+ */
+async function showCatalogTable(page) {
+  await page.getByTestId('portal-view-table').click();
+}
+
 /** Open the Subscribe dialog on a catalog row and get as far as a plan. */
 async function openSubscribe(page, rowName, namespace = 'monitoring') {
+  await showCatalogTable(page);
   await page.getByRole('row', { name: rowName }).getByRole('button').click();
   await page.getByRole('menuitem', { name: 'Subscribe…' }).click();
   await expect(page.getByTestId('subscribe-form')).toBeVisible();
@@ -106,6 +118,7 @@ test.describe('the catalog', () => {
   test('lists what this cluster can install, and where from', async ({ page }) => {
     await mockApi(page, { preflight: ALLOW_ALL });
     await openPortal(page);
+    await showCatalogTable(page);
 
     const row = page.getByRole('row', { name: /Prometheus Operator/ });
     await expect(row).toBeVisible();
@@ -121,6 +134,131 @@ test.describe('the catalog', () => {
     // ago has published no connection state, and calling that unhealthy sends
     // somebody to debug a registry that is merely still starting.
     await expect(catalogs.getByTestId('status-badge').filter({ hasText: 'Private mirror' })).toBeVisible();
+  });
+
+  test('opens as tiles, and the icon a catalog did not publish is a placeholder', async ({
+    page,
+  }) => {
+    await mockApi(page, { preflight: ALLOW_ALL });
+    await openPortal(page);
+
+    const tile = page.getByTestId('package-tile-prometheus');
+    await expect(tile).toBeVisible();
+    await expect(tile).toContainText('Prometheus Operator');
+    await expect(tile).toContainText('provided by Red Hat');
+    // Which catalog vouched for it, which is what OpenShift's corner badge is.
+    await expect(tile).toContainText('Community Operators');
+
+    // `hasIcon: true` fetches the image. `hasIcon: false` never asks and draws
+    // the placeholder instead — the ordinary case, because operatorhub.io's
+    // catalog publishes an icon for not one of its packages, and a broken-image
+    // glyph on every tile would read as a console that could not load them.
+    await expect(tile.getByTestId('package-icon')).toBeVisible();
+    await expect(
+      page.getByTestId('package-tile-grafana-operator').getByTestId('package-icon-placeholder'),
+    ).toBeVisible();
+  });
+
+  test('the rail filters the grid, and counts the whole catalog rather than the filtered view', async ({
+    page,
+  }) => {
+    await mockApi(page, { preflight: ALLOW_ALL });
+    await openPortal(page);
+
+    // Both packages are in Monitoring; only one is in Logging & Tracing.
+    await expect(page.getByTestId('catalog-category-Monitoring')).toContainText('(2)');
+    await page.getByTestId('catalog-category-Logging & Tracing').click();
+
+    await expect(page.getByTestId('package-tile-prometheus')).toBeVisible();
+    await expect(page.getByTestId('package-tile-grafana-operator')).toHaveCount(0);
+
+    // The count does not move with the selection. A rail whose numbers changed
+    // as you ticked would make an unticked option look like it had disappeared
+    // from the cluster rather than from the current filter.
+    await expect(page.getByTestId('catalog-category-Monitoring')).toContainText('(2)');
+    await expect(page.getByTestId('catalog-filters')).toContainText('Showing 1 of 2');
+  });
+
+  test('a tile whose Subscription state is unknown never reads as "not installed"', async ({
+    page,
+  }) => {
+    await mockApi(page, { preflight: ALLOW_ALL, portalCatalog: INSTALLED_UNREADABLE });
+    await openPortal(page);
+
+    // The same claim the table's cell makes, on the surface that is now the
+    // default one. A tile is where somebody decides to subscribe, so this is
+    // exactly where "unknown" collapsing into "no" creates the second
+    // Subscription.
+    const tile = page.getByTestId('package-tile-prometheus');
+    await expect(tile.getByTestId('status-badge')).toContainText('Install state unknown');
+    await expect(tile.getByText('not installed')).toHaveCount(0);
+  });
+
+  test('the table row menu opens the plan on the same terms a tile does', async ({ page }) => {
+    // The two entry points to the one §16 write must not disagree about whether
+    // it can be reached. They did: the row menu was disabled by the deployment
+    // gate while the tile opened the dialog, so switching view silently changed
+    // what an operator could read about a write neither view can perform.
+    const GATE_OFF = {
+      enabled: false,
+      enabledDetail:
+        'Subscribing is switched off on this deployment: ADMIN_PORTAL_INSTALL_ENABLED is not set.',
+    };
+    await mockApi(page, {
+      preflight: ALLOW_ALL,
+      portalCatalog: { ...FIXTURES.portalCatalog, ...GATE_OFF },
+      portalPlan: (body) => ({
+        ...FIXTURES.portalPlan,
+        ...GATE_OFF,
+        package: body.package,
+        namespace: body.namespace,
+        target: { ...FIXTURES.portalPlan.target, namespace: body.namespace },
+      }),
+    });
+    await openPortal(page);
+    await showCatalogTable(page);
+
+    const item = page.getByRole('menuitem', { name: 'Subscribe…' });
+    await page.getByRole('row', { name: /Prometheus Operator/ }).getByRole('button').click();
+    await expect(item).toBeEnabled();
+    await item.click();
+
+    await expect(page.getByTestId('subscribe-form')).toBeVisible();
+    await page.getByTestId('subscribe-namespace').fill('monitoring');
+    await expect(page.getByTestId('subscribe-disabled')).toBeVisible();
+  });
+
+  test('a tile opens the subscribe plan even where subscribing is switched off', async ({
+    page,
+  }) => {
+    const GATE_OFF = {
+      enabled: false,
+      enabledDetail:
+        'Subscribing is switched off on this deployment: ADMIN_PORTAL_INSTALL_ENABLED is not set.',
+    };
+    await mockApi(page, {
+      preflight: ALLOW_ALL,
+      portalCatalog: { ...FIXTURES.portalCatalog, ...GATE_OFF },
+      portalPlan: (body) => ({
+        ...FIXTURES.portalPlan,
+        ...GATE_OFF,
+        package: body.package,
+        namespace: body.namespace,
+        target: { ...FIXTURES.portalPlan.target, namespace: body.namespace },
+      }),
+    });
+    await openPortal(page);
+
+    await page.getByTestId('package-tile-prometheus').click();
+
+    // `POST /portal/subscriptions/plan` writes nothing and is ungated, and the
+    // dialog says so itself — reading what enabling the gate would allow is the
+    // thing somebody does *because* it is off. Greying the tile would take that
+    // away; the control rule 11.4 disables is Confirm, inside.
+    await expect(page.getByTestId('subscribe-form')).toBeVisible();
+    await page.getByTestId('subscribe-namespace').fill('monitoring');
+    await expect(page.getByTestId('subscribe-disabled')).toBeVisible();
+    await expect(page.getByTestId('subscribe-document')).toBeVisible();
   });
 });
 
@@ -352,6 +490,7 @@ test.describe('a Subscription listing that did not answer', () => {
   test('renders Unknown, never "not installed"', async ({ page }) => {
     await mockApi(page, { preflight: ALLOW_ALL, portalCatalog: INSTALLED_UNREADABLE });
     await openPortal(page);
+    await showCatalogTable(page);
 
     const row = page.getByRole('row', { name: /Prometheus Operator/ });
     const unknown = row.locator('[data-testid="nullable-cell"][data-nullable="true"]');

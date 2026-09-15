@@ -16,15 +16,18 @@ later.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import logging
 from typing import Any, Literal
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.api.bodies import MutationBody
 from app.admin import olm as olm_admin
 from app.admin import portal as portal_admin
+from app.errors import NotFound, UpstreamError
 from app.services import portal as portal_service
 
 logger = logging.getLogger(__name__)
@@ -140,6 +143,81 @@ def get_portal_catalog(
     body = portal_service.catalog(limit=limit)
     body.update(_gate())
     return body
+
+
+@router.get("/portal/catalog/icon")
+def get_portal_icon(
+    package: str = Query(..., min_length=1, max_length=253),
+    catalog: str | None = Query(
+        None,
+        min_length=1,
+        max_length=253,
+        description=(
+            "The CatalogSource this package's row came from. Two catalogs may "
+            "offer the same package name and ship different logos for it."
+        ),
+    ),
+    catalogNamespace: str | None = Query(None, min_length=1, max_length=253),  # noqa: N803
+) -> Response:
+    """§16.10 — one package's icon, as image bytes.
+
+    A separate request per icon rather than base64 on every §16.3 row, for the
+    reason the catalog row carries no ``description``: a listing of several
+    hundred packages that inlined a logo apiece is a response nobody can use.
+    The browser asks for the ones it is actually painting, and caches them.
+
+    The bytes are somebody else's, pulled from a registry image this console did
+    not build, so three things bound what leaves here. The media type is an
+    allowlist (``ICON_MEDIA_TYPES``) and never the catalog's own string. The
+    decoded size is capped. And the response carries a CSP that permits nothing
+    plus ``nosniff`` — SVG is in the allowlist because operator logos are
+    overwhelmingly SVG, and an SVG can carry script, so it is served in a way
+    that cannot run any: the console renders these in an ``<img>``, which does
+    not execute script, and the header refuses it for anything that tries.
+    """
+    obj = portal_service.find_package(
+        package, catalog_name=catalog, catalog_namespace=catalogNamespace
+    )
+    icon = portal_service.icon_of(portal_service.channel_named(obj, None))
+    if icon is None:
+        raise NotFound(
+            f"The catalog published no icon for {package}.",
+            hint="Catalogs routinely ship none; the console draws a placeholder instead.",
+            context={"resource": "packagemanifests", "name": package},
+        )
+
+    try:
+        raw = base64.b64decode(icon["base64data"], validate=True)
+    except (binascii.Error, ValueError) as e:
+        # The catalog said there was an icon and the bytes are not decodable.
+        # That is the catalog's defect, not this console's, and it is reported
+        # as one rather than served as a broken image.
+        raise UpstreamError(
+            f"The icon {package} publishes is not valid base64.",
+            detail=f"{type(e).__name__}: {e}",
+            context={"resource": "packagemanifests", "name": package},
+        ) from e
+
+    if len(raw) > portal_service.ICON_MAX_BYTES:
+        raise NotFound(
+            f"The icon {package} publishes is larger than this console will serve.",
+            detail=f"{len(raw)} bytes decoded, limit {portal_service.ICON_MAX_BYTES}.",
+            hint="The console draws a placeholder instead.",
+            context={"resource": "packagemanifests", "name": package},
+        )
+
+    return Response(
+        content=raw,
+        media_type=icon["mediatype"],
+        headers={
+            # Short and private. A catalog can be re-pointed at a new image
+            # under the same package name, so an immutable cache would pin a
+            # logo the cluster has stopped publishing.
+            "Cache-Control": "private, max-age=300",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+        },
+    )
 
 
 @router.get("/portal/subscriptions")

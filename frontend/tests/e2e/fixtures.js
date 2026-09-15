@@ -1718,6 +1718,9 @@ export const FIXTURES = {
         capabilityLevel: 'Deep Insights',
         certified: false,
         installModes: ['OwnNamespace', 'SingleNamespace', 'AllNamespaces'],
+        // The catalog published a logo for this one and none for the other, so
+        // both tile renderings are exercised by the default fixture.
+        hasIcon: true,
         installed: false,
         installations: [],
       },
@@ -1740,6 +1743,7 @@ export const FIXTURES = {
         capabilityLevel: null,
         certified: null,
         installModes: null,
+        hasIcon: false,
         installed: true,
         installations: [
           {
@@ -5537,6 +5541,22 @@ export async function mockApi(
     /* ── §16 the operator portal ───────────────────────────────────────── */
 
     if (path === '/portal/catalog') return json(portalCatalog ?? FIXTURES.portalCatalog);
+
+    // §16.10. A 1x1 PNG: what a tile asserts is that a row whose `hasIcon` is
+    // true renders an <img> and not the placeholder, never what the logo looks
+    // like. A row whose `hasIcon` is false never reaches here, which is the
+    // other half of the promise — and the half worth keeping true, because the
+    // real community catalog publishes an icon for none of its packages.
+    if (path === '/portal/catalog/icon') {
+      return route.fulfill({
+        status: 200,
+        contentType: 'image/png',
+        body: Buffer.from(
+          'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+          'base64',
+        ),
+      });
+    }
 
     /* ── §33 installing OLM itself ─────────────────────────────────────── */
 
