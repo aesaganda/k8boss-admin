@@ -146,7 +146,6 @@ the change matters.
 
 ## Questions
 
-Open a [discussion or issue](../../issues) if something here is unclear
-before you've written code — a five-minute question up front is cheaper than
-a PR built on a wrong assumption about the write funnel or the bundle
-boundary.
+Open an [issue](../../issues) if something here is unclear before you've
+written code — a five-minute question up front is cheaper than a PR built on
+a wrong assumption about the write funnel or the bundle boundary.

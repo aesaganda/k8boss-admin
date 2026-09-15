@@ -1291,6 +1291,14 @@ Before enabling the optional Ingress, either enable local/LDAP auth with the
 | [`docs/adr-0007-impersonation.md`](docs/adr-0007-impersonation.md) | **Proposed.** Why the console acts as one ServiceAccount per cluster, what impersonating the operator would fix and cost, and the conditions it would have to meet |
 | [`CLAUDE.md`](CLAUDE.md) | Working agreements for anyone (or anything) changing this repository |
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the invariants a change has to
+respect, how to run the test suites, and what CI checks. Found a security
+issue? That goes to [SECURITY.md](SECURITY.md), not a public issue.
+Participation is governed by the
+[Code of Conduct](CODE_OF_CONDUCT.md).
+
 ## License
 
 Apache-2.0. Copyright 2026 A. Eren Saganda. See [LICENSE](LICENSE).

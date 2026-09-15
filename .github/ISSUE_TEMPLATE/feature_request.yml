@@ -1,0 +1,44 @@
+name: Feature request
+description: Propose a new capability or a change to an existing one.
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If this is about the console installing or writing something new
+        **on its own** — a third bundle alongside the router (§14) and OLM
+        (§33), or any write outside the funnel `docs/safety-model.md`
+        describes — read
+        [`docs/adr-0004-shipped-router.md`](https://github.com/aesaganda/k8boss-admin/blob/main/docs/adr-0004-shipped-router.md)
+        and
+        [`docs/adr-0008-shipped-olm.md`](https://github.com/aesaganda/k8boss-admin/blob/main/docs/adr-0008-shipped-olm.md)
+        first. That boundary is deliberately hard to move, and a request to
+        move it needs to engage with why it's there, not just with the
+        feature it would enable.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: >-
+        What are you trying to do today that the console doesn't support,
+        and what do you currently do instead (kubectl, a different tool,
+        nothing)?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed approach
+      description: >-
+        If you have one. If it's a write: does it fit the existing funnel
+        (`backend/app/admin/mutate.py` — gate, preflight, dry-run, diff,
+        audit), or does it need something the funnel doesn't offer? If the
+        latter, say what and why.
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

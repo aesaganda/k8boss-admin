@@ -1,0 +1,83 @@
+name: Bug report
+description: Something is broken — a wrong answer, a write that shouldn't have happened, a crash.
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If this looks like a security issue — an RBAC bypass, a dry-run that
+        wasn't actually dry, a write missing from the audit trail, credential
+        exposure — stop and use **Security vulnerability** in the issue
+        chooser instead. See [SECURITY.md](https://github.com/aesaganda/k8boss-admin/blob/main/SECURITY.md).
+
+  - type: input
+    id: version
+    attributes:
+      label: Version / commit
+      description: >-
+        `git rev-parse HEAD` in the checkout you're running, or the image
+        tag if you pulled one.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: How is it deployed?
+      options:
+        - docker compose (the quickstart)
+        - Kubernetes (deploy/ manifests)
+        - Something else — describe below
+    validations:
+      required: true
+
+  - type: textarea
+    id: flags
+    attributes:
+      label: Feature flags enabled
+      description: >-
+        Any of ADMIN_ALLOW_MUTATIONS, ADMIN_NODE_DEBUG_ENABLED,
+        ADMIN_CLI_ENABLED, ADMIN_ROUTER_MANAGE_ENABLED,
+        ADMIN_PORTAL_INSTALL_ENABLED, ADMIN_OLM_INSTALL_ENABLED,
+        SECRET_REVEAL_ENABLED that are set to true. Leave blank if you don't
+        know — that's useful information too.
+
+  - type: input
+    id: cluster
+    attributes:
+      label: Cluster
+      description: >-
+        Distribution and version (e.g. kind v1.30, EKS 1.29, OpenShift
+        4.16). If the bug is UI-only, say so instead.
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs. actual behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: error
+    attributes:
+      label: Error code / response body
+      description: >-
+        If the console returned a structured error (`rbac_denied`,
+        `conflict`, `unsupported`, …), paste the response body — it says
+        more than the HTTP status alone.
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: >-
+        Backend logs are JSON. Paste the relevant lines rather than a
+        screenshot — they're easier to search and to redact.
