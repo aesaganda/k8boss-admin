@@ -5,16 +5,23 @@ Middleware order is load-bearing, so it is spelled out here rather than left to
 the reader of ``add_middleware`` calls. Starlette wraps each added middleware
 *around* what came before, so the last one added is the outermost:
 
-    CORS  ->  request logging  ->  cluster context  ->  exception handlers  ->  routes
+    CORS  ->  unhandled-error floor  ->  request logging  ->  authentication
+          ->  cluster context  ->  exception handlers  ->  routes
 
 CORS outermost is the point. Everything the app can produce — including a 502 for
 an unreachable cluster and a 403 naming a missing RBAC grant — passes back out
 through it and keeps its ``Access-Control-Allow-Origin`` header. When an error is
-rendered *outside* CORS (which is what happens to anything reaching Starlette's
-ServerErrorMiddleware) the browser blocks the response and ``fetch()`` rejects
+rendered *outside* CORS the browser blocks the response and ``fetch()`` rejects
 with ``TypeError: Failed to fetch``: the operator sees a network error and the
-real reason is never delivered. ``register_exception_handlers`` exists to make
-sure nothing gets that far.
+real reason is never delivered. ``register_exception_handlers`` maps everything
+this application raises deliberately, so nothing anticipated gets that far.
+
+The floor under those handlers is the second ``ServerErrorMiddleware`` added
+below, and it has to be a middleware rather than another handler registration:
+Starlette's own ``ServerErrorMiddleware`` is the outermost layer of the stack by
+construction — outside even CORS — and a handler cannot be registered further out
+than the layer that holds it. See the comment above that ``add_middleware`` call
+for what reaches it.
 
 Cluster context sits inside request logging so the correlation id is set before
 the context is pinned, and both are outside the routes that read them.

@@ -916,10 +916,17 @@ read.
 Four refusals carry the safety of it:
 
 * **Never adopt an object it did not create.** An install that finds a
-  ClusterRole of the same name without `managed-by: k8boss-admin` refuses and
-  names it — before writing anything, on a dry run as much as on a real one, and
-  the refusal is audited. An operator who asked for an install and got a silent
-  takeover of another team's object is the worst outcome this feature has.
+  ClusterRole of the same name without `managed-by: k8boss-admin` refuses —
+  before writing anything, on a dry run as much as on a real one, and the
+  refusal is audited. An operator who asked for an install and got a silent
+  takeover of another team's object is the worst outcome this feature has. The
+  refusal names **every** conflicting object in `context.conflicts[]`, not the
+  first one: the scan has already read all eight by the time it can decide, so
+  stopping at one costs a round trip per conflict — delete, install, get refused
+  on the next, delete, install — where each refusal reads as a fresh failure
+  rather than as the second of three, and nothing says how many remain. One
+  audit row per object too, because the row is looked for by the object it was
+  about.
 * **A partial install is reported as partial.** `installed` is false unless all
   eight landed. There is no rollback: deleting what succeeded is more writes
   nobody approved, against objects that may already be in use.
@@ -1243,16 +1250,30 @@ Being honest about the edges is part of the model:
   the port private or put an authenticating proxy in front. Built-in local/LDAP
   auth removes that limitation, but does not replace Kubernetes preflight or the
   deployment-wide mutation gate.
-* **The console's users are not cluster identities.** Every call to a cluster is
-  made as that cluster's one registered credential, so §2's preflight answers
-  about the console rather than about the operator reading it — correct about
-  whether the write will succeed, correct about the wrong subject — and the
-  cluster's own audit log records the ServiceAccount for every write this
-  console makes. Two operators with different console roles have identical power
-  over every registered cluster. [`adr-0007-impersonation.md`](adr-0007-impersonation.md)
-  records what impersonating the operator would fix, why the grant it needs is
-  cluster-admin by proxy, and the conditions under which it could be built. It
-  is proposed, not accepted, and nothing implements it.
+* **The console's users are not cluster identities — unless a cluster has opted
+  in.** By default every call to a cluster is made as that cluster's one
+  registered credential, so §2's preflight answers about the console rather than
+  about the operator reading it — correct about whether the write will succeed,
+  correct about the wrong subject — and the cluster's own audit log records the
+  ServiceAccount for every write this console makes. Two operators with
+  different console roles have identical power *through* that credential.
+  [`adr-0007-impersonation.md`](adr-0007-impersonation.md) is **accepted and
+  implemented**: §18 is what a cluster with `impersonation_enabled` does
+  instead, including why the grant it needs is cluster-admin by proxy and why it
+  therefore ships commented out. This bullet describes every cluster that has
+  not set the flag, which is the default and, until somebody changes it, all of
+  them.
+* **Identical power through the credential is not identical power over the
+  credential.** With `AUTH_ENABLED=true`, registering a cluster, editing one and
+  de-registering one are administrator-only. That is not paperwork: the edit is
+  a partial update where an omitted `token` keeps the stored one, so an account
+  that can move `api_server` without sending a `token` has pointed this
+  console's bearer token at a host it chose and is handed the token on the next
+  request. Clearing `impersonation_enabled` is the quiet version — every later
+  call to that cluster reverts to the ServiceAccount, and the caller leaves
+  their own RBAC behind for the console's. With `AUTH_ENABLED=false` there is no
+  console role to check and the proxy in front decides, as it does for every
+  other endpoint.
 * **There is no undo.** This is the reason the whole flow is dry-run-first rather
   than optimistic-with-rollback; see [`adr-0001-dry-run-first.md`](adr-0001-dry-run-first.md).
   A deleted StatefulSet's PersistentVolumeClaims are not recreated by any button
