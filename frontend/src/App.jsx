@@ -81,6 +81,7 @@ const Disruption = lazyPage('Disruption budgets', () => import('./pages/Disrupti
 const Clusters = lazyPage('Clusters', () => import('./pages/Clusters'));
 const Audit = lazyPage('Audit', () => import('./pages/Audit'));
 const Users = lazyPage('Users', () => import('./pages/Users'));
+const Sessions = lazyPage('Sessions', () => import('./pages/Sessions'));
 
 function NotFound() {
   return (
@@ -172,6 +173,10 @@ function ConsoleRoutes() {
               <Route path="clusters" element={<Clusters />} />
               <Route path="audit" element={<Audit />} />
               <Route path="users" element={<Users />} />
+              {/* §12.7. Its own URL rather than a tab on Users: the accounts
+                  that exist and the sessions that are live are two different
+                  questions, and the second one gets asked in a hurry. */}
+              <Route path="sessions" element={<Sessions />} />
               <Route path="login" element={<Navigate to="/" replace />} />
 
               <Route path="*" element={<NotFound />} />

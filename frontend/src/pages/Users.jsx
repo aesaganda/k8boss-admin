@@ -14,7 +14,7 @@ import {
   ModalHeader,
   TextInput,
 } from '@patternfly/react-core';
-import { users as usersApi } from '../api/client';
+import { sessions as sessionsApi, users as usersApi } from '../api/client';
 import { useAuth } from '../contexts/AuthContext';
 import { useNotify } from '../contexts/NotificationContext';
 import { formatTimestamp } from '../utils/format';
@@ -23,7 +23,9 @@ import {
   DataTable,
   EmptyState,
   ErrorState,
+  NullableCell,
   PageHeader,
+  SectionHeader,
   StatusBadge,
 } from '../components/ui';
 
@@ -65,6 +67,127 @@ const SOURCE_LABELS = {
 const PROVIDER_MANAGED = new Set(
   Object.keys(SOURCE_LABELS).filter((source) => source !== 'local'),
 );
+
+/**
+ * §12.8. How anybody signs in to this deployment, above the accounts it produced.
+ *
+ * It is here rather than on a page of its own because it answers the question
+ * this table raises and cannot answer: an `LDAP` account whose role is `admin`
+ * says nothing about *which* directory it came from or which group made it an
+ * administrator, and until now the only place those lived was the container's
+ * environment.
+ *
+ * **Read-only, deliberately.** Providers are environment configuration, one of
+ * each kind per deployment (§12.4), and the contract says out loud that several
+ * of the same kind is a design change rather than a config key. An Edit button
+ * here would edit a copy and report a save, so each row names the variable
+ * prefix that does change it and stops there.
+ *
+ * The methods this deployment has **not** configured are named in one line
+ * rather than given rows of their own: four "not configured" rows above the
+ * table an administrator came for is noise, and dropping them entirely would
+ * lose the difference between a method this console does not support and one
+ * nobody has set up yet.
+ */
+function SignInMethods() {
+  const [rows, setRows] = useState([]);
+  const [error, setError] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let live = true;
+    sessionsApi
+      .providers()
+      .then((result) => {
+        if (live) setRows(result.items ?? []);
+      })
+      .catch((err) => {
+        if (live) setError(err);
+      })
+      .finally(() => {
+        if (live) setLoading(false);
+      });
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  const columns = useMemo(
+    () => [
+      { key: 'label', title: 'Method', sortable: true },
+      {
+        key: 'endpoint',
+        title: 'Points at',
+        // Unknown, not blank, and the explanation depends on the row: local
+        // accounts have nowhere to point, while an *enabled* directory or
+        // issuer with no address is a misconfiguration and must not read as a
+        // normal absence.
+        cell: (row) => (
+          <NullableCell
+            value={row.endpoint}
+            reason={
+              row.name === 'local'
+                ? 'Local accounts are this console\u2019s own password table, so there is no address.'
+                : 'This method is enabled with no address configured, which is a misconfiguration rather than a default.'
+            }
+          />
+        ),
+      },
+      {
+        key: 'admin_group',
+        title: 'Administrators',
+        cell: (row) => (
+          <NullableCell
+            value={row.admin_group}
+            reason="No group is mapped, so this method grants the default console role and promotions are made here instead."
+          />
+        ),
+      },
+      {
+        key: 'settings_prefix',
+        title: 'Configured by',
+        cell: (row) => <code>{row.settings_prefix}*</code>,
+      },
+    ],
+    [],
+  );
+
+  // A failed read is reported and never rendered as "no methods": a console
+  // that authenticated this request has at least one, so an empty panel here
+  // would be a visibly impossible answer.
+  if (error) {
+    return (
+      <ErrorState title="The configured sign-in methods could not be read" error={error} />
+    );
+  }
+
+  const configured = rows.filter((row) => row.enabled);
+  const absent = rows.filter((row) => !row.enabled);
+
+  return (
+    <>
+      <SectionHeader
+        title="Sign-in methods"
+        description="Configured from the environment and read-only here. Every account below arrived through one of them."
+      />
+      <DataTable
+        columns={columns}
+        rows={configured}
+        rowKey="name"
+        loading={loading}
+        ariaLabel="Sign-in methods"
+        emptyTitle="No sign-in methods"
+        emptyDescription="This deployment reports no configured method, which cannot be true of a console that just authenticated this request — read it again before acting on it."
+      />
+      {absent.length > 0 && (
+        <p className="admin-form-help">
+          Not configured on this deployment:{' '}
+          {absent.map((row) => `${row.label} (${row.settings_prefix}*)`).join(', ')}.
+        </p>
+      )}
+    </>
+  );
+}
 
 function UserForm({ isOpen, editing, onClose, onSaved }) {
   const { notify } = useNotify();
@@ -209,7 +332,7 @@ function UserForm({ isOpen, editing, onClose, onSaved }) {
 }
 
 export default function Users() {
-  const { enabled, ldapEnabled, user: currentUser } = useAuth();
+  const { enabled, user: currentUser } = useAuth();
   const { notify } = useNotify();
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -298,11 +421,15 @@ export default function Users() {
         subtitle="Local accounts and identities synchronized from the configured directory."
         actions={<Button variant="primary" onClick={() => setEditing(EMPTY_FORM)}>Add local user</Button>}
       />
-      {ldapEnabled && (
-        <Alert isInline variant="info" title="LDAP authentication enabled" className="admin-users__provider">
-          Directory users appear after their first successful login. Administrator membership is mapped by LDAP_ADMIN_GROUP_DN.
-        </Alert>
-      )}
+      {/* The LDAP-only banner that used to sit here is gone: the panel below
+          says the same thing for every configured method and says it with the
+          deployment's actual directory and group, rather than naming the
+          variable the group is configured in. */}
+      <SignInMethods />
+      <SectionHeader
+        title="Console accounts"
+        description="Local users, plus every identity from a method above that has signed in at least once — directory and single sign-on accounts appear after their first successful login, never before."
+      />
       {error && <ErrorState title="Users could not be loaded" error={error} onRetry={refresh} />}
       <DataTable
         columns={columns}

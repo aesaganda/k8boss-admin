@@ -23,11 +23,12 @@ than a verified identity, which is exactly what it is.
 from __future__ import annotations
 
 import functools
+import hashlib
 import logging
 import secrets
 from urllib.parse import parse_qsl, urlencode
 
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, Depends, Path, Request, Response
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -44,7 +45,7 @@ from app.errors import (
     TooManyAttempts,
 )
 from app.identity import handshake as handshake_service
-from app.identity import oidc, saml, sso, throttle
+from app.identity import inventory, oidc, saml, sso, throttle
 from app.identity.dependencies import current_session, require_admin
 from app.identity.service import (
     FEDERATED_SOURCES,
@@ -54,9 +55,11 @@ from app.identity.service import (
     create_local_user,
     create_session,
     hash_password,
+    list_active_sessions,
     normalize_username,
     provision_federated_user,
     revoke_session,
+    revoke_session_hash,
     revoke_user_sessions,
 )
 from app.k8s.context import get_current_source_ip
@@ -186,6 +189,37 @@ def _normalized_or_raw(username: str) -> str:
         return (username or "").strip()[:255] or "(empty)"
 
 
+def _session_provenance(request: Request) -> dict[str, str | None]:
+    """Where this sign-in is coming from, recorded on the session row (§12.7).
+
+    The **peer address**, which is the same value the audit trail records, and
+    deliberately not an ``X-Forwarded-For`` claim: believing that header needs a
+    configured list of trusted proxies, and without one it is a string the
+    caller chose — an address in a session list that an attacker can set is
+    worse than no address, because an administrator reads it as evidence.
+
+    The user agent is bounded because it is caller-controlled and lands in a
+    column. ``None`` rather than an empty string for a request that sent none:
+    the listing renders unknown differently from blank.
+    """
+    agent = (request.headers.get("user-agent") or "").strip()[:512]
+    return {
+        "ip_address": request.client.host if request.client else None,
+        "user_agent": agent or None,
+    }
+
+
+def _cookie_token_hash(request: Request) -> str | None:
+    """The digest of the caller's own session cookie, or ``None``.
+
+    Used only to mark which row in §12.7's listing is the caller's own. Hashing
+    rather than comparing raw values because the digest is what the table is
+    keyed by — the raw token is never stored anywhere to compare against.
+    """
+    raw = request.cookies.get(settings.auth_cookie_name)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest() if raw else None
+
+
 def _set_session_cookie(response: Response, raw_token: str) -> None:
     """Attach the session cookie. One place, so its attributes cannot diverge.
 
@@ -252,7 +286,9 @@ def auth_config() -> dict:
 
 
 @router.post("/login")
-def login(body: LoginBody, db: Session = Depends(get_db)) -> JSONResponse:
+def login(
+    body: LoginBody, request: Request, db: Session = Depends(get_db)
+) -> JSONResponse:
     """Local or LDAP sign-in. Throttled, and audited on every terminal state."""
     if not settings.auth_enabled:
         raise Invalid("Application authentication is not enabled on this deployment.")
@@ -327,7 +363,7 @@ def login(body: LoginBody, db: Session = Depends(get_db)) -> JSONResponse:
     throttle.release(actor)
     throttle.release(user.username)
 
-    raw_token, identity = create_session(db, user)
+    raw_token, identity = create_session(db, user, **_session_provenance(request))
     _audit_signin(
         outcome="applied", username=user.username, method=user.auth_source,
         detail=f"Signed in via {user.auth_source} with the {user.role} role.",
@@ -632,7 +668,11 @@ def _complete_sso(
     # impersonate: which sources qualify is ADR-0007's decision to change, and it
     # cannot be revisited for a session that never carried the values.
     raw_token, session = create_session(
-        db, user, idp_username=identity.username, idp_groups=identity.groups,
+        db,
+        user,
+        idp_username=identity.username,
+        idp_groups=identity.groups,
+        **_session_provenance(request),
     )
     _audit_signin(
         outcome="applied", username=user.username, method=module.NAME,
@@ -746,6 +786,96 @@ def saml_metadata(request: Request) -> Response:
         content=saml.metadata_xml(acs_url=_callback_url(request, saml)),
         media_type="application/samlmetadata+xml",
     )
+
+
+# --------------------------------------------------------------------------- #
+# Active sessions and configured sign-in methods (§12.7, §12.8)
+# --------------------------------------------------------------------------- #
+
+
+@router.get("/sessions")
+def list_sessions(
+    request: Request,
+    _admin=Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> dict:
+    """§12.7. Every session that can currently act on this console.
+
+    Administrator-only, like §12.6: the rows name who is signed in, from which
+    address, and each one can be revoked. Expired rows are excluded rather than
+    listed as inactive — they are deleted lazily, so "how many people can act on
+    this console right now" would otherwise be answered with a count that
+    includes browsers closed last week.
+    """
+    return envelope(
+        list_active_sessions(db, current_token_hash=_cookie_token_hash(request))
+    )
+
+
+@router.delete("/sessions/{token_hash}", status_code=204)
+def revoke_console_session(
+    token_hash: str = Path(..., pattern="^[0-9a-f]{64}$"),
+    _admin=Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> Response:
+    """§12.7. Revoke one session, including the caller's own.
+
+    Recorded on both terminal states. A revocation that found nothing is
+    ``denied`` and not silence: "I revoked that session" and "there was no such
+    session" are different answers, and a trail that renders the second as the
+    first tells an incident review that access was cut when it was not.
+
+    The digest is validated as a digest rather than looked up as whatever
+    arrived. A caller-controlled string of any length reaching a primary-key
+    lookup is not dangerous here, but a 404 for a value that was never a session
+    id claims the shape was right and the row was missing, which is one wrong
+    answer more than necessary.
+
+    Revoking one's own session is permitted and needs no special case: the row
+    is gone, so the cookie the browser still holds resolves to nothing on the
+    next request, which is exactly what an expired session does. The SPA already
+    branches on ``authentication_required`` and offers sign-in.
+    """
+    username = revoke_session_hash(db, token_hash)
+    if username is None:
+        recorder.record_console_event(
+            verb="delete",
+            resource="sessions",
+            name=None,
+            outcome="denied",
+            detail="Refused a session revocation: that session does not exist.",
+            error="not_found: no session with the requested token digest.",
+        )
+        raise NotFound(
+            "That console session does not exist. It may already have been "
+            "revoked or expired.",
+            context={"resource": "sessions"},
+        )
+    recorder.record_console_event(
+        verb="delete",
+        resource="sessions",
+        name=username,
+        outcome="applied",
+        detail=f"Revoked an active console session belonging to {username}.",
+    )
+    return Response(status_code=204)
+
+
+@router.get("/providers")
+def list_sign_in_methods(_admin=Depends(require_admin)) -> dict:
+    """§12.8. How anybody can sign in to this deployment, and what confers admin.
+
+    Administrator-only, and that is the same decision §12.1 makes from the other
+    side: every value here — an issuer, a directory URL, an API server address,
+    a group DN — is what the public discovery endpoint withholds so that nobody
+    who can merely reach the console can enumerate its identity infrastructure.
+
+    Read-only. The values come from the process environment, one provider of each
+    kind (§12.4), and a console that offered to edit them would be editing a copy
+    while reporting a save. Each row names the variable prefix that does change
+    it, which is the actionable half.
+    """
+    return envelope(inventory.sign_in_methods())
 
 
 @router.get("/users")

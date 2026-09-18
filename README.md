@@ -105,6 +105,15 @@ Start with `docker compose --env-file .env.auth up --build`, sign in, then open
 users table is empty and never overwrite an existing account. Set
 `AUTH_COOKIE_SECURE=true` behind HTTPS.
 
+That page also lists the sign-in methods this deployment has configured — where
+each one points and which group confers the `admin` role — read-only, because
+they are the environment variables below and a form there would edit a copy.
+**Administration -> Sessions** lists every session that can currently act on the
+console, with the address and browser it was opened from, and revokes one. An
+account being active and a session being live are different facts: deactivating
+an account revokes its sessions, and a lost laptop is the case where you want
+the session gone and the account left alone.
+
 LDAP is search-and-bind: the service account finds one user DN, then the console
 binds as that DN with the submitted password. Plain-text LDAP is refused; use
 `ldaps://` or StartTLS.

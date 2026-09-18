@@ -102,7 +102,12 @@ test.describe('console authentication', () => {
     await page.getByRole('button', { name: 'Sign in' }).click();
 
     await expect(page.getByRole('heading', { name: 'Users' })).toBeVisible();
-    await expect(page.getByText('LDAP authentication enabled')).toBeVisible();
+    // §12.8: how people sign in, above the accounts it produced. It replaced an
+    // LDAP-only banner that named the variable the admin group lives in; this
+    // says which directory and which group.
+    await expect(page.getByRole('grid', { name: 'Sign-in methods' })).toContainText(
+      'LDAP / Active Directory',
+    );
     await expect(page.getByRole('grid', { name: 'Console users' })).toContainText('Directory Admin');
     await expect(page.getByRole('navigation', { name: 'Console navigation' }).getByRole('link', { name: 'Users' })).toBeVisible();
   });

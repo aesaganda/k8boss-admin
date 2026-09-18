@@ -273,6 +273,26 @@ class AuthSession(Base):
     # impersonates fine.
     idp_groups = Column(Text, nullable=True)
 
+    # §12.7's listing: which browser this session was opened from, captured once
+    # at sign-in. It is what lets an administrator tell their own session from
+    # somebody else's before revoking one — a revoke list with no provenance is
+    # a row of identical tokens, and the safe way to use it is not to.
+    #
+    # The address is the peer address, the same value the audit trail records,
+    # and deliberately not an `X-Forwarded-For` claim: trusting that header
+    # needs a configured list of trusted proxies, and without one it is a string
+    # the caller chose. NULL means the transport reported no peer, or the
+    # session predates these columns — never "no address", which is why the
+    # listing renders it as unknown rather than blank.
+    ip_address = Column(String(45), nullable=True)
+    user_agent = Column(String(512), nullable=True)
+
+    # Refreshed coarsely — see :func:`app.identity.service.load_session` for why
+    # it is not written on every request. NULL means this session has not been
+    # used since the column existed, which is not the same as never used, so the
+    # listing shows it as unknown and falls back to `created_at` for ordering.
+    last_used_at = Column(DateTime, nullable=True)
+
 
 #: ``category`` values. Two kinds of record live in one table because they answer
 #: one question — "who did what to this console and its clusters" — and splitting

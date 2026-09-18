@@ -12,13 +12,14 @@ import secrets
 from dataclasses import dataclass
 
 from sqlalchemy import delete, func, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app import database
 from app.config import settings
 from app.errors import Invalid, PermissionDenied
 from app.identity import roles
-from app.models import AuthSession, User, utcnow
+from app.models import AuthSession, User, rfc3339, utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -436,6 +437,8 @@ def create_session(
     *,
     idp_username: str | None = None,
     idp_groups: tuple[str, ...] | None = None,
+    ip_address: str | None = None,
+    user_agent: str | None = None,
 ) -> tuple[str, SessionIdentity]:
     """Create a session and return the one-time raw bearer token to set as a cookie.
 
@@ -446,6 +449,12 @@ def create_session(
     ``app.k8s.impersonation.decide`` by ``auth_source``, because a session that
     somehow carried both would still be the console's password table asserting a
     cluster identity.
+
+    ``ip_address`` and ``user_agent`` are §12.7's provenance, supplied by the
+    route because it is the layer holding the request. Both default to ``None``,
+    and ``None`` is stored as unknown rather than as a blank: a session list that
+    rendered an empty cell as "no address" would be inviting an administrator to
+    revoke by elimination.
     """
     raw_token = secrets.token_urlsafe(32)
     csrf_token = secrets.token_urlsafe(32)
@@ -458,6 +467,13 @@ def create_session(
             expires_at=expires_at,
             idp_username=idp_username,
             idp_groups=_encode_groups(idp_groups),
+            ip_address=ip_address,
+            user_agent=user_agent,
+            # Set at creation rather than left NULL: a session that has been
+            # used exactly once — the sign-in — has been used, and NULL here
+            # means "not seen since the column existed", which is a different
+            # sentence the listing renders differently.
+            last_used_at=utcnow(),
         )
     )
     db.commit()
@@ -468,17 +484,30 @@ def create_session(
     )
 
 
+#: How stale ``AuthSession.last_used_at`` is allowed to be.
+#:
+#: This function runs on **every authenticated request**, so writing the
+#: timestamp each time would put an UPDATE and a commit in front of every read
+#: the console serves — a write-per-read on the one table every request already
+#: touches. §12.7 only needs the value to answer "is this session still in use",
+#: where a minute of lag changes no decision, so the row is written at most once
+#: per minute per session and the listing documents the granularity rather than
+#: implying a precision it does not have.
+_LAST_USED_GRANULARITY = datetime.timedelta(minutes=1)
+
+
 def load_session(raw_token: str | None) -> SessionIdentity | None:
     """Resolve a raw cookie value using a short-lived database session."""
     if not raw_token:
         return None
     db = database.SessionLocal()
     try:
+        now = utcnow()
         token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
         row = db.get(AuthSession, token_hash)
         if row is None:
             return None
-        if row.expires_at <= utcnow():
+        if row.expires_at <= now:
             db.delete(row)
             db.commit()
             return None
@@ -487,7 +516,7 @@ def load_session(raw_token: str | None) -> SessionIdentity | None:
             db.delete(row)
             db.commit()
             return None
-        return SessionIdentity(
+        identity = SessionIdentity(
             _principal(
                 user,
                 idp_username=row.idp_username,
@@ -496,8 +525,104 @@ def load_session(raw_token: str | None) -> SessionIdentity | None:
             row.csrf_token,
             row.expires_at,
         )
+        # Built before the refresh, so the values returned are read off the row
+        # rather than re-selected after the commit expired them.
+        if row.last_used_at is None or now - row.last_used_at >= _LAST_USED_GRANULARITY:
+            row.last_used_at = now
+            try:
+                db.commit()
+            except SQLAlchemyError:
+                # A failed bookkeeping write must never fail the request. This
+                # function is what decides whether the caller is signed in, and
+                # it now writes on the way through: a database that has lost
+                # INSERT/UPDATE — full disk, a hot standby, a revoked grant —
+                # would otherwise turn a stale timestamp into "every
+                # authenticated request is a 500", which is the whole console
+                # refusing everyone over a column nothing depends on. Same
+                # reasoning as the audit recorder's failed INSERT: by the time
+                # this runs, the answer to "is this session valid" is already
+                # known and it is yes.
+                db.rollback()
+                logger.warning(
+                    "Could not refresh last_used_at for a console session; the "
+                    "session list will show a stale value. The session itself "
+                    "is unaffected.", exc_info=True,
+                )
+        return identity
     finally:
         db.close()
+
+
+def list_active_sessions(
+    db: Session, *, current_token_hash: str | None = None
+) -> list[dict]:
+    """Every unexpired session, newest first, with who opened it and from where.
+
+    **Expired rows are filtered rather than counted.** They are deleted lazily,
+    when :func:`load_session` next sees one, so a browser that was closed leaves
+    a row behind indefinitely; including those would make "142 active sessions"
+    a number with no relationship to how many people can currently act on this
+    console. Nothing here deletes them either — a listing that pruned would make
+    a GET a write.
+
+    Ordered by ``created_at`` descending and never by ``last_used_at``: that
+    column is nullable, and the two engines disagree about where NULLs sort in a
+    DESC order (PostgreSQL first, SQLite last). A listing whose row order
+    depended on which database the deployment runs is the kind of divergence
+    CLAUDE.md asks to be deliberate about, and here it buys nothing.
+
+    ``id`` is the stored SHA-256 digest of the bearer token, which is what this
+    table is keyed by. It is safe to hand to the browser and it is **not** a
+    credential: the middleware hashes the cookie it is given and looks the row up
+    by the result, so possessing the digest authenticates nobody.
+    """
+    rows = db.execute(
+        select(AuthSession, User)
+        .join(User, User.id == AuthSession.user_id)
+        .where(AuthSession.expires_at > utcnow())
+        .order_by(AuthSession.created_at.desc(), AuthSession.token_hash)
+    ).all()
+    return [
+        {
+            "id": row.token_hash,
+            "username": user.username,
+            "display_name": user.display_name,
+            "auth_source": user.auth_source,
+            "role": user.role,
+            "ip_address": row.ip_address,
+            "user_agent": row.user_agent,
+            "created_at": rfc3339(row.created_at),
+            "last_used_at": rfc3339(row.last_used_at),
+            "expires_at": rfc3339(row.expires_at),
+            # Whether this row is the caller's own session. The one row whose
+            # revocation signs the administrator out, which is a thing to know
+            # before clicking rather than after.
+            "current": bool(current_token_hash) and row.token_hash == current_token_hash,
+        }
+        for row, user in rows
+    ]
+
+
+def revoke_session_hash(db: Session, token_hash: str) -> str | None:
+    """Revoke one session by its stored digest. Returns whose it was.
+
+    The username is returned rather than looked up again by the caller, because
+    the caller needs it for the audit row and the row is gone by then. ``None``
+    means there was no such session — which the route reports as a 404 and
+    records as a refusal, since "revoke a session that is not there" and "revoke
+    a session" must not produce the same trail entry.
+    """
+    row = db.get(AuthSession, token_hash)
+    if row is None:
+        return None
+    # The account row is deleted with its sessions by an ON DELETE CASCADE, so a
+    # session without one should not exist. If it does, the revoke still happens
+    # and the trail says the owner could not be named — the alternative is
+    # refusing to revoke a session because of a defect in a different table.
+    username = db.scalar(select(User.username).where(User.id == row.user_id))
+    db.delete(row)
+    db.commit()
+    return username or "(unknown)"
 
 
 def revoke_session(raw_token: str | None) -> None:

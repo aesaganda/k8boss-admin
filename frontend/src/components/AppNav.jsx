@@ -87,7 +87,11 @@ function NavSection({ id, title, routes, children }) {
 export default function AppNav() {
   const { enabled, user } = useAuth();
   const canManageUsers = enabled && user?.role === 'admin';
-  const administrationRoutes = ['/clusters', '/audit', ...(canManageUsers ? ['/users'] : [])];
+  const administrationRoutes = [
+    '/clusters',
+    '/audit',
+    ...(canManageUsers ? ['/users', '/sessions'] : []),
+  ];
 
   return (
     <Nav aria-label="Console navigation" className="admin-nav">
@@ -194,6 +198,11 @@ export default function AppNav() {
           <RouterNavItem to="/clusters">Clusters</RouterNavItem>
           <RouterNavItem to="/audit">Audit log</RouterNavItem>
           {canManageUsers && <RouterNavItem to="/users">Users</RouterNavItem>}
+          {/* §12.7. Below Users and gated with it: revoking somebody else's
+              session is the same administrator's job as deactivating their
+              account, and on a deployment with no application authentication
+              there are no sessions to list. */}
+          {canManageUsers && <RouterNavItem to="/sessions">Sessions</RouterNavItem>}
         </NavSection>
       </NavList>
     </Nav>
