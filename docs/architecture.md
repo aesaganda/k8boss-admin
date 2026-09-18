@@ -40,8 +40,13 @@ hard dependency on the API server being reachable — both of which are visible 
 the user, which is the trade being made.
 
 The SPA is served by nginx, which also reverse-proxies `/api` and `/api/ws` to
-the backend. Same-origin, so CORS is not in the picture in a normal deployment
-(`cors_origins` exists for split-origin ones and for `npm run dev` on :5174).
+the backend. Same-origin, so CORS is not in the picture in a normal deployment —
+and it is not in the picture for `npm run dev` on :5174 either, because Vite
+proxies `/api` and the browser never sees a cross-origin request. `cors_origins`
+exists for genuinely split-origin deployments and defaults to empty, granting
+nothing. That default matters more than it looks: the middleware is configured
+with `allow_credentials=True`, so an origin listed here is one whose pages may
+call this API carrying the operator's session cookie.
 
 ---
 
@@ -52,17 +57,27 @@ wraps each added middleware *around* what came before, so the last added is
 outermost:
 
 ```
-CORS ─▶ request logging ─▶ authentication ─▶ cluster context ─▶ exception handlers ─▶ route
+CORS ─▶ unhandled-error floor ─▶ request logging ─▶ authentication ─▶ cluster context ─▶ exception handlers ─▶ route
 ```
 
 **CORS outermost is the whole point.** Everything the app can produce — a 502
 for an unreachable cluster, a 403 naming a missing RBAC grant — passes back out
 through it and keeps its `Access-Control-Allow-Origin` header. An error rendered
-*outside* CORS (which is what happens to anything that reaches Starlette's
-`ServerErrorMiddleware`) is blocked by the browser, `fetch()` rejects with
+*outside* CORS is blocked by the browser, `fetch()` rejects with
 `TypeError: Failed to fetch`, and the operator sees a network error while the
-real reason is never delivered. `register_exception_handlers` exists so nothing
-gets that far.
+real reason is never delivered. `register_exception_handlers` maps everything
+this application raises deliberately, so nothing anticipated gets that far.
+
+**The floor under those handlers is a second `ServerErrorMiddleware`, and it has
+to be a middleware rather than another entry in `register_exception_handlers`.**
+Starlette's own `ServerErrorMiddleware` is the outermost layer of the stack by
+construction — outside even CORS — so an exception nothing maps is rendered
+there, and that 500 carries no `Access-Control-Allow-Origin`: the failure above,
+arriving through the one door a handler registration cannot close, because a
+handler cannot be registered further out than the layer that holds it.
+`app/main.py` therefore adds its own `ServerErrorMiddleware` (with
+`unhandled_error_handler`) one layer *inside* CORS, so the response is rendered
+where the browser is still allowed to read it.
 
 A read then travels like this:
 

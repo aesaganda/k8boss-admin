@@ -36,7 +36,13 @@ from sqlalchemy.orm import Session
 from app.audit import recorder
 from app.config import settings
 from app.database import get_db
-from app.errors import AdminError, Invalid, InvalidCredentials, NotFound
+from app.errors import (
+    AdminError,
+    Invalid,
+    InvalidCredentials,
+    NotFound,
+    TooManyAttempts,
+)
 from app.identity import handshake as handshake_service
 from app.identity import oidc, saml, sso, throttle
 from app.identity.dependencies import current_session, require_admin
@@ -259,7 +265,31 @@ def login(body: LoginBody, db: Session = Depends(get_db)) -> JSONResponse:
     #
     # It reserves rather than merely counts: counting alone let a simultaneous
     # burst all read the same number and all proceed. See app.identity.throttle.
-    throttle.check(actor)
+    try:
+        throttle.check(actor)
+    except TooManyAttempts as refusal:
+        # The row belongs here and not inside `throttle.check`, which is
+        # deliberately decoupled from the audit table. `check` raises, so
+        # without this branch none of the three _audit_signin calls below ran
+        # for a refused attempt: an attacker guessing at one account appeared
+        # exactly AUTH_THROTTLE_MAX_ATTEMPTS times and then went silent for as
+        # long as they kept guessing. The burst that tripped the lockout is
+        # precisely what "is somebody guessing at this account" is asking
+        # about, and it was the part of the trail with no rows in it.
+        #
+        # No throttle.release here. A reservation is released when the failure
+        # turns out not to be the caller's; this one is the caller's, and
+        # releasing on a refusal would hand an attacker a fresh budget every
+        # time they trip the limit.
+        _audit_signin(
+            outcome="denied", username=actor, method=body.source,
+            detail=f"Sign-in refused before the password check ({body.source}): "
+                   "too many attempts for this account inside the window. The "
+                   "actor on this record is the submitted username, not a "
+                   "verified identity.",
+            error=f"{refusal.code}: {refusal.message}",
+        )
+        raise
 
     try:
         user = authenticate(
@@ -545,7 +575,13 @@ def _complete_sso(
         # instead, because a value read from the unsigned wrapper would be one the
         # attacker chose.
         state = params.get("state") or ""
-        if not params.get("code") or not secrets.compare_digest(state, pending.state):
+        # Compared as bytes. `compare_digest` refuses a `str` carrying any
+        # non-ASCII character, and the TypeError escapes to ServerErrorMiddleware
+        # as a 500: one non-ASCII character in the attacker-chosen `state` would
+        # trade this audited refusal for an unrecorded server error.
+        if not params.get("code") or not secrets.compare_digest(
+            state.encode(), pending.state.encode()
+        ):
             _audit_signin(
                 outcome="denied", username="(sso)", method=module.NAME,
                 detail="The single sign-on callback did not match a handshake this "

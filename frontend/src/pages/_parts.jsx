@@ -19,7 +19,7 @@
  *                               objects is a cluster that looks smaller than it
  *                               is, and the operator has no way to notice.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   Alert,
@@ -64,7 +64,6 @@ import {
   Toolbar,
 } from '../components/ui';
 import DebugPanel from '../components/DebugPanel';
-import ImportYamlDialog from '../components/ImportYamlDialog';
 import { load } from '../components/clusterYaml';
 import LogViewer from '../components/LogViewer';
 import MutationDialog from '../components/MutationDialog';
@@ -84,6 +83,12 @@ import {
   objectName,
   objectNamespace,
 } from './_data';
+
+// Lazy, like the copy in `Layout.jsx`, and for the same reason: this dialog
+// carries `objectFormModel.js` and `templates.js`, and a single static import
+// of it anywhere pulls both back into the chunk that does the importing. The
+// saving only exists if every call site is `lazy`, so this one is too.
+const ImportYamlDialog = lazy(() => import('../components/ImportYamlDialog'));
 
 /* ── Cluster scope ──────────────────────────────────────────────────────── */
 
@@ -994,16 +999,18 @@ function ResourceTabBody({ tab, catalog, createGate }) {
           search text, the open drawer and every `continue` page the operator
           loaded, to show one new row that is on the first page anyway. */}
       {creating && (
-        <ImportYamlDialog
-          isOpen
-          title={`Create ${kind}`}
-          templates={templatesFor(entry)}
-          onClose={() => setCreating(false)}
-          onApplied={() => {
-            setCreating(false);
-            listing.reload();
-          }}
-        />
+        <Suspense fallback={null}>
+          <ImportYamlDialog
+            isOpen
+            title={`Create ${kind}`}
+            templates={templatesFor(entry)}
+            onClose={() => setCreating(false)}
+            onApplied={() => {
+              setCreating(false);
+              listing.reload();
+            }}
+          />
+        </Suspense>
       )}
     </>
   );

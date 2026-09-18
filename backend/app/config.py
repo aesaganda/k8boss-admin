@@ -773,9 +773,12 @@ class Settings(BaseSettings):
         description=(
             "The absolute Assertion Consumer Service URL registered at the IdP. "
             "Empty derives it from the forwarded host. It is checked against the "
-            "assertion's Recipient and Destination, so a derived value that does "
-            "not match what was registered fails the sign-in rather than "
-            "quietly accepting an assertion addressed elsewhere."
+            "assertion's Recipient, which is required rather than checked when "
+            "present, so a derived value that does not match what was registered "
+            "fails the sign-in rather than quietly accepting an assertion "
+            "addressed elsewhere. The response wrapper's Destination is not "
+            "checked: it sits outside the signature, so it is the replayer's to "
+            "write."
         ),
     )
     saml_username_attribute: str = Field(
@@ -859,8 +862,20 @@ class Settings(BaseSettings):
 
     # -- HTTP -------------------------------------------------------------
     cors_origins: str = Field(
-        default="http://localhost:5173,http://localhost:3000,http://localhost:8080",
-        description="Comma-separated allowed origins for the SPA dev server and bundle host.",
+        default="",
+        description=(
+            "Comma-separated allowed origins for split-origin deployments. Empty "
+            "(the default) means no cross-origin access at all, which is what a "
+            "console whose SPA nginx serves same-origin needs — and what `npm run "
+            "dev` needs too, because Vite proxies /api and the browser never sees "
+            "a cross-origin request. The previous default listed :5173, :3000 and "
+            ":8080; none of those is this console (:5174 is), and :5173 is K8Boss "
+            "— a different application routinely run on the same machine. Paired "
+            "with allow_credentials=True in app.main, that shipped a credentialed "
+            "grant over this console's API to a page served by somebody else's "
+            "dev server, and granted nothing to the origin that might have wanted "
+            "one."
+        ),
     )
     log_level: str = Field(
         default="INFO",

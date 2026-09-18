@@ -13,6 +13,10 @@ Three properties carry most of the weight here:
   that we never got close enough to observe.
 * **One failing overview collector nulls its own key.** Never zero, never a 500,
   and always with an ``unavailable`` entry naming what could not be read.
+* **No pooled database connection is held while a cluster is being contacted.**
+  Otherwise one unreachable cluster's timeout, multiplied by the tabs watching
+  it, drains the pool and takes the console's own sign-ins and audit writes down
+  with it.
 """
 
 from __future__ import annotations
@@ -133,6 +137,34 @@ def plain_kubernetes(monkeypatch):
 
     monkeypatch.setattr(catalog, "raw_get", fake_raw_get)
     return fake_raw_get
+
+
+@pytest.fixture
+def request_sessions(client):
+    """Hand each request its session and keep a reference to it.
+
+    The pooled connection a handler holds is not reachable from inside a stubbed
+    cluster call, but the transaction that holds it is: a SQLAlchemy session
+    checks a connection out when its transaction begins and gives it back when
+    the transaction ends, so ``in_transaction()`` sampled *during* a cluster
+    round trip is the observable form of "this request is sitting on a
+    connection while it waits".
+    """
+    from app.database import get_db
+    from app.main import app
+
+    sessions: list = []
+
+    def factory():
+        session = database.SessionLocal()
+        sessions.append(session)
+        try:
+            yield session
+        finally:
+            session.close()
+
+    app.dependency_overrides[get_db] = factory
+    return sessions
 
 
 @pytest.fixture
@@ -383,6 +415,33 @@ def test_an_unreachable_cluster_is_a_result_not_a_500(client, registered_cluster
     assert body["permissions"] is None
 
 
+def test_the_connection_test_holds_no_database_connection_while_it_waits_on_the_cluster(
+    client, registered_cluster, fake_k8s, stub_preflight, plain_kubernetes,
+    request_sessions,
+):
+    """The longest cluster call this console makes must not sit on the pool.
+
+    A test against an unreachable API server runs to the connect timeout by
+    definition. One connection held for all of it, times the tabs retrying a
+    cluster that is down, is a pool that never refills — and then sign-in and
+    the audit trail start failing because a *customer's* API server is down.
+    """
+    in_transaction: list[bool] = []
+
+    def answer_and_sample(*args, **kwargs):
+        in_transaction.append(request_sessions[0].in_transaction())
+        return obj(git_version="v1.31.4")
+
+    fake_k8s.version_api.returns("get_code", answer_and_sample)
+
+    response = client.post(f"/api/clusters/{registered_cluster.id}/test")
+
+    assert response.status_code == 200
+    assert in_transaction == [False]
+    # And the result still lands on the row, through a fresh read.
+    assert client.get("/api/clusters").json()["items"][0]["status"] == "connected"
+
+
 def test_a_failed_test_is_recorded_as_disconnected_with_a_reason(
     client, registered_cluster, fake_k8s
 ):
@@ -420,6 +479,29 @@ def test_overview_collects_every_sub_object(client, registered_cluster, healthy_
     assert body["requested"]["cpu_cores"] == 1.75
     assert body["requested"]["memory_bytes"] == (512 + 256) * 2 ** 20 + 2 ** 30
     assert body["unavailable"] == []
+
+
+def test_the_overview_holds_no_database_connection_while_it_contacts_the_cluster(
+    client, registered_cluster, healthy_cluster, request_sessions
+):
+    """Six collectors, six round trips, and a connection checked out for none of
+    them. The row is read for the one column the response needs and the session
+    is released before the first cluster call."""
+    in_transaction: list[bool] = []
+
+    def answer_and_sample(*args, **kwargs):
+        in_transaction.append(request_sessions[0].in_transaction())
+        return obj(git_version="v1.31.4")
+
+    healthy_cluster.version_api.returns("get_code", answer_and_sample)
+
+    body = client.get(f"/api/clusters/{registered_cluster.id}/overview").json()
+
+    assert in_transaction == [False]
+    # The read that 404s an unregistered id still happened, and its one column
+    # still reached the response.
+    assert body["platform"] == "kubernetes"
+    assert body["server_version"] == "v1.31.4"
 
 
 def test_the_overview_and_the_nodes_page_agree_on_what_is_requested(

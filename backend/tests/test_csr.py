@@ -636,6 +636,24 @@ def test_a_stale_resource_version_conflicts_with_the_current_state(cluster):
     assert caught.value.context["currentState"] == "Pending"
 
 
+def test_a_conflict_that_never_reaches_the_funnel_is_still_in_the_trail(cluster):
+    """Rule 5 covers the writes that conflicted, and this refusal fires before
+    `mutate()` — so nothing else would record that two people were deciding the
+    same signing request at once, which is what rule 4 exists to make
+    answerable."""
+    cluster()
+
+    with pytest.raises(Conflict):
+        csr_admin.decide(NAME, "Approved", dry_run=True, resource_version="1")
+
+    (row,) = audit_rows()
+    assert row["outcome"] == "conflict"
+    assert row["target"]["name"] == NAME
+    assert row["target"]["subresource"] == csr_admin.SUBRESOURCE
+    assert row["dry_run"] is True
+    assert "7719" in row["detail"]
+
+
 def test_deciding_an_already_decided_request_is_refused_before_the_put(cluster):
     """There is no un-approve. The API server refuses it too, with a message that
     names a field path rather than the decision and when it was made."""

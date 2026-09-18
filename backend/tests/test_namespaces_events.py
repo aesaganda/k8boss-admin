@@ -8,7 +8,9 @@ failed, and ``0`` when the namespace is genuinely empty. Those two rows look
 identical to an operator doing a cleanup, and one of them is the namespace they
 are about to delete. The namespace listing itself is the primary read: refused,
 it is a 403 with a hint, not a 200 with an empty table saying the cluster has no
-namespaces.
+namespaces. The tally is read over the raw path rather than through the typed
+client, so the failures asserted here are ``raw_get``'s — including one the typed
+call could not produce.
 
 **Events.** The API server returns events in etcd key order and offers no sort,
 so "newest first" has to be computed here — over a scan that is bounded, and that
@@ -54,15 +56,24 @@ def _namespace(name="prod", phase="Active", labels=None, annotations=None, delet
 
 
 def _pod(namespace="prod", name="checkout-7d9-abc"):
-    return obj(metadata=obj(name=name, namespace=namespace))
+    """What the API server sends: JSON, undeserialized.
+
+    A dict and not an ``obj`` because the tally reads the raw listing — building
+    a ``V1Pod`` per pod is the cost the endpoint stopped paying, and a fixture
+    that kept handing it models would let the slow path come back unnoticed.
+    """
+    return {"metadata": {"name": name, "namespace": namespace}}
 
 
 def _stub_namespaces(fake, namespaces, pods=None, pod_error=None):
     fake.core_v1.returns("list_namespace", obj(items=namespaces))
     if pod_error is not None:
-        fake.core_v1.raises("list_pod_for_all_namespaces", pod_error)
+        fake.api_client.raises("call_api", pod_error)
     else:
-        fake.core_v1.returns("list_pod_for_all_namespaces", obj(items=pods or []))
+        fake.api_client.returns(
+            "call_api",
+            {"apiVersion": "v1", "kind": "PodList", "items": list(pods or [])},
+        )
 
 
 def test_namespaces_come_back_shaped_and_sorted(client, fake_k8s):
@@ -169,6 +180,53 @@ def test_an_unreachable_cluster_degrades_the_pod_column_as_unreachable(client, f
 
     assert body["unavailable"][0]["reason"] == "unreachable"
     assert body["items"][0]["pod_count"] is None
+
+
+def test_pods_are_counted_from_the_raw_listing_rather_than_from_pod_models(
+    client, fake_k8s
+):
+    """The tally reads two keys per pod; building a ``V1Pod`` for each is the cost.
+
+    Asserted through the request the fake actually saw, because a return to the
+    typed client would still produce the right counts here — it would just spend
+    seconds of CPU on a ten-thousand-pod cluster to do it, which no assertion
+    about the response body can see.
+    """
+    _stub_namespaces(
+        fake_k8s, [_namespace("prod"), _namespace("staging")],
+        pods=[_pod("prod"), _pod("prod", "checkout-7d9-def"), _pod("kube-system")],
+    )
+
+    body = client.get("/api/namespaces").json()
+
+    assert [(row["name"], row["pod_count"]) for row in body["items"]] == [
+        ("prod", 2), ("staging", 0),
+    ]
+    path, verb = fake_k8s.api_client.called("call_api")[0][0][:2]
+    assert (path, verb) == ("/api/v1/pods", "GET")
+
+
+def test_a_pod_listing_that_is_not_a_kubernetes_object_is_not_read_as_zero_pods(
+    client, fake_k8s
+):
+    """The one failure the raw path has and the typed call did not.
+
+    A proxy in front of the API server answering with its own error page comes
+    back as a JSON body that is not an object. ``raw_get`` raises for it rather
+    than returning something list-shaped, and the page has to report that as "we
+    could not look": a table of zeroes assembled from a captive portal's
+    response is the same confident wrong answer as a swallowed 403.
+    """
+    fake_k8s.core_v1.returns("list_namespace", obj(items=[_namespace("prod")]))
+    fake_k8s.api_client.returns("call_api", ["not", "an", "object"])
+
+    response = client.get("/api/namespaces")
+    body = response.json()
+
+    assert response.status_code == 200
+    assert body["items"][0]["pod_count"] is None
+    assert body["partial"] is True
+    assert [entry["reason"] for entry in body["unavailable"]] == ["unreachable"]
 
 
 # --------------------------------------------------------------------------- #

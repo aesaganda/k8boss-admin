@@ -242,6 +242,7 @@ encrypted, never returned.
   "authentication_type": "service_account_token",
   "has_ca_certificate": true,
   "skip_tls_verify": false,
+  "impersonation_enabled": false,
   "app_domain": "apps.prod-eu.example.com",
   "status": "connected",
   "server_version": "v1.31.4",
@@ -265,6 +266,15 @@ returned here and a UI can prefill it. Sending `""` on `PUT` clears it; omitting
 it keeps the stored value. That asymmetry is deliberate — a domain typed wrongly
 has to be removable, not only overwritable.
 
+**The three writes below require the `admin` console role** (§12.6) when
+`AUTH_ENABLED=true`; a `user` identity gets `403`. Outside §12.6's own surface
+they and §10.4's audit export are the only endpoints that ask about a console
+role at all — everything else answers to Kubernetes preflight and the mutation
+gate. Under `AUTH_ENABLED=false` there is no console role to check, so they are
+as open as everything else in that mode and the authenticating proxy in front
+owns the decision — the premise of legacy proxy mode, applied here rather than
+excepted here.
+
 ### `POST /api/clusters`
 
 ```json
@@ -276,6 +286,13 @@ has to be removable, not only overwritable.
 → `201` `ClusterPublic`.
 
 ### `PUT /api/clusters/{id}` — partial; omitted `token` keeps the stored one.
+
+That last clause is why this one is an administrator act rather than an edit.
+Moving `api_server` while omitting `token` re-points the *stored* credential at
+a new host, so a caller who can send this body has the console hand that
+cluster's bearer token to an address they chose, on the next request, with
+nothing on the wire that looks like a credential being read.
+
 ### `DELETE /api/clusters/{id}` → `204`.
 ### `POST /api/clusters/{id}/test`
 
@@ -1288,7 +1305,15 @@ write access to the volume — which, for a table whose whole value is that it c
 be trusted after an incident, is the population that matters. The chain does not
 prevent any of that either; it makes it **detectable**.
 
-Query: `limit` (optional). Response:
+Query: `limit` (optional, `1`–`1000`; over the §10.1 page cap is `422 invalid`).
+Bounded for the same reason a page is: the windowed walk reads newest-first and
+reverses, so it holds `limit` rows in memory by construction where the unwindowed
+walk streams — omitting `limit` is therefore uncapped, and is also the only form
+that can return `intact`. Rejected rather than silently clamped: verifying a
+thousand records while answering a question asked about a million is this
+endpoint's own defect standard, a claim about records nobody read.
+
+Response:
 
 ```json
 { "status": "partial", "verified": 4460, "unchained": 12, "total": 4472,
@@ -1545,6 +1570,19 @@ HTTP and WebSocket API requires a valid opaque session cookie, except:
 Unsafe HTTP methods also require the session's `X-CSRF-Token`. Session bearer
 tokens are HttpOnly cookies and only their SHA-256 digests are stored.
 
+**A WebSocket without a valid session is accepted and then closed with
+application close code `4401`, never refused before the accept.** That ordering
+is normative, not an implementation detail: a close sent before the accept is a
+failure of the HTTP upgrade itself, and a browser reports that to the page as a
+generic connection error with no code attached. The `4401` never arrives,
+`onclose` cannot tell "your session expired" from "something dropped us", and
+both stream viewers rendered an expired session as *connection lost* — which
+sends an operator to debug a network that is fine. Accepting first costs one
+frame and is the only way the reason reaches the client. `4401` is the one
+application close code this API defines, and both stream viewers branch on it to
+offer sign-in rather than a reconnect; every other close is an ordinary end of
+stream or a transport failure, and neither is a reason to ask anyone to sign in.
+
 The sign-on routes are public because single sign-on **is how a session is
 obtained** — challenging them for one is a deadlock whose symptom is a sign-in
 button that answers 401. The list is **exact paths built from the provider
@@ -1749,12 +1787,24 @@ which several may be listed so a signing-key rotation is a config change rather
 than an outage; the `Issuer` against `SAML_IDP_ENTITY_ID`, without which a
 certificate this console trusts could sign for any issuer; the `Audience`
 against this console's entity ID, which is the SAML spelling of `aud`;
-`InResponseTo` against the sealed `AuthnRequest` id; `Recipient` and
-`Destination` against the ACS URL; the condition and subject-confirmation
-windows, with `SAML_CLOCK_SKEW_SECONDS` of leeway and **no expiry treated as a
-refusal**; and the presence of an `AuthnStatement`, because an assertion carrying
+`InResponseTo` against the sealed `AuthnRequest` id; `Recipient` against the ACS
+URL, **required rather than checked when present** — the party replaying an
+assertion at somebody else's endpoint is also the party who can leave the
+attribute out, so a check that only ran when it was there checked nothing in the
+one case it exists for, and SAML core makes it mandatory on bearer confirmation
+data anyway; the condition and subject-confirmation windows, with
+`SAML_CLOCK_SKEW_SECONDS` of leeway and **no expiry treated as a refusal**; and
+the presence of an `AuthnStatement`, because an assertion carrying
 only attributes is a statement *about* somebody rather than a statement that they
 just authenticated.
+
+**The `Response` wrapper's `Destination` is not checked, and that is deliberate
+rather than missing.** On the assertion-signed shape every large IdP emits —
+Shibboleth, Keycloak, Okta — `Destination` sits outside the signed subtree, so
+it is a value whoever posts the document writes. Checking it would read, in this
+list, as a second address check standing beside `Recipient`, while catching
+nothing `Recipient` does not already catch. `Recipient` is inside the signature,
+which is why it is the one that can refuse anything.
 
 Three refusals are named rather than folded into "invalid", because the
 administrator's next action differs for each: an **encrypted assertion** (this
@@ -1904,9 +1954,13 @@ never appear in responses. The current user and final active administrator
 cannot be deactivated. Every non-local auth source has provider-managed passwords
 and roles, refreshed at login **when the provider reports group membership** — when it
 does not, the stored role is left alone rather than reset (§12.4). The `admin` role gates this
-user-administration surface; both `admin` and `user` identities retain the
-console's normal cluster capabilities, still constrained by preflight and the
-deployment-wide mutation gate.
+user-administration surface, §10.4's audit export, **and §3's three cluster
+writes** — `POST /api/clusters`, `PUT /api/clusters/{id}`,
+`DELETE /api/clusters/{id}`, because those decide which API server this
+console's credential talks to, not what a person may read on it. Nothing else is
+gated by role: both `admin` and
+`user` identities retain the console's normal cluster capabilities, still
+constrained by preflight and the deployment-wide mutation gate.
 
 ---
 
@@ -2254,9 +2308,24 @@ create if absent and a replace if it is already ours.
 
 **The console never adopts an object it did not create.** Every bundle object
 carries `app.kubernetes.io/managed-by: k8boss-admin`. An install that finds one
-of the same name without it refuses with `409 conflict` naming the object —
-before writing anything, on a dry run as much as on a real one, and the refusal
-is audited because it happens before the funnel is reached.
+of the same name without it refuses with `409 conflict` — before writing
+anything, on a dry run as much as on a real one, and the refusal is audited
+because it happens before the funnel is reached.
+
+**The refusal names every conflicting object, not the first one.** The ownership
+scan reads all eight before it can decide, so the rest are already known and
+withholding them is a choice — one that costs a round trip each: delete the
+ClusterRole, install again, get refused on the Service, delete that, install
+again, and nothing in any of those refusals says how many are left. So
+`context.conflicts[]` carries one entry per object —
+`{group, version, resource, namespace, name, kind}` — the `message` says how
+many there are, and `detail` names each one with the `managed-by` value it
+actually carries, which is usually what tells the operator whose it is. One
+audit row per object, not one for the batch: the question the trail answers is
+"did anyone try to install a router over *my* ClusterRole", asked by the person
+who just found it, and a single row carrying a count cannot be found by the
+object it was about. §33's OLM install names every conflict too, in its own
+`context.conflicts[]` shape.
 
 **A partial install is reported as one.** `installed` is false unless every
 object landed; `failed` counts the rest; `objects[]` carries a per-object
@@ -3580,8 +3649,20 @@ else in this console — or in `kubectl` — puts it in front of anyone.
 `endpoint_count` is nullable twice over, and the two nulls mean different things
 the UI states separately: `null` on a URL-addressed webhook means there is
 nothing *in the cluster* to count (it may be answering perfectly well), and
-`null` on a Service-addressed one means the EndpointSlice listing did not answer.
-Neither may render as `0`, which is the finding.
+`null` on a Service-addressed one means the EndpointSlice listing did not
+answer. Neither may render as `0`, which is the finding.
+
+**"Did not answer" includes "answered, but was not exhausted."** The slice
+listing is paged, and a cluster with more than ten pages of 500 leaves the
+scan holding a cursor rather than a total. That is reported as an `unavailable[]`
+entry with `reason: "timeout"` and the whole tally at `null` — not as the tally
+the scan managed to build. A page nobody read and a Service with no backends
+produce the same number, and that number is `0`, which is the one value this
+section acts on: it sorts the webhook to the top of the table under a sentence
+saying it is refusing every write that matches its rules. There is no way to
+spell "0, of the slices we looked at" in a count an operator reads as a fact, so
+it is withheld. A Service with no EndpointSlice at all is still a real `0` —
+that is the finding, and it survives the distinction.
 
 `complete` is false when one of the two configuration listings answered and the
 other did not — the rows are real, but they are not all of them.

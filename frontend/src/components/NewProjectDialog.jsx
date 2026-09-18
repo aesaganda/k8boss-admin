@@ -31,7 +31,10 @@
  * **A preflight denial blocks Confirm with the grant it needs.** It is the
  * one thing about a namespaced object that can be checked before its
  * namespace exists, and finding it out after the Namespace was created leaves
- * a half-project behind for a refusal that was knowable up front.
+ * a half-project behind for a refusal that was knowable up front. Which
+ * objects count as refused is `MutationDialog`'s `refusedByPreflight`, shared
+ * so the rule cannot drift again; what a refusal costs *here* is this dialog's
+ * own sentence.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -49,7 +52,7 @@ import {
   TextArea,
   TextInput,
 } from '@patternfly/react-core';
-import MutationDialog from './MutationDialog';
+import MutationDialog, { refusedByPreflight } from './MutationDialog';
 import DiffView from './DiffView';
 import { CodeBlock, PartialBanner, SectionHeader, StatusBadge } from './ui';
 import { projects } from '../api/client';
@@ -283,7 +286,22 @@ export default function NewProjectDialog({ onClose, onApplied }) {
     [body, acknowledged],
   );
 
-  /** Re-checked against the dry run's own answer, which is the later read. */
+  /**
+   * Re-checked against the dry run's own answer, which is the later read.
+   *
+   * The refusal branch decides from `MutationDialog`'s `refusedByPreflight`
+   * rather than from a filter of its own. This dialog used to carry that
+   * filter, and it read `allowed === false` alone: a review that *failed*
+   * (`evaluationError` non-null, which §0.2 says means the authorizer could not
+   * decide) blocked Confirm and told an operator they lack a grant they may
+   * well hold, sending them to widen a ClusterRole that was already correct.
+   *
+   * What stays local is the sentence, not the decision. `MutationDialog`'s own
+   * wording is about writing the objects before this one; here the cost is
+   * specific and worse — the Namespace is object one, so confirming leaves a
+   * namespace behind with no quota, no limits and nobody bound to it, for a
+   * refusal that was knowable before anything was written.
+   */
   const confirmBlockedReason = useCallback(
     (result) => {
       const missing = (result?.consequences ?? []).filter((c) => !acknowledged.includes(c.code));
@@ -293,7 +311,7 @@ export default function NewProjectDialog({ onClose, onApplied }) {
           `${missing.map((c) => c.label).join('; ')}. Go back and tick each one.`
         );
       }
-      const refused = (result?.objects ?? []).filter((o) => o.preflight?.allowed === false);
+      const refused = refusedByPreflight(result);
       if (refused.length) {
         return (
           `The preflight refused ${refused.map((o) => `${o.kind} ${o.name}`).join(', ')}. ` +

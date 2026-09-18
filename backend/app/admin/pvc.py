@@ -49,8 +49,8 @@ import logging
 from typing import Any
 
 from app.admin.apply import MERGE_PATCH, patch_fn
-from app.admin.mutate import FeatureGate, mutate, read_only_switch
-from app.errors import Conflict, Invalid
+from app.admin.mutate import FeatureGate, audit_conflict, mutate, read_only_switch
+from app.errors import ClusterUnreachable, Conflict, Invalid
 from app.resources import reader
 from app.resources.envelope import collect
 from app.resources.shaping import get_field, parse_bytes
@@ -75,6 +75,13 @@ WARN_EXPANSION_UNKNOWN = "pvc_expansion_unknown"
 WARN_IN_USE = "pvc_in_use_offline_resize"
 WARN_RESIZE_PENDING = "pvc_resize_already_pending"
 WARN_MOUNTS_UNKNOWN = "pvc_mounts_unknown"
+
+#: Paging for the pod listing behind :func:`mounted_by`. Same shape and the same
+#: reason as §32's EndpointSlice tally: no field selector exists for a pod's
+#: volumes, so every pod in the namespace has to be looked at one page at a
+#: time, and a namespace with more than one page of pods is ordinary.
+_POD_PAGE_SIZE = 500
+_MAX_POD_PAGES = 10
 
 
 # --------------------------------------------------------------------------- #
@@ -285,14 +292,45 @@ def mounted_by(
     """
     pods: list[str] | None = None
     with collect(unavailable, "", "pods", namespace=namespace):
-        listing = reader.list_resource("", "v1", "pods", namespace=namespace, limit=500)
-        found = []
-        for pod in listing.get("items") or []:
-            for volume in get_field(pod, "spec", "volumes", default=[]) or []:
-                claim = get_field(volume, "persistentVolumeClaim", "claimName")
-                if claim == name:
-                    found.append(get_field(pod, "metadata", "name"))
-                    break
+        found: list[str] = []
+        cont: str | None = None
+        for _page in range(_MAX_POD_PAGES):
+            listing = reader.list_resource(
+                "", "v1", "pods", namespace=namespace,
+                limit=_POD_PAGE_SIZE, cont=cont,
+            )
+            for pod in listing.get("items") or []:
+                for volume in get_field(pod, "spec", "volumes", default=[]) or []:
+                    claim = get_field(volume, "persistentVolumeClaim", "claimName")
+                    if claim == name:
+                        found.append(get_field(pod, "metadata", "name"))
+                        break
+            # Every page, not just the first. One listing of 500 reported every
+            # pod behind the cursor as not mounting the claim, and this list is
+            # what tells an operator which workloads an expansion affects — so a
+            # short one reads as "nothing else is attached" on the screen where
+            # that sentence starts an offline resize. An expired cursor is a
+            # 410, which `from_api_exception` maps to `invalid` and `collect`
+            # re-raises rather than recording: a cursor that died mid-listing
+            # surfaces as an error instead of as a shorter list.
+            cont = listing.get("continue") or None
+            if not cont:
+                break
+        else:
+            # Still pods behind the cursor after the budget. Refused rather than
+            # returned short, for §0.1: an unread page and a namespace where
+            # nothing has the claim open are the same list once it is returned,
+            # and only one of them is safe to act on. `collect` maps this to a
+            # `timeout` entry and leaves `pods` at None.
+            raise ClusterUnreachable(
+                "The pod listing did not finish.",
+                detail=(
+                    f"Stopped after {_MAX_POD_PAGES} pages of {_POD_PAGE_SIZE} "
+                    f"pods in {namespace} with more remaining, so which of them "
+                    "mount this claim could not be established."
+                ),
+                context={"cause": "timeout"},
+            )
         # Assigned last, so a listing that raised leaves `pods` at None rather
         # than at a partial tally that reads as "nothing has this mounted".
         pods = sorted(pod for pod in found if pod)
@@ -666,7 +704,7 @@ def expand(
     live, current, live_version = _live(namespace, name)
     sent_version = request["resourceVersion"]
     if sent_version and live_version and sent_version != live_version:
-        raise Conflict(
+        conflict = Conflict(
             f"The claim {namespace}/{name} changed while you were reading it.",
             detail=(
                 f"You are editing version {sent_version}; the cluster has "
@@ -681,6 +719,19 @@ def expand(
                 "currentCapacity": current["capacity"],
             },
         )
+        # Rule 5 applies to a conflict too, and this one fires before the first
+        # `mutate()` — so without this the trail held nothing to say two people
+        # were resizing the same claim at once, which is the whole question
+        # rule 4 exists to make answerable.
+        audit_conflict(
+            verb="patch", group="", version="v1", plural="persistentvolumeclaims",
+            namespace=namespace, name=name, dry_run=dry_run, error=conflict,
+            detail=(
+                f"expand pvc {namespace}/{name}: refused, editing "
+                f"{sent_version} and the cluster has {live_version}"
+            ),
+        )
+        raise conflict
 
     expansion = expansion_support(current["storage_class"], unavailable)
     mounts = mounted_by(namespace, name, unavailable)

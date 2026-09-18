@@ -234,6 +234,54 @@ function MutationError({ error, phase }) {
   );
 }
 
+/* ── The preflight guard every multi-object write gets ──────────────────── */
+
+/**
+ * Confirm is blocked when the dry run already carries a per-object refusal.
+ *
+ * §14, §16's OLM install and §17's project all answer with an `objects[]` whose
+ * rendered entries carry a `preflight` of the create the real write will make.
+ * Confirming past one means writing the objects before it and then failing on
+ * it — the half-install those endpoints' partial reports exist to describe,
+ * reached on purpose and with the refusal already on screen.
+ *
+ * It lives here, and is applied to every result rather than passed in by each
+ * wrapper, for the reason the write funnel is one function: three panels each
+ * remembering to check this is three panels of which one already did not. That
+ * was §16's OLM install, which offered an enabled Confirm for a create the
+ * preflight had refused, while §14's identical dialog beside it did not.
+ *
+ * **A verdict that could not be evaluated is not a refusal.** §0.2: `allowed:
+ * false` with a non-null `evaluationError` means the authorizer failed, so the
+ * permission is unknown — and it is routine here, because a preflight of a
+ * create on a CustomResourceDefinition that phase one has not installed yet
+ * cannot be answered at all. Blocking on it would tell an operator they lack a
+ * grant they may well hold, and send them to widen a ClusterRole that was
+ * already correct.
+ *
+ * The selection is exported so that a wrapper with something more specific to
+ * say about the consequence — `NewProjectDialog` explains what a half-written
+ * project costs — decides from this list rather than re-deriving it. Three
+ * copies of that filter had drifted, and every one of them was missing the
+ * `evaluationError` clause above.
+ */
+export function refusedByPreflight(result) {
+  return (result?.objects ?? []).filter(
+    (object) => object.preflight?.allowed === false && !object.preflight.evaluationError,
+  );
+}
+
+function blockOnPreflightDenial(result) {
+  const refused = refusedByPreflight(result);
+  if (!refused.length) return null;
+  const first = refused[0];
+  return (
+    `The preflight refused ${refused.map((object) => `${object.kind} ${object.name}`).join(', ')}. ` +
+    `${first.preflight.hint || first.preflight.reason || ''} Confirming would write the objects before ` +
+    'it and then fail on this one, for a refusal that is already known.'
+  );
+}
+
 /* ── Default result summary ─────────────────────────────────────────────── */
 
 /**
@@ -279,7 +327,11 @@ export function MutationDialog({
   requireTyped,
   /** Skip the form phase and dry-run on open. Defaults to "there is no form". */
   autoPreview,
-  /** `(result) => string | null` — non-null disables Confirm and states why. */
+  /**
+   * `(result) => string | null` — non-null disables Confirm and states why.
+   * Additive: a dry run carrying a per-object preflight refusal is blocked
+   * whether or not this is passed. See `blockOnPreflightDenial`.
+   */
   confirmBlockedReason,
   /** `({ result, phase, error }) => node` — extra body content, e.g. a drain plan. */
   renderExtra,
@@ -420,8 +472,15 @@ export function MutationDialog({
   const hasVerdict = typeof preview?.diff?.changed === 'boolean';
   const noOp = hasVerdict && preview.diff.changed === false;
 
+  // The wrapper's own reason first — it knows about consequences and forms this
+  // dialog cannot see — then the per-object preflight guard, which applies to
+  // every result whether or not the wrapper remembered to ask for it.
   const blockedReason = useMemo(
-    () => (preview && confirmBlockedReason ? confirmBlockedReason(preview) : null),
+    () =>
+      preview
+        ? (confirmBlockedReason ? confirmBlockedReason(preview) : null) ??
+          blockOnPreflightDenial(preview)
+        : null,
     [preview, confirmBlockedReason],
   );
 

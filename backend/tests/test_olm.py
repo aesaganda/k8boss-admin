@@ -1018,14 +1018,13 @@ def _stub_status(monkeypatch, *, deployments=None, csv=None, crds=8, fail=None):
             return deployments[name]
         if plural == "clusterserviceversions" and csv is not None:
             return csv
+        if plural == "customresourcedefinitions" and name in olm_bundle.crd_names()[:crds]:
+            return _established_crd(name)
         raise NotFound(f"{plural}/{name} not found", context={"resource": plural})
 
     def fake_list(group, version, plural, **kwargs):
         if fail and plural in fail:
             raise RBACDenied(f"{plural} is forbidden", context={"resource": plural})
-        if plural == "customresourcedefinitions":
-            return {"items": [_established_crd(n)
-                              for n in olm_bundle.crd_names()[:crds]]}
         return {"items": []}
 
     monkeypatch.setattr(olm_service.reader, "get_resource", fake_get)
@@ -1140,6 +1139,30 @@ def test_a_crd_listing_that_failed_counts_null_rather_than_zero(monkeypatch, fak
     assert result["crds"]["present"] is None
     assert result["crds"]["established"] is None
     assert "unknown — not zero" in result["crds"]["detail"]
+
+
+def test_the_olm_crds_are_found_without_listing_every_crd_on_the_cluster(
+    monkeypatch, fake_k8s,
+):
+    """A cluster with a few operators installed serves more CRDs than one page
+    holds, and OLM's eight are not guaranteed to be on the first one. Counted out
+    of a truncated listing they all read as missing, and the portal reports OLM
+    as not installed on a cluster where it is running."""
+    stub_discovery(monkeypatch)
+    _stub_status(monkeypatch)
+
+    def no_listing(group, version, plural, **kwargs):
+        raise AssertionError(
+            f"{plural} was listed; the eight CRDs are read by name so that a "
+            "cluster with more than one page of them still answers"
+        )
+
+    monkeypatch.setattr(olm_service.reader, "list_resource", no_listing)
+
+    result = olm_service.status()
+
+    assert result["crds"]["present"] == 8
+    assert result["crds"]["missing"] == []
 
 
 def test_installed_but_not_ready_is_the_ordinary_state_after_an_install(

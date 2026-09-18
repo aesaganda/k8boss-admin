@@ -33,7 +33,7 @@
  * cell. Asking for raw makes every row the same shape — a Kubernetes object —
  * which is what this page is for.
  */
-import { useMemo, useState } from 'react';
+import { Suspense, lazy, useMemo, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import {
   Button,
@@ -58,7 +58,6 @@ import {
   Toolbar,
 } from '../components/ui';
 import DeleteDialog from '../components/DeleteDialog';
-import ImportYamlDialog from '../components/ImportYamlDialog';
 import { templatesFor } from '../components/templates';
 import { realGroup, resources as resourcesApi, wireGroup } from '../api/client';
 import { useCluster } from '../contexts/ClusterContext';
@@ -75,6 +74,12 @@ import {
   YamlPanel,
   menuAction,
 } from './_parts';
+
+// Lazy, like the copy in `Layout.jsx`, and for the same reason: this dialog
+// carries `objectFormModel.js` and `templates.js`, and a single static import
+// of it anywhere pulls both back into the chunk that does the importing. The
+// saving only exists if every call site is `lazy`, so this one is too.
+const ImportYamlDialog = lazy(() => import('../components/ImportYamlDialog'));
 
 /* ── The catalog ────────────────────────────────────────────────────────── */
 
@@ -419,16 +424,18 @@ export function Listing({ group, version, plural, catalog, initialName, initialN
       </Drawer>
 
       {creating && (
-        <ImportYamlDialog
-          isOpen
-          title={`Create ${entry?.kind}`}
-          templates={templatesFor(entry)}
-          onClose={() => setCreating(false)}
-          onApplied={() => {
-            setCreating(false);
-            listing.reload();
-          }}
-        />
+        <Suspense fallback={null}>
+          <ImportYamlDialog
+            isOpen
+            title={`Create ${entry?.kind}`}
+            templates={templatesFor(entry)}
+            onClose={() => setCreating(false)}
+            onApplied={() => {
+              setCreating(false);
+              listing.reload();
+            }}
+          />
+        </Suspense>
       )}
 
       {editTarget && (

@@ -660,3 +660,37 @@ def test_a_saml_session_cannot_act_as_a_cluster_identity(
     # revisited for a session that never carried the values.
     assert principal.idp_username == "erens"
     assert principal.idp_groups == ("platform-admins",)
+
+
+def test_an_assertion_with_no_recipient_is_refused(
+    client, idp, idp_key_pem, idp_certificate
+):
+    """`Recipient` is required, not validated when it happens to be there.
+
+    Whoever replays an assertion here writes the response around it, so the
+    attribute that would catch a misdirected one is the attribute they leave
+    out — which made "checked when present" a check that never ran in the one
+    case it exists for.
+    """
+    request_id = start(client)
+    xml = response_xml(request_id=request_id).replace(f' Recipient="{ACS}"', "")
+    document = sign_assertion(xml, idp_key_pem, idp_certificate)
+
+    assert "assertion_rejected" in post(client, document).headers["location"]
+
+
+def test_a_non_ascii_in_response_to_is_refused_rather_than_crashing_the_callback(
+    client, idp, idp_key_pem, idp_certificate
+):
+    """`compare_digest` raises TypeError on a `str` that is not pure ASCII.
+
+    The attribute is written by whoever sends the response. Before the
+    comparison was made on bytes, one non-ASCII character in it turned the
+    refusal a replay is supposed to produce into an unaudited 500.
+    """
+    start(client)
+    document = sign_assertion(
+        response_xml(request_id="_bir-şey-başka"), idp_key_pem, idp_certificate
+    )
+
+    assert "assertion_rejected" in post(client, document).headers["location"]

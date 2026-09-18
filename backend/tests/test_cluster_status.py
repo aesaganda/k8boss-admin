@@ -120,6 +120,29 @@ def endpoint_slice(namespace, service, *, ready=1):
     }
 
 
+def endpoint_slice_pages(monkeypatch, pages, *, ends=True):
+    """Serve the EndpointSlice listing across several pages.
+
+    The `cluster` fixture answers every listing in a single page, which is the
+    shape that hid the bug: a tally taken from page one alone recorded a zero
+    for every Service whose slice was behind the cursor. `ends=False` never
+    exhausts the cursor, which is the cluster that outruns the page budget.
+    """
+    single_page = cluster_status.reader.list_resource
+
+    def fake(group, version, plural, *, namespace=None, cont=None, **kwargs):
+        if plural != "endpointslices":
+            return single_page(group, version, plural, namespace=namespace, **kwargs)
+        index = int(cont or 0)
+        more = not ends or index + 1 < len(pages)
+        return {
+            "items": pages[index % len(pages)],
+            "continue": str(index + 1) if more else None,
+        }
+
+    monkeypatch.setattr(cluster_status.reader, "list_resource", fake)
+
+
 def default_listings():
     """Fresh every time: the lease's `renewTime` has to be recent *now*."""
     return {
@@ -462,6 +485,59 @@ def test_an_endpoint_listing_that_failed_leaves_every_count_unknown(
     # The rows themselves are still real and still worth showing: the
     # configurations answered, only the endpoint tally did not.
     assert len(body["webhooks"]["items"]) == 1
+    assert body["partial"] is True
+
+
+def test_a_service_whose_endpoint_slice_is_on_a_later_page_is_not_counted_as_zero(
+    cluster, db_engine, monkeypatch,
+):
+    """The tally follows the continue token.
+
+    A cluster with more EndpointSlices than one page holds is ordinary, and the
+    slice backing a webhook's Service lands wherever etcd order puts it. Read
+    from page one alone, that webhook's `endpoint_count` is 0 — which sorts it
+    to the top of the table as one that rejects every write matching its rules,
+    on a backend that is up."""
+    cluster["listings"][("admissionregistration.k8s.io", "validatingwebhookconfigurations")] = [
+        webhook_config("policy.example.io", hooks=[
+            hook("deny.example.io",
+                 service={"namespace": "policy", "name": "webhook", "port": 443}),
+        ]),
+    ]
+    endpoint_slice_pages(monkeypatch, [
+        [endpoint_slice("other", "unrelated", ready=1)],
+        [endpoint_slice("policy", "webhook", ready=2)],
+    ])
+
+    section = status()["webhooks"]
+
+    assert section["items"][0]["endpoint_count"] == 2
+    assert section["blocking_count"] == 0
+
+
+def test_an_endpoint_cursor_still_live_after_the_page_budget_is_a_failed_read(
+    cluster, db_engine, monkeypatch,
+):
+    """Not a short tally, which is zeros for every Service nobody reached.
+
+    The budget bounds the work one request can do; what it must not do is turn
+    "we stopped looking" into a number. `None` all the way through, and the
+    reason in `unavailable[]`."""
+    cluster["listings"][("admissionregistration.k8s.io", "validatingwebhookconfigurations")] = [
+        webhook_config("policy.example.io", hooks=[
+            hook("deny.example.io",
+                 service={"namespace": "policy", "name": "webhook", "port": 443}),
+        ]),
+    ]
+    endpoint_slice_pages(monkeypatch, [[]], ends=False)
+
+    body = status()
+
+    assert body["webhooks"]["items"][0]["endpoint_count"] is None
+    assert body["webhooks"]["blocking_count"] is None
+    assert ("discovery.k8s.io", "endpointslices", "timeout") in [
+        (e["group"], e["resource"], e["reason"]) for e in body["unavailable"]
+    ]
     assert body["partial"] is True
 
 

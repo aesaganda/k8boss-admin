@@ -46,6 +46,42 @@ def _derive_key(secret: str) -> bytes:
     return base64.urlsafe_b64encode(digest)
 
 
+# A `Fernet.generate_key()` is 32 bytes of entropy rendered as 44 urlsafe-base64
+# characters. Anything shorter than that was typed by a person, not generated.
+_GENERATED_KEY_LENGTH = len(Fernet.generate_key())
+
+
+def _warn_if_the_key_looks_typed(secret: str) -> None:
+    """Warn once when ``ENCRYPTION_KEY`` looks like a passphrase, not a key.
+
+    The derivation above is one unsalted SHA-256, so a human-chosen passphrase is
+    brute-forceable offline from a database dump at the speed of raw SHA-256 —
+    every stored cluster token at once, without touching this console.
+
+    The derivation is deliberately NOT changed here. A KDF swap re-derives a
+    different key from the same secret, which makes every token in every existing
+    database undecryptable and presents itself to an operator as every registered
+    cluster failing to authenticate after an upgrade — a worse failure than the
+    one being fixed, and one they cannot undo. So: say it, name the command that
+    fixes it, and leave the ciphertext readable. Called from the key-resolution
+    path, which the ``_fernet`` memo runs once per process — a per-request copy of
+    this line is a line operators filter out.
+    """
+    if len(secret) < _GENERATED_KEY_LENGTH:
+        logger.warning(
+            "ENCRYPTION_KEY is %d characters, shorter than a generated key (%d). "
+            "It is stretched with a single unsalted SHA-256, so a value someone "
+            "chose by hand can be brute-forced offline from a database dump and "
+            "every stored cluster token read with it. Generate a real key with: "
+            "python -c 'from cryptography.fernet import Fernet; "
+            "print(Fernet.generate_key().decode())' — note that changing "
+            "ENCRYPTION_KEY orphans credentials already stored under the old "
+            "value, so re-register the affected clusters afterwards.",
+            len(secret),
+            _GENERATED_KEY_LENGTH,
+        )
+
+
 def key_file_path() -> Path:
     """Where the generated key lives: next to the database it protects.
 
@@ -74,6 +110,7 @@ def key_file_path() -> Path:
 def _load_or_create_key() -> bytes:
     """Resolve the Fernet key: explicit setting, then key file, then generate."""
     if settings.encryption_key:
+        _warn_if_the_key_looks_typed(settings.encryption_key)
         return _derive_key(settings.encryption_key)
 
     path = key_file_path()

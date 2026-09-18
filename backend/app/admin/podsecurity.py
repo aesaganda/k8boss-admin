@@ -42,7 +42,7 @@ import logging
 from typing import Any
 
 from app.admin.apply import MERGE_PATCH, patch_fn
-from app.admin.mutate import FeatureGate, mutate, read_only_switch
+from app.admin.mutate import FeatureGate, audit_conflict, mutate, read_only_switch
 from app.errors import Conflict, Invalid
 from app.resources import reader
 from app.resources.shaping import (
@@ -493,7 +493,7 @@ def set_level(
     live, current, live_version = _live_state(name)
     sent_version = request["resourceVersion"]
     if sent_version and live_version and sent_version != live_version:
-        raise Conflict(
+        conflict = Conflict(
             f"The namespace {name} changed while you were reading it.",
             detail=(
                 f"You are editing version {sent_version}; the cluster has "
@@ -507,6 +507,19 @@ def set_level(
                 "currentPodSecurity": current,
             },
         )
+        # Rule 5 applies to a conflict too, and this one fires before the first
+        # `mutate()` — so without this the trail held nothing to say two people
+        # were changing the same namespace's Pod Security level at once, which
+        # is the whole question rule 4 exists to make answerable.
+        audit_conflict(
+            verb="patch", group="", version="v1", plural="namespaces",
+            namespace=None, name=name, dry_run=dry_run, error=conflict,
+            detail=(
+                f"pod security {name}: refused, editing {sent_version} and the "
+                f"cluster has {live_version}"
+            ),
+        )
+        raise conflict
 
     consequences = consequences_for(current, requested)
     _require_acknowledgement(consequences, acknowledge_consequences)

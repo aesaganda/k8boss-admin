@@ -40,6 +40,7 @@ from app.k8s.client import manager
 from app.k8s.context import reset_current_cluster_id, set_current_cluster_id
 from app.k8s.quantities import add_quantities, parse_quantity
 from app.identity import oidc, openshift
+from app.identity.dependencies import require_console_admin
 from app.models import Cluster, utcnow
 from app.services import nodes as nodes_service
 from app.services import route_domain
@@ -284,8 +285,27 @@ def list_clusters(db: Session = Depends(get_db)) -> dict:
     return envelope([c.to_public_dict() for c in clusters])
 
 
+# The three writes below are administrator-only when the console authenticates
+# operators, and unchanged in legacy proxy mode — `require_console_admin` returns
+# None with AUTH_ENABLED false, where the proxy in front owns the decision.
+#
+# Ungated, they were reachable by any signed-in account down to the lowest
+# "user" role, and two payloads walk straight through. Clearing
+# `impersonation_enabled` makes every later call to that cluster run as this
+# console's ServiceAccount instead of as the signed-in operator (ADR-0007), so
+# the caller leaves their own RBAC behind and inherits the console's. Worse, and
+# independent of impersonation: a PUT that moves `api_server` while *omitting*
+# `token` keeps the stored credential — that is what `ClusterUpdate` promises —
+# and points it at a host the caller controls, so the next request hands them
+# the cluster's bearer token. Registering a cluster is an administrator act for
+# the same reason: it decides which API server this console's ServiceAccount
+# talks to.
 @router.post("/clusters", status_code=201)
-def create_cluster(payload: ClusterCreate, db: Session = Depends(get_db)) -> dict:
+def create_cluster(
+    payload: ClusterCreate,
+    _admin=Depends(require_console_admin),
+    db: Session = Depends(get_db),
+) -> dict:
     """Register a cluster. The token is encrypted before it reaches the database."""
     _validate(api_server=payload.api_server, authentication_type=payload.authentication_type)
     _validate_impersonation(payload.impersonation_enabled)
@@ -321,7 +341,10 @@ def create_cluster(payload: ClusterCreate, db: Session = Depends(get_db)) -> dic
 
 @router.put("/clusters/{cluster_id}")
 def update_cluster(
-    cluster_id: int, payload: ClusterUpdate, db: Session = Depends(get_db)
+    cluster_id: int,
+    payload: ClusterUpdate,
+    _admin=Depends(require_console_admin),
+    db: Session = Depends(get_db),
 ) -> dict:
     """Partial update. An omitted ``token`` keeps the stored one."""
     cluster = _load(db, cluster_id)
@@ -375,7 +398,11 @@ def update_cluster(
 
 
 @router.delete("/clusters/{cluster_id}", status_code=204)
-def delete_cluster(cluster_id: int, db: Session = Depends(get_db)) -> Response:
+def delete_cluster(
+    cluster_id: int,
+    _admin=Depends(require_console_admin),
+    db: Session = Depends(get_db),
+) -> Response:
     """De-register a cluster and drop its cached transport.
 
     The audit records naming it are left alone. They denormalise the cluster name
@@ -415,11 +442,25 @@ def test_cluster(cluster_id: int, db: Session = Depends(get_db)) -> dict:
     # exercise the configuration as it now stands, and a cached transport from
     # before the operator's edit would report on the configuration they just
     # replaced.
-    manager.invalidate(cluster.id)
+    manager.invalidate(cluster_id)
+
+    # Hand the pooled database connection back before contacting the cluster.
+    # A test against an unreachable API server is the longest cluster call this
+    # console makes — it runs to the connect timeout by definition — and a
+    # session left open holds one pooled connection for all of it. Enough tabs
+    # on one sick cluster exhaust the pool, and then this console's own sign-ins
+    # and audit writes start failing because somebody *else's* API server is
+    # down: one customer's outage becomes the whole console's.
+    #
+    # `close()` detaches the row with its loaded columns intact, which is all
+    # the transport builder needs; the result below is written through a fresh
+    # load, and the commit that records it releases the connection again before
+    # the preflight round trips.
+    db.close()
 
     started = time.perf_counter()
     try:
-        with _cluster_context(cluster.id):
+        with _cluster_context(cluster_id):
             clients = manager.get_clients_for_cluster(cluster)
             try:
                 version = clients.version_api.get_code()
@@ -427,13 +468,23 @@ def test_cluster(cluster_id: int, db: Session = Depends(get_db)) -> dict:
                 clients.close()
     except Exception as e:  # noqa: BLE001 - every failure is a test result
         latency_ms = round((time.perf_counter() - started) * 1000, 1)
-        error = _as_envelope(e, cluster_id=cluster.id)
-        cluster.status = "disconnected"
-        cluster.status_detail = error["message"]
-        cluster.updated_at = utcnow()
+        error = _as_envelope(e, cluster_id=cluster_id)
+        # Re-read rather than reuse the detached row, and tolerate its absence:
+        # the connection was released above, so the cluster could have been
+        # de-registered while we waited on its timeout. Recording the result of
+        # a test on a row that is gone is not worth failing the test over — the
+        # operator asked whether the cluster answers, and it did not.
+        row = db.get(Cluster, cluster_id)
+        if row is not None:
+            row.status = "disconnected"
+            row.status_detail = error["message"]
+            row.updated_at = utcnow()
+        # Outside the branch: the read above opened a transaction, and leaving it
+        # open would hold the connection across the return path we just released
+        # it for.
         db.commit()
         logger.warning("Connection test failed for cluster id=%s: %s",
-                       cluster.id, error["error"])
+                       cluster_id, error["error"])
         return {
             "reachable": False,
             "server_version": None,
@@ -445,11 +496,14 @@ def test_cluster(cluster_id: int, db: Session = Depends(get_db)) -> dict:
     latency_ms = round((time.perf_counter() - started) * 1000, 1)
     server_version = getattr(version, "git_version", None) or None
 
-    cluster.status = "connected"
-    cluster.status_detail = None
-    cluster.server_version = server_version
-    cluster.last_connected = utcnow()
-    cluster.updated_at = utcnow()
+    # Same re-read, same reason as the failure branch above.
+    row = db.get(Cluster, cluster_id)
+    if row is not None:
+        row.status = "connected"
+        row.status_detail = None
+        row.server_version = server_version
+        row.last_connected = utcnow()
+        row.updated_at = utcnow()
     db.commit()
 
     # Imported here, not at module scope: this is the only place in the
@@ -457,7 +511,7 @@ def test_cluster(cluster_id: int, db: Session = Depends(get_db)) -> dict:
     # registrable even while that layer is being changed.
     from app.admin import preflight
 
-    with _cluster_context(cluster.id):
+    with _cluster_context(cluster_id):
         permissions = preflight.check_many([dict(check) for check in BASELINE_PREFLIGHT_CHECKS])
 
     # §13. Offered, never applied: the stored value is the operator's and this
@@ -466,7 +520,7 @@ def test_cluster(cluster_id: int, db: Session = Depends(get_db)) -> dict:
     # could not ask", which are the same thing to a form that has nothing to
     # pre-fill — the difference is reported where it can be acted on, in the
     # capabilities envelope the route dialog reads.
-    with _cluster_context(cluster.id):
+    with _cluster_context(cluster_id):
         discovered = route_domain.discover_domain()
 
     return {
@@ -525,11 +579,23 @@ def cluster_overview(cluster_id: int, db: Session = Depends(get_db)) -> dict:
     """
     from app.resources.envelope import collect
 
-    cluster = _load(db, cluster_id)
+    # `_load` is still what turns an unregistered id into a 404; the platform is
+    # the only column the response needs from the row.
+    platform = _load(db, cluster_id).platform
+
+    # Everything below this line talks to a cluster and nothing below it talks to
+    # the database, so the pooled connection goes back first. Held across six
+    # collectors' round trips, one slow or unreachable cluster keeps a connection
+    # for the whole of its timeout, and enough open tabs on that one cluster
+    # exhaust the pool — at which point this console's own sign-ins and audit
+    # writes start failing because somebody *else's* API server is down. The
+    # client manager opens its own short-lived session to resolve the cluster, so
+    # releasing this one costs the collectors nothing.
+    db.close()
 
     result: dict = {
         "server_version": None,
-        "platform": cluster.platform,
+        "platform": platform,
         "nodes": None,
         "namespaces": None,
         "workloads": None,
@@ -539,7 +605,7 @@ def cluster_overview(cluster_id: int, db: Session = Depends(get_db)) -> dict:
     }
     unavailable: list[dict] = []
 
-    with _cluster_context(cluster.id):
+    with _cluster_context(cluster_id):
         with collect(unavailable, "", "version"):
             result["server_version"] = _collect_server_version()
 

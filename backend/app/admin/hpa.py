@@ -42,7 +42,7 @@ import logging
 from typing import Any
 
 from app.admin.apply import MERGE_PATCH, patch_fn
-from app.admin.mutate import FeatureGate, mutate, read_only_switch
+from app.admin.mutate import FeatureGate, audit_conflict, mutate, read_only_switch
 from app.errors import Conflict, Invalid
 from app.resources import reader
 from app.resources.shaping import get_field, hpa_row
@@ -478,7 +478,7 @@ def set_bounds(
 
     sent_version = request["resourceVersion"]
     if sent_version and live_version and sent_version != live_version:
-        raise Conflict(
+        conflict = Conflict(
             f"The autoscaler {namespace}/{name} changed while you were reading it.",
             detail=(
                 f"You are editing version {sent_version}; the cluster has "
@@ -493,6 +493,19 @@ def set_bounds(
                 "currentMaxReplicas": current["max_replicas"],
             },
         )
+        # Rule 5 applies to a conflict too, and this one fires before the first
+        # `mutate()` — so without this the trail held nothing to say two people
+        # were editing the same autoscaler at once, which is the whole question
+        # rule 4 exists to make answerable.
+        audit_conflict(
+            verb="patch", group=GROUP, version=VERSION, plural=PLURAL,
+            namespace=namespace, name=name, dry_run=dry_run, error=conflict,
+            detail=(
+                f"hpa bounds {namespace}/{name}: refused, editing "
+                f"{sent_version} and the cluster has {live_version}"
+            ),
+        )
+        raise conflict
 
     check_changed(current, request)
     consequences = consequences_for(current, request)

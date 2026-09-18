@@ -66,6 +66,13 @@ import { useTheme } from '../contexts/ThemeContext';
 
 const DEFAULT_COMMAND = '/bin/sh';
 
+// `app/middleware/auth.py` closes an unauthenticated socket with this
+// application code — after accepting it, precisely so the code arrives here.
+// Without it the close is indistinguishable from a proxy dropping the
+// connection, and an operator whose session expired retries, fails again, and
+// goes to debug a network that is fine.
+const SESSION_EXPIRED_CLOSE = 4401;
+
 // Matching PatternFly's own surfaces rather than xterm's black default, so a
 // terminal in light mode is not a hole in the page.
 const THEMES = {
@@ -266,8 +273,14 @@ export function PodTerminal({
       }
     };
 
-    socket.onclose = () => {
-      if (!sawTerminalRef.current) {
+    socket.onclose = (event) => {
+      if (event?.code === SESSION_EXPIRED_CLOSE) {
+        // The console refused the socket; the cluster and the network were
+        // never involved. Saying "connection lost" here sent operators to look
+        // at a proxy when what they needed was to sign in again.
+        setStatus('expired');
+        term.write('\r\n\x1b[2m— your session expired; sign in again\x1b[0m\r\n');
+      } else if (!sawTerminalRef.current) {
         setStatus('lost');
         term.write('\r\n\x1b[2m— connection lost\x1b[0m\r\n');
       }
@@ -320,6 +333,7 @@ export function PodTerminal({
     ended: { status: 'unknown', label: 'Session ended' },
     error: { status: 'failed', label: 'Refused' },
     lost: { status: 'unreachable', label: 'Connection lost' },
+    expired: { status: 'warning', label: 'Session expired' },
   }[status] ?? { status: 'unknown', label: status };
 
   // §1.6 / §11.5: the gate is checked here so no socket is opened and no audit
@@ -464,6 +478,14 @@ export function PodTerminal({
             ? 'The session closed without the API server reporting what the command returned. This is not ' +
               'the same as a successful exit, and it is not reported as one.'
             : exit.detail || 'The command exited.'}
+        </Alert>
+      )}
+
+      {status === 'expired' && (
+        <Alert isInline variant="warning" title="Your session expired" data-testid="pod-terminal-expired">
+          The console closed this shell because this browser no longer has a valid session — nothing is
+          wrong with the pod, the cluster or the network. Sign in again and open a new shell. Whatever the
+          command was doing in the pod may still be running; closing a terminal does not stop a process.
         </Alert>
       )}
 

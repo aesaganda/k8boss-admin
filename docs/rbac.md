@@ -22,12 +22,35 @@ that is the deployment it is written for.
 **Every permission here belongs to one ServiceAccount per cluster, not to the
 person signed in.** The console's own users decide who may reach the console;
 they decide nothing about a cluster, so two operators with different console
-roles have identical power over every registered cluster and every preflight in
-this document answers about the ServiceAccount. That is why withholding a grant
-is the control, and why this table is worth reading before enabling writes.
-[`adr-0007-impersonation.md`](adr-0007-impersonation.md) records what acting as
-the operator instead would fix and what its grant would cost; it is proposed,
-not accepted, and nothing implements it.
+roles have identical power *through* a cluster's registered credential, and
+every preflight in this document answers about the ServiceAccount. That is why
+withholding a grant is the control, and why this table is worth reading before
+enabling writes.
+
+[`adr-0007-impersonation.md`](adr-0007-impersonation.md) is **accepted and
+implemented**, so the paragraph above describes the default rather than the only
+behaviour. `Cluster.impersonation_enabled` is per-cluster and off until somebody
+sets it; where it is set, `app/k8s/impersonation.py` sends `Impersonate-User`
+and `Impersonate-Group` for the signed-in operator, and the API server
+authorizes, admits and writes its own audit record as that person. A session
+that cannot supply a cluster identity is refused with `impersonation_unavailable`
+rather than served as the console — a silent fall-back would show an operator
+data their own RBAC forbids. What that grant costs is in the ADR; what it ships
+as is commented out, below.
+
+**One thing is not identical between two operators, and it is the credential
+itself.** With `AUTH_ENABLED=true`, registering a cluster, editing one and
+de-registering one are administrator-only — `POST`, `PUT` and
+`DELETE` on `/api/clusters`, §3 of [`api-contract.md`](api-contract.md). The
+reason is the `PUT`: it is a partial update and an omitted `token` keeps the
+stored one, which is a promise the console has to keep and also the shape of the
+attack. An account that can move `api_server` while leaving `token` out has
+redirected this console's bearer token at a host it chose, and the next request
+hands the token over. Clearing `impersonation_enabled` is the quieter half of
+the same edit — every later call to that cluster reverts to the ServiceAccount,
+so the caller leaves their own RBAC behind and inherits the console's. In legacy
+proxy mode there is no console role to check, so the proxy in front owns that
+decision exactly as it owns every other endpoint.
 
 ---
 

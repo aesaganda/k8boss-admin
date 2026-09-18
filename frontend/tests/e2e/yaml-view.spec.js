@@ -139,7 +139,15 @@ test.describe('reading an object’s YAML', () => {
     const readAt = await page.getByTestId('yaml-panel-read-at').textContent();
 
     // Every later read fails. Registered after mockApi, so it wins.
-    await page.route('**/yaml**', (route) =>
+    //
+    // Anchored under `/api/` rather than matching `yaml` anywhere in the URL.
+    // The suite runs against a production build, so the page's own chunks are
+    // real network requests: a bare `**/yaml**` also swallows
+    // `/assets/yamlSyntax-*.js`, and the page then renders the error boundary's
+    // "its JavaScript chunk did not download" instead of the panel this test is
+    // about. That is a failure with nothing to do with the YAML endpoint, and
+    // the only clue is a heading that never appears.
+    await page.route('**/api/**/yaml**', (route) =>
       route.fulfill({
         status: 502,
         contentType: 'application/json',
@@ -169,7 +177,10 @@ test.describe('reading an object’s YAML', () => {
 
   test('nothing to show at all is still shown as a failure', async ({ page }) => {
     await mockApi(page);
-    await page.route('**/yaml**', (route) =>
+    // Anchored under `/api/` — see the note on the refresh test above. This one
+    // installs the route *before* the navigation, so an unanchored glob breaks
+    // the page load itself rather than the read it is aiming at.
+    await page.route('**/api/**/yaml**', (route) =>
       route.fulfill({
         status: 403,
         contentType: 'application/json',

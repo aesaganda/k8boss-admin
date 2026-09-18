@@ -6,7 +6,7 @@
  * logging" from "we lost the connection"*. The backend goes to real trouble to
  * keep it (`StreamTerminator` in `app/api/logs.py` exists for nothing else),
  * and a viewer that rendered both as a grey "disconnected" line would throw all
- * of it away. So this component distinguishes **three** terminal states, not
+ * of it away. So this component distinguishes **four** terminal states, not
  * two:
  *
  *   `end` frame     — the stream finished. The pod stopped producing output, or
@@ -24,6 +24,14 @@
  *                     different thing to tell an operator than either of the
  *                     other two, and the one most likely to be mistaken for
  *                     "the application went quiet".
+ *   close code 4401 — the console's own middleware refused the socket because
+ *                     this browser's session is gone. Amber, and worded as a
+ *                     sign-in problem. It is only distinguishable from the case
+ *                     above because `app/middleware/auth.py` accepts the socket
+ *                     before closing it; a close sent before the accept is a
+ *                     handshake failure and the browser never delivers the code,
+ *                     which is how an expired session used to read as a broken
+ *                     network and send operators to debug a healthy one.
  *
  * Two other places where silence would lie:
  *
@@ -64,6 +72,23 @@ const TAIL_OPTIONS = [100, 500, 1000, 5000, 10000];
 // reported rather than silently discarded — see the docstring.
 const MAX_BUFFERED_LINES = 5000;
 
+// How often arriving frames are moved from the ref into React state.
+//
+// One `setLines` per frame copies the whole buffer and re-renders the panel per
+// frame: a pod logging a few hundred lines a second pins the tab, and the
+// operator watching a rollout cannot scroll, pause or press Download. Batching
+// on a timer costs at most this much latency on a line appearing and nothing
+// else — the ref holds every frame in arrival order, and the flush on close
+// means the tail is never the price of the batching.
+const FLUSH_INTERVAL_MS = 100;
+
+// `app/middleware/auth.py` closes an unauthenticated socket with this
+// application code — after accepting it, precisely so the code arrives here.
+// Without it the close is indistinguishable from a proxy dropping the
+// connection, and an operator whose session expired goes to debug a network
+// that is fine.
+const SESSION_EXPIRED_CLOSE = 4401;
+
 /** Terminal-state vocabulary. `null` means the stream is still open. */
 const TERMINAL = {
   ended: {
@@ -81,6 +106,14 @@ const TERMINAL = {
       'Something between this browser and it dropped the connection — a proxy idle timeout, a sleeping ' +
       'laptop, a restarted backend. The output above is incomplete, and unlike a normal end this viewer ' +
       'cannot say what was missed.',
+  },
+  expired: {
+    variant: 'warning',
+    title: 'Your session expired',
+    body:
+      'The console closed the stream because this browser no longer has a valid session. Nothing is wrong ' +
+      'with the pod, the cluster or the network — sign in again and reopen the logs. The output above is ' +
+      'whatever had arrived before the session ended.',
   },
 };
 
@@ -146,6 +179,11 @@ export function LogViewer({
   const scrollRef = useRef(null);
   const socketRef = useRef(null);
   const pendingRef = useRef([]);
+  // Frames that have arrived and are not on screen yet. Distinct from
+  // `pendingRef`, which is what an operator's pause is holding: this one is
+  // emptied by the timer a few times a second and nobody asked for it.
+  const bufferRef = useRef([]);
+  const flushTimerRef = useRef(null);
   const pausedRef = useRef(paused);
   // Set the moment a terminal frame arrives, and read in `onclose` — the close
   // event fires for both a clean end and a dropped connection, and this ref is
@@ -153,12 +191,38 @@ export function LogViewer({
   const sawTerminalRef = useRef(false);
   const seqRef = useRef(0);
 
+  /**
+   * Move what has arrived into state.
+   *
+   * Called by the timer, by a terminal frame and by the close, never per frame:
+   * a `setLines` per frame copies the whole 5000-line array and re-renders the
+   * panel, which is what made a chatty pod unreadable exactly when somebody was
+   * reading it. `held` is republished here too, for the same reason — a paused
+   * viewer that set state on every arriving frame re-rendered just as often for
+   * a number nobody is watching change per line.
+   */
+  const flush = useCallback(() => {
+    if (flushTimerRef.current != null) {
+      clearTimeout(flushTimerRef.current);
+      flushTimerRef.current = null;
+    }
+    const batch = bufferRef.current;
+    if (batch.length) {
+      bufferRef.current = [];
+      setLines((current) => capLines([...current, ...batch], setDropped));
+    }
+    if (pausedRef.current) setHeld(pendingRef.current.length);
+  }, []);
+
   useEffect(() => {
     pausedRef.current = paused;
-    if (!paused && pendingRef.current.length) {
+    if (!paused && (bufferRef.current.length || pendingRef.current.length)) {
       // Flush in arrival order. Skipping to the live edge would silently lose
-      // whatever arrived while the operator was reading.
-      const flushing = pendingRef.current;
+      // whatever arrived while the operator was reading. The batched frames go
+      // first: they arrived before the pause was pressed, and appending them
+      // after the held ones would interleave two stretches of one log.
+      const flushing = [...bufferRef.current, ...pendingRef.current];
+      bufferRef.current = [];
       pendingRef.current = [];
       setHeld(0);
       setLines((current) => capLines([...current, ...flushing], setDropped));
@@ -196,14 +260,22 @@ export function LogViewer({
 
       if (frame.type === 'log') {
         const entry = { seq: (seqRef.current += 1), line: frame.line ?? '', ts: frame.ts ?? null };
-        if (pausedRef.current) {
-          pendingRef.current.push(entry);
-          setHeld(pendingRef.current.length);
-        } else {
-          setLines((current) => capLines([...current, entry], setDropped));
+        // Which buffer it lands in is decided here, at arrival, so a pause is
+        // still exactly "everything from this moment": deciding it at flush
+        // time would count a line that arrived before the click as held.
+        if (pausedRef.current) pendingRef.current.push(entry);
+        else bufferRef.current.push(entry);
+        if (flushTimerRef.current == null) {
+          flushTimerRef.current = setTimeout(flush, FLUSH_INTERVAL_MS);
         }
         return;
       }
+
+      // A terminal frame is the last thing this socket will say, so whatever is
+      // still batched has to appear above it. "Stream ended" printed over lines
+      // that never made it out of the buffer would be a complete log that is
+      // missing its tail — the part an operator opened the viewer for.
+      flush();
 
       if (frame.type === 'end') {
         sawTerminalRef.current = true;
@@ -226,11 +298,22 @@ export function LogViewer({
       }
     };
 
-    socket.onclose = () => {
-      // §7's guarantee makes the absence of a terminal frame informative. It
-      // means the close did not come from the backend's own code path, so the
-      // truncation has a cause nobody has told us about.
-      if (!sawTerminalRef.current) {
+    socket.onclose = (event) => {
+      // Whatever the close means, the lines that arrived in the last interval
+      // are part of this log. Losing the tail of a stream is a correctness
+      // fault, not a rendering one: the last thing a crashing container says is
+      // the thing being read.
+      flush();
+      if (event?.code === SESSION_EXPIRED_CLOSE) {
+        // The console's own refusal, not the cluster's and not the network's.
+        // Reporting it as "connection lost" is what had operators retrying and
+        // then going to look at a proxy, when what they needed was to sign in.
+        setTerminal('expired');
+        setStatus('expired');
+      } else if (!sawTerminalRef.current) {
+        // §7's guarantee makes the absence of a terminal frame informative. It
+        // means the close did not come from the backend's own code path, so the
+        // truncation has a cause nobody has told us about.
         setTerminal('lost');
         setStatus('lost');
       }
@@ -248,12 +331,19 @@ export function LogViewer({
       socket.onopen = null;
       socket.onmessage = null;
       socket.onclose = null;
+      // The timer would otherwise fire into a viewer that has been unmounted or
+      // is already being rebuilt for a different stream — the effect below
+      // empties the buffers because the new stream is a different log.
+      if (flushTimerRef.current != null) {
+        clearTimeout(flushTimerRef.current);
+        flushTimerRef.current = null;
+      }
       if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
         socket.close();
       }
       socketRef.current = null;
     };
-  }, [ready, namespace, name, container, tailLines]);
+  }, [ready, namespace, name, container, tailLines, flush]);
 
   useEffect(() => {
     // A new stream is a new log. Keeping the old lines above the new ones would
@@ -263,6 +353,7 @@ export function LogViewer({
     setDropped(0);
     setHeld(0);
     pendingRef.current = [];
+    bufferRef.current = [];
     seqRef.current = 0;
     return connect();
     // `nonce` is the reconnect button: it is not read inside `connect`, it only
@@ -315,6 +406,7 @@ export function LogViewer({
     ended: { status: 'unknown', label: 'Ended' },
     error: { status: 'failed', label: 'Failed' },
     lost: { status: 'unreachable', label: 'Connection lost' },
+    expired: { status: 'warning', label: 'Session expired' },
   }[status] ?? { status: 'unknown', label: status };
 
   return (
@@ -524,11 +616,11 @@ export function LogViewer({
         </Alert>
       )}
 
-      {(terminal === 'ended' || terminal === 'lost') && (
+      {(terminal === 'ended' || terminal === 'lost' || terminal === 'expired') && (
         <Alert
           isInline
           variant={TERMINAL[terminal].variant}
-          title={terminal === 'ended' ? `${TERMINAL.ended.title} (${endReason})` : TERMINAL.lost.title}
+          title={terminal === 'ended' ? `${TERMINAL.ended.title} (${endReason})` : TERMINAL[terminal].title}
           data-testid={`log-${terminal}`}
           style={{ marginBlockStart: 'var(--admin-gap-sm, 0.5rem)' }}
         >

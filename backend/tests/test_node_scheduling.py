@@ -657,6 +657,22 @@ def test_a_stale_resource_version_conflicts_with_the_current_taints_attached(clu
     assert caught.value.context["currentTaints"] == [taint(effect="NoSchedule")]
 
 
+def test_a_conflict_that_never_reaches_the_funnel_is_still_in_the_trail(cluster):
+    """Rule 5 covers the writes that conflicted, and this refusal fires before
+    `mutate()` — so nothing else would record that two people were tainting the
+    same node at once, which is what rule 4 exists to make answerable."""
+    cluster(FakeCluster(node_object(taints=[taint(effect="NoSchedule")])), [])
+
+    with pytest.raises(Conflict):
+        ns.set_taints(NODE, {"taints": [], "resourceVersion": "1"}, dry_run=True)
+
+    (row,) = audit_rows()
+    assert row["outcome"] == "conflict"
+    assert row["target"]["name"] == NODE
+    assert row["dry_run"] is True
+    assert "884213" in row["detail"]
+
+
 def test_a_write_that_changes_nothing_is_refused(cluster):
     cluster(FakeCluster(node_object(taints=[taint()])), [])
 

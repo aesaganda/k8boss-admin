@@ -63,6 +63,7 @@ import logging
 import re
 from typing import Any, Iterable
 
+from app.errors import ClusterUnreachable
 from app.k8s.client import get_core_v1, get_version_api
 from app.resources import catalog, reader
 from app.resources.envelope import collect
@@ -89,6 +90,15 @@ KUBELET_MINORS_BEHIND = 3
 #: `v1.31.4+abc`, `v1.31.4-eks-1234`, `1.31.4`. The suffixes distributions add
 #: are why this is a prefix match rather than a parse of the whole string.
 _VERSION_RE = re.compile(r"v?(?P<major>\d+)\.(?P<minor>\d+)")
+
+#: Chunk size and page budget for the EndpointSlice tally. A cluster serves one
+#: slice per Service per address type, so a few thousand is a large cluster and
+#: five pages is already unusual. The budget bounds the work one request can do,
+#: the way §5's event scan does; past it the tally is refused rather than
+#: truncated, because a short tally is a zero for every Service on the pages
+#: nobody read.
+_SLICE_PAGE_SIZE = 500
+_MAX_SLICE_PAGES = 10
 
 
 # --------------------------------------------------------------------------- #
@@ -351,25 +361,53 @@ def _endpoint_counts(
         # as an empty tally, which is exactly the "we could not look" that reads
         # as "nothing there".
         tally: dict[tuple[str, str], int] = {}
-        listing = reader.list_resource(
-            "discovery.k8s.io", "v1", "endpointslices", namespace=None, limit=500,
-        )
-        for slice_ in listing.get("items") or []:
-            namespace = get_field(slice_, "metadata", "namespace")
-            owner = get_field(
-                slice_, "metadata", "labels", default={},
-            ) or {}
-            name = owner.get("kubernetes.io/service-name")
-            if (namespace, name) not in targets:
-                continue
-            ready = 0
-            for endpoint in get_field(slice_, "endpoints", default=[]) or []:
-                conditions = get_field(endpoint, "conditions", default={}) or {}
-                # `ready` absent means ready, per the EndpointSlice API: the
-                # field is optional and its default is true.
-                if conditions.get("ready") is not False:
-                    ready += len(get_field(endpoint, "addresses", default=[]) or [])
-            tally[(namespace, name)] = tally.get((namespace, name), 0) + ready
+        cont: str | None = None
+        for _page in range(_MAX_SLICE_PAGES):
+            listing = reader.list_resource(
+                "discovery.k8s.io", "v1", "endpointslices", namespace=None,
+                limit=_SLICE_PAGE_SIZE, cont=cont,
+            )
+            for slice_ in listing.get("items") or []:
+                namespace = get_field(slice_, "metadata", "namespace")
+                owner = get_field(
+                    slice_, "metadata", "labels", default={},
+                ) or {}
+                name = owner.get("kubernetes.io/service-name")
+                if (namespace, name) not in targets:
+                    continue
+                ready = 0
+                for endpoint in get_field(slice_, "endpoints", default=[]) or []:
+                    conditions = get_field(endpoint, "conditions", default={}) or {}
+                    # `ready` absent means ready, per the EndpointSlice API: the
+                    # field is optional and its default is true.
+                    if conditions.get("ready") is not False:
+                        ready += len(get_field(endpoint, "addresses", default=[]) or [])
+                tally[(namespace, name)] = tally.get((namespace, name), 0) + ready
+            # Every page, not just the first: a webhook's Service whose slice
+            # sits on page two was being recorded as having zero endpoints by
+            # the `setdefault` below, and `_webhooks` sorts a zero to the top of
+            # the table under "this webhook rejects every write matching its
+            # rules". A healthy cluster read as the worst finding this page
+            # makes.
+            cont = listing.get("continue") or None
+            if not cont:
+                break
+        else:
+            # Still more behind the cursor after the budget. Refused rather than
+            # returned short, for §0.1: an unread page is indistinguishable from
+            # a Service with no backends once it becomes a number, and there is
+            # no way to say "0, of the slices we looked at" in a count an
+            # operator acts on. `collect` maps this to a `timeout` entry and
+            # leaves the whole tally at None.
+            raise ClusterUnreachable(
+                "The EndpointSlice listing did not finish.",
+                detail=(
+                    f"Stopped after {_MAX_SLICE_PAGES} pages of "
+                    f"{_SLICE_PAGE_SIZE} slices with more remaining, so how many "
+                    "endpoints back each webhook's Service could not be counted."
+                ),
+                context={"cause": "timeout"},
+            )
         # A Service with no EndpointSlice at all has no backends, which is a
         # real zero and the finding this section is for — distinct from the None
         # the whole tally becomes when the listing did not answer.

@@ -373,7 +373,10 @@ export default function RouterPanel({ gate, onChanged }) {
           requireTyped={options.defaultClass ? options.ingressClassName : undefined}
           autoPreview={false}
           summarize={summarizeInstall}
-          confirmBlockedReason={blockOnPreflightDenial}
+          // No `confirmBlockedReason`: the per-object preflight guard this
+          // panel used to carry is `MutationDialog`'s own, applied to every
+          // result. §16's install beside it had no such copy, which is how it
+          // offered Confirm for a create the preflight had already refused.
           renderExtra={ObjectReport}
           onClose={() => setInstallOpen(false)}
           // Deliberately does NOT close the dialog. An install is eight writes
@@ -554,11 +557,25 @@ function ObjectReport({ result, phase, error }) {
               {object.name}
             </strong>{' '}
             — {object.verb} {projectionBadge(object, executed)}
-            {object.preflight?.allowed === false && (
+            {/* §0.2, said in two different colours. A clean denial is a
+                permission this ServiceAccount does not have and the hint names
+                the grant; the same `allowed: false` carrying an
+                `evaluationError` is a review that failed, and labelling that
+                "refused" sends an operator to widen a ClusterRole that was
+                already correct. */}
+            {object.preflight?.allowed === false && !object.preflight.evaluationError && (
               <span style={{ marginInlineStart: '0.5rem' }} data-testid="router-object-preflight-denied">
                 <StatusBadge status="NotReady" label="preflight refused" />{' '}
                 <span style={{ color: 'var(--admin-muted, #6a6e73)' }}>
                   {object.preflight.hint || object.preflight.reason}
+                </span>
+              </span>
+            )}
+            {object.preflight?.allowed !== true && object.preflight?.evaluationError && (
+              <span style={{ marginInlineStart: '0.5rem' }} data-testid="router-object-preflight-unknown">
+                <StatusBadge status="Unknown" label="permission unknown" />{' '}
+                <span style={{ color: 'var(--admin-muted, #6a6e73)' }}>
+                  {object.preflight.evaluationError}
                 </span>
               </span>
             )}
@@ -613,24 +630,6 @@ function projectionBadge(object, executed) {
     );
   }
   return <StatusBadge status="Unknown" label="projected by the API server" tooltip="A dry run. Nothing was written." />;
-}
-
-/**
- * A preflight denial on a rendered object blocks Confirm, with the grant.
- *
- * Creating the Namespace now would leave a half-install behind for a refusal
- * that is already known — the exact state §14's partial-install report exists
- * to describe, reached on purpose.
- */
-function blockOnPreflightDenial(result) {
-  const refused = (result?.objects ?? []).filter((object) => object.preflight?.allowed === false);
-  if (!refused.length) return null;
-  const first = refused[0];
-  return (
-    `The preflight refused ${refused.map((object) => `${object.kind} ${object.name}`).join(', ')}. ` +
-    `${first.preflight.hint || first.preflight.reason || ''} Installing now would create the Namespace and ` +
-    'then fail inside it, for a refusal that is already known.'
-  );
 }
 
 /**

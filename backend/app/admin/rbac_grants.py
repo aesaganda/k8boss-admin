@@ -68,7 +68,7 @@ import logging
 from typing import Any
 
 from app.admin.apply import MERGE_PATCH, create_fn, patch_fn
-from app.admin.mutate import FeatureGate, mutate, read_only_switch
+from app.admin.mutate import FeatureGate, audit_conflict, mutate, read_only_switch
 from app.errors import AdminError, Conflict, Invalid, NotFound
 from app.resources import reader
 from app.resources.envelope import collect
@@ -823,7 +823,8 @@ def build_binding_body(
 
 
 def _require_version(
-    name: str, sent: str | None, live: str | None, **extra: Any
+    name: str, sent: str | None, live: str | None, *, namespace: str, dry_run: bool,
+    **extra: Any,
 ) -> None:
     """§0.4, locally, so the operator gets a fresh plan rather than a bare 409.
 
@@ -832,10 +833,16 @@ def _require_version(
     loses the race between the read above and the write below, and on a subject
     list that matters — two administrators granting at once, the second patch
     replacing the whole array, and one grant silently gone.
+
+    Audited before it raises, because it fires before the first :func:`mutate`
+    and the funnel — which records every other terminal state — never runs. That
+    the two administrators were in here at the same time is the fact rule 4
+    exists to surface, and until this row it survived only in the 409 one of
+    them saw.
     """
     if not sent or not live or sent == live:
         return
-    raise Conflict(
+    conflict = Conflict(
         f"The binding {name} changed while you were reading it.",
         detail=f"You are editing version {sent}; the cluster has {live}.",
         hint="Preview again against what the binding says now.",
@@ -846,6 +853,15 @@ def _require_version(
             **extra,
         },
     )
+    audit_conflict(
+        verb="patch", group=GROUP, version=VERSION, plural=BINDINGS,
+        namespace=namespace, name=name, dry_run=dry_run, error=conflict,
+        detail=(
+            f"grant {namespace}/{name}: refused, editing {sent} and the "
+            f"cluster has {live}"
+        ),
+    )
+    raise conflict
 
 
 # --------------------------------------------------------------------------- #
@@ -1102,6 +1118,8 @@ def apply_grant(
             str(get_field(live, "metadata", "name") or ""),
             sent_version,
             resolved["resourceVersion"],
+            namespace=namespace,
+            dry_run=dry_run,
             currentSubjects=resolved["currentSubjects"],
         )
 

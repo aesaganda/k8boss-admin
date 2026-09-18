@@ -16,6 +16,8 @@ reason that has nothing to do with what it asserts.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import os
 import time
 
@@ -113,6 +115,42 @@ def test_a_configured_secret_is_preferred_over_an_existing_key_file(
     monkeypatch.setattr(settings, "encryption_key_file", str(key_file))
 
     assert crypto._load_or_create_key() == crypto._derive_key("configured-secret")
+
+
+def test_a_short_configured_key_is_warned_about_with_the_command_that_generates_one(
+    monkeypatch, caplog,
+):
+    """One unsalted SHA-256 makes a typed passphrase brute-forceable offline from
+    a database dump. The operator can only act on that if the log line names the
+    command that produces a real key, so assert the command is in it."""
+    monkeypatch.setattr(settings, "encryption_key", "hunter2")
+
+    with caplog.at_level("WARNING"):
+        crypto._load_or_create_key()
+
+    assert "Fernet.generate_key()" in caplog.text
+    assert "hunter2" not in caplog.text, "never log credential material"
+
+
+def test_a_generated_length_key_is_not_warned_about(monkeypatch, caplog):
+    """A warning that fires for a correctly configured deployment is a warning
+    operators learn to filter, and it takes the real one with it."""
+    monkeypatch.setattr(settings, "encryption_key", Fernet.generate_key().decode())
+
+    with caplog.at_level("WARNING"):
+        crypto._load_or_create_key()
+
+    assert caplog.text == ""
+
+
+def test_warning_about_a_short_key_does_not_change_what_it_derives():
+    """The fix is a log line and nothing more, on purpose: re-deriving the key
+    from the same secret would make every token in every existing database
+    undecryptable, which reaches the operator as every cluster failing to
+    authenticate after an upgrade."""
+    assert crypto._derive_key("hunter2") == base64.urlsafe_b64encode(
+        hashlib.sha256(b"hunter2").digest()
+    )
 
 
 def test_an_existing_key_file_is_read_rather_than_replaced(

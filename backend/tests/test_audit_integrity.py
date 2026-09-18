@@ -27,9 +27,9 @@ Three properties, in order of how badly getting them wrong would hurt:
 from __future__ import annotations
 
 import pytest
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, inspect, select, update
 
-from app import database
+from app import database, schema_upgrade
 from app.audit import integrity, recorder
 from app.models import AuditRecord
 
@@ -98,6 +98,28 @@ def test_an_untampered_trail_verifies_as_intact(db_engine):
     assert report["anchored"] is True
 
 
+def test_the_chain_verifies_across_more_than_one_streamed_batch(db_engine, monkeypatch):
+    """A batch boundary is not a break.
+
+    The walk reads the trail in batches instead of loading it: `GET
+    /api/audit/verify` is reachable by anyone who can click Verify, and one click
+    that materialises a few hundred thousand ORM objects is an out-of-memory kill
+    of the single backend replica. The link that has to survive batching is the
+    one spanning two batches — it is carried in a local rather than re-derived
+    per batch, and a walk that dropped it would report an untouched trail as
+    broken at every boundary.
+    """
+    monkeypatch.setattr(integrity, "_WALK_BATCH", 2)
+    for index in range(5):
+        write(detail=f"change {index}")
+
+    report = verify()
+
+    assert report["status"] == integrity.STATUS_INTACT
+    assert report["verified"] == 5
+    assert report["first_break"] is None
+
+
 def test_an_empty_trail_is_intact_rather_than_broken(db_engine):
     report = verify()
 
@@ -158,6 +180,33 @@ def test_deleting_a_committed_record_breaks_the_chain(db_engine):
     assert report["status"] == integrity.STATUS_BROKEN
     assert report["first_break"] is not None
     assert "deleted" in report["first_break"]["reason"]
+
+
+def test_deleting_the_first_record_is_reported_with_no_predecessor_to_name(db_engine):
+    """The break at the head of the trail, where there is no previous record.
+
+    Every other break is diagnosed by asking what claims the record just walked
+    as its predecessor. At the very first record there is none, so the question
+    is asked of GENESIS instead — on the one endpoint that says whether the trail
+    can be trusted, and which therefore may not fail while answering.
+    """
+    for index in range(3):
+        write(detail=f"change {index}")
+    victim = rows()[0]
+
+    db = database.SessionLocal()
+    try:
+        db.execute(delete(AuditRecord).where(AuditRecord.id == victim.id))
+        db.commit()
+    finally:
+        db.close()
+
+    report = verify()
+
+    assert report["status"] == integrity.STATUS_BROKEN
+    # Nothing was verified: the break is at the first record there is.
+    assert report["verified"] == 0
+    assert "cannot be reached" in report["first_break"]["reason"]
 
 
 def test_a_forged_record_inserted_into_the_middle_is_unreachable(db_engine):
@@ -552,6 +601,41 @@ def test_two_records_cannot_share_a_predecessor(db_engine):
     finally:
         db.rollback()
         db.close()
+
+
+def test_exactly_one_unique_index_backs_each_chain_column(db_engine):
+    """The uniqueness is declared once, so the database maintains one index.
+
+    `unique=True` on the column and a named `Index(...)` are two declarations of
+    the same guarantee, and the database honours both: the named index plus an
+    anonymous constraint index of its own. `CREATE UNIQUE INDEX IF NOT EXISTS` in
+    `schema_upgrade` cannot collapse them, because it matches by name and the
+    anonymous one has none. Both are then written on every audit INSERT — which
+    is on the write path of every mutation this console makes — for a guarantee
+    either one of them already provides on its own.
+    """
+    schema_upgrade.upgrade(db_engine)  # the half of startup that follows create_all
+    inspector = inspect(db_engine)
+
+    unique_indexes = [
+        index for index in inspector.get_indexes("audit_records") if index["unique"]
+    ]
+    table_constraints = inspector.get_unique_constraints("audit_records")
+
+    for column in ("prev_hash", "event_hash"):
+        names = [
+            index["name"]
+            for index in unique_indexes
+            if index["column_names"] == [column]
+        ]
+        assert names == [f"ix_audit_{column}"], (
+            f"expected exactly one unique index over {column}, found {names}"
+        )
+        assert [c for c in table_constraints if c["column_names"] == [column]] == [], (
+            f"{column} carries a table-level UNIQUE constraint as well as "
+            f"ix_audit_{column}, so the database maintains two indexes for one "
+            "guarantee on every audit INSERT"
+        )
 
 
 def test_a_record_that_cannot_be_chained_is_still_written(db_engine, monkeypatch):

@@ -62,6 +62,13 @@ export function HealthProvider({ children }) {
   }, []);
 
   useEffect(() => {
+    // Polls while the tab is hidden, unlike the cluster and namespace contexts,
+    // and deliberately: this reads the console's own database every 30s, not a
+    // customer's API server, and a `visibilitychange` guard on its own only
+    // moves the cost — the tab comes back showing whatever the status pill and
+    // the write gate said before it was hidden, which is the stale answer at
+    // the moment somebody is looking again. Adding the guard means adding a
+    // re-read on return, and that is a bigger change than the poll is worth.
     refresh();
     const handle = setInterval(() => refresh({ silent: true }), POLL_MS);
     return () => clearInterval(handle);

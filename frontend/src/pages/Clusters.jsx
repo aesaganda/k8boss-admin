@@ -75,7 +75,9 @@ import {
   PageHeader,
   SectionHeader,
   StatusBadge,
+  menuAction,
 } from '../components/ui';
+import { useAuth } from '../contexts/AuthContext';
 import { useCluster } from '../contexts/ClusterContext';
 import { useNotify } from '../contexts/NotificationContext';
 import { formatTimestamp } from '../utils/format';
@@ -507,7 +509,38 @@ function PermissionMatrix({ test }) {
 
 export default function Clusters() {
   const { clusters, activeClusterId, setActiveClusterId, loading, error, refresh } = useCluster();
+  const { enabled: authEnabled, user } = useAuth();
   const { notify } = useNotify();
+
+  /**
+   * §3's three writes are administrator-only, and this is the mirror of that.
+   *
+   * `require_console_admin` gates create, update and delete when the console
+   * authenticates operators, and returns `None` when it does not — in legacy
+   * proxy mode there is no console role to check and the proxy in front owns
+   * the decision. So the gate is `!authEnabled || admin`, in that order:
+   * reading the role first would disable registration entirely on a deployment
+   * that never had one, which is a supported deployment made unusable by a
+   * check meant to protect a different one.
+   *
+   * Disabled rather than hidden, per rule 11.4. A control that vanishes reads
+   * as a missing feature and becomes a support ticket; a disabled one carrying
+   * its reason answers the question where it was asked. Offering it enabled,
+   * which is what this page did, spends a click to arrive at a 403 toast that
+   * says nothing this sentence could not have said first.
+   */
+  const adminGate = useMemo(
+    () =>
+      !authEnabled || user?.role === 'admin'
+        ? { allowed: true, reason: null }
+        : {
+            allowed: false,
+            reason:
+              'Registering, editing and de-registering a cluster is administrator-only on this ' +
+              'console. This account holds the user role; ask an administrator to make the change.',
+          },
+    [authEnabled, user],
+  );
 
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState(null);
@@ -634,22 +667,41 @@ export default function Clusters() {
 
   const detail = clusters.find((c) => c.id === selected) ?? null;
 
+  // Not `ActionButton`: that one names its own `data-testid`, and this button's
+  // is what the impersonation suite drives the registration form from. Same
+  // shape otherwise — `isAriaDisabled` keeps it focusable so the tooltip is
+  // reachable, and the span gives Tooltip a node to attach its ref to.
+  const registerButton = (
+    <Button
+      variant="primary"
+      isAriaDisabled={!adminGate.allowed}
+      onClick={
+        adminGate.allowed
+          ? () => {
+              setEditing(null);
+              setFormOpen(true);
+            }
+          : undefined
+      }
+      data-testid="cluster-add"
+    >
+      Register a cluster
+    </Button>
+  );
+
   return (
     <>
       <PageHeader
         title="Clusters"
         subtitle="Registered API servers. Credentials are stored encrypted and are never returned by this console."
         actions={
-          <Button
-            variant="primary"
-            onClick={() => {
-              setEditing(null);
-              setFormOpen(true);
-            }}
-            data-testid="cluster-add"
-          >
-            Register a cluster
-          </Button>
+          adminGate.allowed ? (
+            registerButton
+          ) : (
+            <Tooltip content={adminGate.reason}>
+              <span className="admin-gated-action">{registerButton}</span>
+            </Tooltip>
+          )
         }
       />
 
@@ -679,14 +731,14 @@ export default function Clusters() {
             isDisabled: Boolean(testing[row.id]),
           },
           { title: row.id === activeClusterId ? 'Already active' : 'Make active', onClick: () => setActiveClusterId(row.id), isDisabled: row.id === activeClusterId },
-          {
-            title: 'Edit',
-            onClick: () => {
-              setEditing(row);
-              setFormOpen(true);
-            },
-          },
-          { title: 'De-register', onClick: () => setDeleting(row), isDanger: true },
+          // Test connection and Make active stay ungated: neither is one of
+          // §3's administrator-only writes — the first is a read, the second
+          // only changes which cluster this browser is looking at.
+          menuAction('Edit', adminGate, () => {
+            setEditing(row);
+            setFormOpen(true);
+          }),
+          menuAction('De-register', adminGate, () => setDeleting(row), { isDanger: true }),
         ]}
       />
 

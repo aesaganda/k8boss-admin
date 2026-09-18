@@ -38,7 +38,7 @@ from app.admin import apply as apply_service
 from app.admin import preflight
 from app.audit import recorder
 from app.config import settings
-from app.errors import ClusterUnreachable, MutationsDisabled, RBACDenied
+from app.errors import ClusterUnreachable, MutationsDisabled, RBACDenied, UpstreamError
 from app.resources import catalog, reader, shaping
 from app.resources.envelope import collect, envelope
 
@@ -239,9 +239,10 @@ def _secret_gate(
 
     Reading a Secret's values is a privileged act and is treated as one: it needs
     the deployment to have opted in, it is preflighted like a write, and it lands
-    in the audit trail whether it succeeded or was denied. A denial is recorded
-    too — an audit trail that only holds successful reads cannot answer "did
-    anyone try", which is the question asked after an incident.
+    in the audit trail on every terminal state — revealed, refused by the switch,
+    denied, or undecided. An audit trail that only holds successful reads cannot
+    answer "did anyone try", which is the question asked after an incident, and
+    the attempt worth seeing most is the one made while the feature was off.
 
     The gate is ``SECRET_REVEAL_ENABLED`` rather than ``ADMIN_ALLOW_MUTATIONS``.
     §8 phrases the condition as "mutations are enabled", but ``app.config``
@@ -258,7 +259,7 @@ def _secret_gate(
         "namespace": namespace, "name": name,
     }
     if not settings.secret_reveal_enabled:
-        raise MutationsDisabled(
+        disabled = MutationsDisabled(
             "Revealing Secret values is disabled on this deployment.",
             hint=(
                 "Set SECRET_REVEAL_ENABLED=true to allow it. Key names and sizes "
@@ -266,6 +267,18 @@ def _secret_gate(
             ),
             context={**target, "verb": "get"},
         )
+        # Recorded as failed rather than denied: the deployment refused, not an
+        # authorizer, and a row that called this a denial sends whoever reads the
+        # trail to audit a ClusterRole that was never consulted. Recorded at all
+        # because "somebody kept asking for production Secret values while the
+        # switch was off" is what a probe looks like, and without this row it is
+        # the one attempt the trail cannot show.
+        recorder.record(
+            verb="get", target=target, dry_run=False, outcome="failed",
+            detail="Secret values requested while SECRET_REVEAL_ENABLED is false",
+            error=disabled.message,
+        )
+        raise disabled
 
     try:
         preflight.require("get", "", "secrets", namespace=namespace, name=name)
@@ -273,6 +286,17 @@ def _secret_gate(
         recorder.record(
             verb="get", target=target, dry_run=False, outcome="denied",
             detail="Secret values requested", error=e.message,
+        )
+        raise
+    except (ClusterUnreachable, UpstreamError) as e:
+        # We could not establish whether the caller may read this Secret. Failed
+        # rather than denied, for §9's reason: nobody refused anything, and a
+        # trail that called an authorizer outage a denial reports a permissions
+        # decision that was never made.
+        recorder.record(
+            verb="get", target=target, dry_run=False, outcome="failed",
+            detail="Secret values requested; the access review could not be decided",
+            error=e.message,
         )
         raise
 

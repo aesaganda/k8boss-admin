@@ -176,6 +176,15 @@ def budgets(namespace: str | None = None) -> dict[str, Any]:
     counts: dict[str, int | None] = {}
     undecided: dict[str, int] = {}
 
+    # ponytail: the full budget x pod cross product, kept on purpose. Grouping
+    # the pods by namespace first measured 2.25s -> 0.16s at 400 budgets over
+    # 10000 pods, so the ceiling is real and the upgrade is a dict of namespace
+    # -> pods built once above this loop, with `_covers` losing its namespace
+    # comparison. It is not built yet because listing those 10000 pods and
+    # deserializing them costs several times what the cross product does: the
+    # index would take a term that is not the bottleneck out of a page whose
+    # bottleneck is one line above. Build it when the pod read stops being the
+    # cost — measure, do not assume it already has.
     for budget in budget_objects:
         key = _budget_key(budget)
         if pods is None:

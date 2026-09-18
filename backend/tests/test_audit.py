@@ -350,3 +350,21 @@ def test_the_endpoint_pages_with_the_continue_token(db_engine, api):
     assert len(first["items"]) == 2
     assert [row["detail"] for row in second["items"]] == ["write 0"]
     assert second["continue"] is None
+
+
+def test_the_verify_window_is_capped_rather_than_unbounded(db_engine, api):
+    """A window bigger than a page is refused at the door, not clamped quietly.
+
+    The windowed walk reads newest-first and reverses, so it materialises
+    `limit` rows by construction — which is the whole-table allocation the
+    streaming rewrite removed, reachable again through `?limit=100000000` by
+    anyone who can click Verify. Clamping inside the walk instead would verify a
+    thousand records and report the answer as the check that was asked for.
+    """
+    write()
+
+    refused = api.get(f"/api/audit/verify?limit={recorder.MAX_LIMIT + 1}")
+
+    assert refused.status_code == 422
+    assert refused.json()["error"] == "invalid"
+    assert api.get(f"/api/audit/verify?limit={recorder.MAX_LIMIT}").status_code == 200

@@ -442,7 +442,12 @@ def verify_id_token(id_token: str, *, nonce: str | None) -> dict[str, Any]:
     # an unverified token tells an attacker whether they guessed it.
     expected = nonce or ""
     presented = str(claims.get("nonce") or "")
-    if expected and not secrets.compare_digest(expected, presented):
+    # Compared as bytes. `compare_digest` refuses a `str` carrying any non-ASCII
+    # character, and the TypeError would escape this refusal as a 500 instead of
+    # the audited denial a replay is supposed to produce — the `nonce` claim is
+    # the attacker's to write, so one non-ASCII character would buy them an
+    # unrecorded server error in place of a recorded security event.
+    if expected and not secrets.compare_digest(expected.encode(), presented.encode()):
         logger.warning("OIDC nonce mismatch; refusing the sign-in.")
         raise PermissionDenied(
             "The single sign-on assertion did not match this sign-in attempt.",

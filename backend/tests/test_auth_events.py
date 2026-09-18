@@ -486,3 +486,54 @@ def test_a_successful_sign_in_clears_the_budget(
         assert attempt(client, "erens", PASSWORD).status_code == 200
 
     assert throttle.recent_attempts("erens") == 0
+
+
+def test_a_throttled_attempt_is_recorded_like_every_other_refusal(
+    client, db_session, auth_enabled, monkeypatch
+):
+    """The burst that trips the lockout was the part of the trail with no rows.
+
+    `throttle.check` raises, and it was called from above the block that owns
+    login's audit calls — so an attacker guessing at one account appeared
+    exactly `AUTH_THROTTLE_MAX_ATTEMPTS` times and then went silent for as long
+    as they kept going. "Is somebody guessing at this account" is asked about
+    precisely the silent part.
+    """
+    monkeypatch.setattr(settings, "auth_throttle_max_attempts", 2)
+    create_local_user(db_session, username="erens", password=PASSWORD)
+
+    statuses = [attempt(client, "erens", "wrong").status_code for _ in range(6)]
+
+    assert statuses == [401, 401, 429, 429, 429, 429]
+    rows = console_records("login")
+    assert len(rows) == 6
+    assert {row["outcome"] for row in rows} == {"denied"}
+    assert {row["actor"] for row in rows} == {"erens"}
+
+    refused = [row for row in rows if "too_many_attempts" in (row["error"] or "")]
+    assert len(refused) == 4
+    # The sibling rejection's sentence, repeated verbatim: a row without it reads
+    # on the audit page as a verified actor, and nothing verified this username.
+    assert all(
+        "the submitted username, not a verified identity" in row["detail"]
+        for row in refused
+    )
+
+
+def test_a_throttled_attempt_does_not_hand_its_own_budget_back(
+    client, db_session, auth_enabled, monkeypatch
+):
+    """Releasing on a refusal would reset the limit every time it was tripped.
+
+    The release exists for a failure that turns out not to be the caller's — a
+    directory outage. A lockout *is* the caller's, and clearing the reservations
+    that produced it gives whoever tripped it a fresh window on demand.
+    """
+    monkeypatch.setattr(settings, "auth_throttle_max_attempts", 2)
+    create_local_user(db_session, username="erens", password=PASSWORD)
+
+    for _ in range(4):
+        attempt(client, "erens", "wrong")
+
+    assert throttle.recent_attempts("erens") == 4
+    assert attempt(client, "erens", PASSWORD).status_code == 429

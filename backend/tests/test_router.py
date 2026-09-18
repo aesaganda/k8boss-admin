@@ -533,6 +533,96 @@ def test_the_takeover_check_writes_nothing_before_it_refuses(
     assert writes == []
 
 
+def _stub_conflicting(monkeypatch, plurals):
+    """Every object in ``plurals`` exists and belongs to Helm; the rest are absent."""
+    def fake_get(group, version, plural, name, namespace=None):
+        if plural in plurals:
+            return {
+                "apiVersion": f"{group}/{version}" if group else version,
+                "kind": name,
+                "metadata": {
+                    "name": name, "namespace": namespace,
+                    "labels": {"app.kubernetes.io/managed-by": "Helm"},
+                },
+            }
+        raise NotFound("not found", context={"resource": plural})
+
+    monkeypatch.setattr(router_service.reader, "get_resource", fake_get)
+
+
+def test_every_ownership_conflict_is_named_in_one_refusal(
+    monkeypatch, fake_k8s, allow_router,
+):
+    """Refusing on the first conflict costs a round trip for each of the others.
+
+    The operator deletes the ClusterRole, installs again, is refused on the
+    Service, deletes that, installs again — and every refusal reads as a fresh
+    failure rather than as the second of three, with nothing saying how many are
+    left. The read loop has already seen all eight objects, so every conflict is
+    known by the time it can refuse.
+    """
+    stub_discovery(monkeypatch)
+    allow_preflight(fake_k8s)
+    _stub_conflicting(monkeypatch, {"clusterroles", "services", "configmaps"})
+
+    with pytest.raises(Conflict) as caught:
+        router_service.install({}, dry_run=True)
+
+    assert "3 of this bundle's objects" in caught.value.message
+    assert [c["resource"] for c in caught.value.context["conflicts"]] == [
+        "clusterroles", "configmaps", "services",
+    ]
+    # The namespace is in the detail, because six of the eight objects are called
+    # k8boss-admin-router and the name alone does not identify one.
+    assert "ClusterRole k8boss-admin-router (it says 'Helm')" in caught.value.detail
+    assert "Service k8boss-router/k8boss-admin-router" in caught.value.detail
+
+
+def test_a_single_conflict_still_reads_as_one_object(
+    monkeypatch, fake_k8s, allow_router,
+):
+    """One conflict is the common case and gets the sentence it had.
+
+    "1 of this bundle's objects already exist" is the plural machinery leaking
+    into the one message an operator is most likely to read.
+    """
+    stub_discovery(monkeypatch)
+    allow_preflight(fake_k8s)
+    _stub_conflicting(monkeypatch, {"clusterroles"})
+
+    with pytest.raises(Conflict) as caught:
+        router_service.install({}, dry_run=True)
+
+    assert caught.value.message.startswith("A ClusterRole called k8boss-admin-router")
+    assert "did not create it" in caught.value.message
+
+
+def test_each_conflicting_object_gets_its_own_audit_row(
+    monkeypatch, fake_k8s, allow_router, db_session,
+):
+    """The trail is asked "did anyone try to take over *this* object".
+
+    It is asked by someone holding one object, so one row per conflict is what
+    can be found. A single row carrying a count of three is unfindable by two of
+    the three targets it was about.
+    """
+    from app.models import AuditRecord
+
+    stub_discovery(monkeypatch)
+    allow_preflight(fake_k8s)
+    _stub_conflicting(monkeypatch, {"clusterroles", "services"})
+
+    with pytest.raises(Conflict):
+        router_service.install({}, dry_run=False)
+
+    records = db_session.query(AuditRecord).filter(
+        AuditRecord.outcome == "conflict"
+    ).all()
+    assert {record.target["resource"] for record in records} == {
+        "clusterroles", "services",
+    }
+
+
 def test_reinstalling_replaces_the_objects_the_console_owns(
     monkeypatch, fake_k8s, allow_router,
 ):

@@ -420,9 +420,11 @@ class AuditRecord(Base):
     # is refused by the database instead of silently branching the chain. The
     # writer retries against the new tip. Multiple NULLs are permitted by a
     # UNIQUE index on both SQLite and PostgreSQL, so unchained rows do not
-    # collide with each other.
-    prev_hash = Column(String(64), nullable=True, unique=True)
-    event_hash = Column(String(64), nullable=True, unique=True)
+    # collide with each other. The uniqueness is declared as a named index in
+    # `__table_args__` rather than with `unique=True` here; see there for why
+    # the name is what stops the database maintaining two of them.
+    prev_hash = Column(String(64), nullable=True)
+    event_hash = Column(String(64), nullable=True)
 
     __table_args__ = (
         # The audit page is always scoped to a cluster and paged by descending
@@ -431,13 +433,32 @@ class AuditRecord(Base):
         # cluster-scoped.
         Index("ix_audit_cluster_id", "cluster_id", "id"),
         Index("ix_audit_ts", "ts"),
-        # The audit page separates console sign-ins from cluster writes, and the
-        # login throttle counts recent console denials for one actor. Both are
-        # (category, ts) scans.
+        # The audit page separates console sign-ins from cluster writes, which
+        # is a (category, ts) scan.
         Index("ix_audit_category_ts", "category", "ts"),
-        # The throttle's exact query: recent records for one actor. Without it,
-        # every login attempt table-scans a table that only ever grows.
+        # The audit page's actor filter — `?actor=…`, usually with `since`. Not
+        # the sign-in throttle: that counts rows in `login_attempts`, which has
+        # its own index. Without this one, asking what a named operator did is a
+        # full scan of a table that only ever grows.
         Index("ix_audit_actor_ts", "actor", "ts"),
+        # The audit page's other filter, and the one an incident review reaches
+        # for first: `?outcome=denied` with §10's descending-id paging. Composite
+        # with id so the same index serves the filter and the order, as
+        # ix_audit_cluster_id does — on outcome alone the database would still
+        # sort the matches to page them.
+        Index("ix_audit_outcome_id", "outcome", "id"),
+        # UNIQUE as *named* indexes rather than `unique=True` on the columns.
+        # The column form emits an anonymous table constraint, which the database
+        # backs with an index of its own naming, while schema_upgrade.py creates
+        # `ix_audit_prev_hash` by name — and `IF NOT EXISTS` cannot see the
+        # anonymous one to skip it. Both then exist and both are maintained on
+        # every audit INSERT, which is on the write path of every mutation.
+        # Naming them makes the declaration here and the statement there the
+        # same object. A database created before this keeps both: schema_upgrade
+        # only ever adds, and dropping an index it did not create is not a
+        # migration this project does.
+        Index("ix_audit_prev_hash", "prev_hash", unique=True),
+        Index("ix_audit_event_hash", "event_hash", unique=True),
     )
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid

@@ -575,6 +575,25 @@ def test_a_stale_resource_version_is_a_conflict_carrying_the_live_bounds(
     assert calls == []
 
 
+def test_a_conflict_that_never_reaches_the_funnel_is_still_in_the_trail(
+    cluster, monkeypatch, db_engine,
+):
+    """Rule 5 covers the writes that conflicted, and this refusal fires before
+    `mutate()` — so nothing else would record that two people were editing the
+    same autoscaler at once, which is what rule 4 exists to make answerable."""
+    stub_read(monkeypatch)
+    stub_patch(monkeypatch)
+
+    with pytest.raises(Conflict):
+        hpa.set_bounds(NAMESPACE, NAME, body(2, 30, resourceVersion="8000"),
+                       dry_run=False, acknowledge_consequences=[])
+
+    (row,) = audit_rows()
+    assert row["outcome"] == "conflict"
+    assert row["target"]["name"] == NAME
+    assert "8000" in row["detail"] and "9040" in row["detail"]
+
+
 def test_a_no_op_write_is_refused_rather_than_audited_as_a_change(
     cluster, monkeypatch, db_engine, allow_mutations,
 ):
