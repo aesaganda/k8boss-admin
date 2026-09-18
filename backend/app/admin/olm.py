@@ -1015,43 +1015,52 @@ def plan(payload: dict[str, Any]) -> dict[str, Any]:
 def _crd_state(unavailable: list[dict[str, Any]]) -> dict[str, Any]:
     """How many of the eight CRDs exist and are Established.
 
-    ``None`` rather than ``0`` on an unreadable listing, per §0.1's corollary: a
-    console reporting "0 of 8 established" from a read nobody could make is what
-    invites a second install on top of a working one.
+    ``None`` rather than ``0`` when the read did not happen, per §0.1's
+    corollary: a console reporting "0 of 8 established" from a read nobody could
+    make is what invites a second install on top of a working one.
     """
-    listing: dict[str, Any] | None = None
-    with collect(unavailable, "apiextensions.k8s.io", "customresourcedefinitions"):
-        listing = reader.list_resource(
-            "apiextensions.k8s.io", "v1", "customresourcedefinitions", limit=500,
-        )
     expected = olm_bundle.crd_names()
-    if listing is None:
+    found: dict[str, Any] = {}
+    # Eight gets by name, not a listing of every CustomResourceDefinition on the
+    # cluster. A cluster with a handful of operators on it serves more than one
+    # page of CRDs, and a first page that does not happen to hold OLM's reports
+    # all eight missing — the portal saying "not installed" about a cluster where
+    # OLM is running, which is the answer that invites a second install on top of
+    # a working one. `NotFound` is a real absence; anything else is a read that
+    # did not happen and leaves the whole block unknown.
+    with collect(
+        unavailable, "apiextensions.k8s.io", "customresourcedefinitions",
+    ) as collected:
+        for name in expected:
+            try:
+                found[name] = reader.get_resource(
+                    "apiextensions.k8s.io", "v1", "customresourcedefinitions", name,
+                )
+            except NotFound:
+                continue
+    if collected.failed:
         return {
             "expected": len(expected),
             "present": None,
             "established": None,
             "missing": None,
             "detail": (
-                "CustomResourceDefinitions could not be listed, so how many of "
+                "CustomResourceDefinitions could not be read, so how many of "
                 "OLM's are present is unknown — not zero."
             ),
         }
-    by_name = {
-        get_field(obj, "metadata", "name"): obj for obj in listing["items"]
-    }
-    present = [name for name in expected if name in by_name]
     established = [
-        name for name in present
+        name for name, obj in found.items()
         if any(
             get_field(c, "type") == "Established" and get_field(c, "status") == "True"
-            for c in get_field(by_name[name], "status", "conditions", default=[]) or []
+            for c in get_field(obj, "status", "conditions", default=[]) or []
         )
     ]
     return {
         "expected": len(expected),
-        "present": len(present),
+        "present": len(found),
         "established": len(established),
-        "missing": [name for name in expected if name not in by_name],
+        "missing": [name for name in expected if name not in found],
         "detail": None,
     }
 

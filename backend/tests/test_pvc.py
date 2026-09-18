@@ -132,8 +132,17 @@ def stub_reads(
     class_error=None,
     pods=None,
     pods_error=None,
+    pod_pages=None,
+    pages_end=True,
 ):
-    """The three reads §20 makes, each independently stubbable and failable."""
+    """The three reads §20 makes, each independently stubbable and failable.
+
+    ``pod_pages`` serves the pod listing one page at a time, so a test can put a
+    pod on page two: the single unpaged listing this module used to make
+    reported everything behind the cursor as not mounting the claim. Same shape
+    as §32's `endpoint_slice_pages`, including ``pages_end=False`` for the
+    namespace that outruns the page budget.
+    """
 
     def fake_get(group, version, plural, name, namespace=None):
         if plural == "persistentvolumeclaims":
@@ -146,11 +155,21 @@ def stub_reads(
             return klass if klass is not None else storage_class()
         raise AssertionError(f"unexpected get_resource for {plural}")
 
-    def fake_list(group, version, plural, *, namespace=None, limit=500, **kwargs):
+    def fake_list(group, version, plural, *, namespace=None, limit=500, cont=None,
+                  **kwargs):
         assert plural == "pods", plural
         if pods_error is not None:
             raise pods_error
-        return {"items": list(pods or [])}
+        if pod_pages is None:
+            return {"items": list(pods or [])}
+        # The cursor is the index of the page to serve. A page that is an
+        # exception is what the API server raising mid-listing looks like.
+        index = int(cont or 0)
+        page = pod_pages[index % len(pod_pages)]
+        if isinstance(page, Exception):
+            raise page
+        more = not pages_end or index + 1 < len(pod_pages)
+        return {"items": list(page), "continue": str(index + 1) if more else None}
 
     monkeypatch.setattr(pvc.reader, "get_resource", fake_get)
     monkeypatch.setattr(pvc.reader, "list_resource", fake_list)
@@ -392,6 +411,47 @@ def test_a_refused_pod_listing_is_null_never_empty(cluster, monkeypatch, db_engi
     codes = [entry["code"] for entry in plan["consequences"]]
     assert pvc.WARN_MOUNTS_UNKNOWN in codes
     assert pvc.WARN_IN_USE not in codes
+
+
+def test_a_pod_on_the_second_page_of_the_listing_is_still_named(
+    cluster, monkeypatch, db_engine,
+):
+    """One unpaged listing reported every pod behind the cursor as not mounting
+    the claim, so the operator was told which workloads an expansion affects
+    from a list that was silently short — and resized believing nothing else was
+    attached."""
+    stub_reads(monkeypatch, pod_pages=[[pod("api")], [pod("postgres-0")]])
+    unavailable = []
+
+    assert pvc.mounted_by(NAMESPACE, NAME, unavailable) == ["api", "postgres-0"]
+    assert unavailable == []
+
+
+def test_a_pod_listing_longer_than_the_budget_is_refused_rather_than_returned_short(
+    cluster, monkeypatch, db_engine,
+):
+    """An unread page and a namespace where nothing has the claim open are the
+    same list once it is returned, and only one of them is safe to resize on."""
+    stub_reads(monkeypatch, pod_pages=[[]], pages_end=False)
+    unavailable = []
+
+    assert pvc.mounted_by(NAMESPACE, NAME, unavailable) is None
+    assert [entry["reason"] for entry in unavailable] == ["timeout"]
+
+
+def test_a_cursor_that_expired_mid_listing_is_raised_rather_than_swallowed(
+    cluster, monkeypatch, db_engine,
+):
+    """`collect` records unavailability, not a bad request: a 410 means the
+    listing this console built cannot be finished, and reporting it as a degraded
+    column would leave a short mount list looking like a complete one."""
+    stub_reads(monkeypatch, pod_pages=[
+        [pod("api")],
+        Invalid("The list cursor expired before the listing finished."),
+    ])
+
+    with pytest.raises(Invalid):
+        pvc.mounted_by(NAMESPACE, NAME, [])
 
 
 def test_a_claim_nothing_mounts_is_an_empty_list_and_no_restart_warning(
