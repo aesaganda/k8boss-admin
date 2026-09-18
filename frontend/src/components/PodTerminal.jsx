@@ -73,6 +73,16 @@ const DEFAULT_COMMAND = '/bin/sh';
 // goes to debug a network that is fine.
 const SESSION_EXPIRED_CLOSE = 4401;
 
+// A sentence per refusal this panel can actually receive, because the fallback
+// puts the raw code in the title and none of these is a problem the operator
+// fixes by reading a token. `impersonation_unavailable` is the one worth
+// spelling out: the console refused, the cluster did not, and the fix is either
+// `kubectl exec` or turning impersonation off — never a ClusterRole.
+const REFUSAL_TITLES = {
+  rbac_denied: 'This ServiceAccount may not exec into pods',
+  impersonation_unavailable: 'A shell cannot act as you on this cluster',
+};
+
 // Matching PatternFly's own surfaces rather than xterm's black default, so a
 // terminal in light mode is not a hole in the page.
 const THEMES = {
@@ -442,11 +452,7 @@ export function PodTerminal({
         <Alert
           isInline
           variant="danger"
-          title={
-            errorFrame.reason === 'rbac_denied'
-              ? 'This ServiceAccount may not exec into pods'
-              : `Exec refused — ${errorFrame.reason}`
-          }
+          title={REFUSAL_TITLES[errorFrame.reason] || `Exec refused — ${errorFrame.reason}`}
           data-testid="pod-terminal-error"
         >
           <p>{errorFrame.message}</p>

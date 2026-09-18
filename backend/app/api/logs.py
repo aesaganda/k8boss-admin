@@ -106,6 +106,14 @@ _WS_REASONS: dict[str, str] = {
     "no_cluster_selected": "no_cluster_selected",
     "unsupported": "unsupported",
     "mutations_disabled": "mutations_disabled",
+    # Its own token for the reason `mutations_disabled` has one: neither is a
+    # permission problem and neither is fixed on the cluster. Without the entry
+    # the fallback reports ADR-0007's refusal as `upstream_error` — the console
+    # declining to act, rendered to the operator as the API server failing,
+    # which is the misattribution §1.3 keeps a separate code to prevent. This
+    # was reachable before §7 ever refused on its own: `decide` raises it inside
+    # `get_clients`, which every stream here calls.
+    "impersonation_unavailable": "impersonation_unavailable",
     "conflict": "conflict",
     "invalid": "invalid",
     "upstream_error": "upstream_error",

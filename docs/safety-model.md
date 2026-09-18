@@ -1297,7 +1297,11 @@ Being honest about the edges is part of the model:
   keystroke. It is gated on `ADMIN_ALLOW_MUTATIONS` *and* a preflight on
   `create pods/exec`, and the session is audited on open and close — but within
   the session, the console is a terminal and nothing more. Withholding
-  `pods/exec` is the only real control.
+  `pods/exec` is the only real control. On a cluster that impersonates, exec is
+  **refused** rather than opened: the WebSocket upgrade carries no impersonation
+  headers, so the shell would run as the ServiceAccount while the preflight and
+  the trail named the operator, and ADR-0007's fourth condition makes that a
+  refusal rather than a fallback.
 * **Setting a Pod Security level changes what is admitted next, not what is
   running.** §18 patches six labels; no pod is evicted, restarted or
   rescheduled, and `applied: true` there means the labels changed and nothing

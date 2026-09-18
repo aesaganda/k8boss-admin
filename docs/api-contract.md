@@ -727,6 +727,19 @@ Server→client: `{"type":"stdout","data":"..."}`, `{"type":"stderr","data":"...
 `{"type":"error","reason":"...","detail":"..."}`, `{"type":"end","code":0}`.
 Exec sessions are audited on open and on close.
 
+**Refused on a cluster that impersonates.** When `impersonation_enabled` is on
+for the cluster and the session qualifies (§27.2, ADR-0007), this endpoint
+answers `{"type":"error","reason":"impersonation_unavailable"}` and closes,
+*before* the preflight is issued. The channel is a WebSocket and its upgrade
+request carries no impersonation headers, so the shell would run as the console's
+ServiceAccount while the trail and the preflight named the operator — and
+ADR-0007's fourth condition is that a request which cannot build those headers
+fails rather than proceeding as the console. The refusal is audited like any
+other terminal state. `kubectl exec` with the operator's own credentials keeps
+their identity end to end; the other option is to turn impersonation off for that
+cluster, which changes attribution for every other call and should be decided as
+such rather than as a side effect of wanting a terminal.
+
 `container` may name an **ephemeral** container (§7.4) as well as a regular or
 init one. A missing `container` on a pod with more than one entry in
 `spec.containers` is refused; ephemeral containers never enter that count,
