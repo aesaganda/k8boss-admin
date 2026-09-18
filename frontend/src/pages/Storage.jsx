@@ -54,6 +54,17 @@ export default function Storage() {
     () => [
       {
         key: 'pvcs',
+        // Nine columns and a row menu do not fit beside the navigation, and
+        // these two cost the least to lose. A cluster almost always has one
+        // default StorageClass, so `Class` reads the same on every row; and
+        // `Volume` is the generated `pvc-3f2a…` name of the PersistentVolume
+        // the claim is bound to, which nobody reads off a list — the fact a
+        // list is read for is whether it is bound at all, and that is the
+        // Status column. Both are one click away in Manage columns, and the
+        // claim's own page carries them.
+        //
+        // A default, not a filter: every row is still here.
+        defaultHiddenColumns: ['storage_class', 'volume'],
         title: 'PersistentVolumeClaims',
         group: 'core',
         version: 'v1',

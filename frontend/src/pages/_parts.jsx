@@ -163,8 +163,23 @@ export function Muted({ children, title }) {
  *
  * The overflow chip stays plain text on purpose — it is a tooltip trigger, and
  * a link that swallows its own click is worse than one that is not offered.
+ *
+ * `breakAnywhere` is for values that are machine strings with no break
+ * opportunity in them — a hostname, a URL, an address. CSS breaks at spaces and
+ * hyphens and at neither a dot nor a slash, so `https://checkout.apps.example.com/`
+ * is one unbreakable run and becomes its column's MINIMUM width. Opt-in rather
+ * than always on: most chips hold short values, and collapsing every chip
+ * column's minimum to one character makes the table layout hand the width to
+ * whichever column has the longest content instead of to the one that needs it.
  */
-export function ChipList({ values, max = 3, color = 'grey', emptyText = 'None', hrefFor }) {
+export function ChipList({
+  values,
+  max = 3,
+  color = 'grey',
+  emptyText = 'None',
+  hrefFor,
+  breakAnywhere = false,
+}) {
   const list = (values ?? []).filter((v) => v != null && v !== '');
   if (!list.length) return <Muted>{emptyText}</Muted>;
   const shown = list.slice(0, max);
@@ -178,6 +193,7 @@ export function ChipList({ values, max = 3, color = 'grey', emptyText = 'None', 
             key={`${value}-${i}`}
             isCompact
             color={color}
+            className={breakAnywhere ? 'admin-break-anywhere' : undefined}
             isClickable
             render={({ className, content, componentRef }) => (
               <a
@@ -194,7 +210,12 @@ export function ChipList({ values, max = 3, color = 'grey', emptyText = 'None', 
             {String(value)}
           </Label>
         ) : (
-          <Label key={`${value}-${i}`} isCompact color={color}>
+          <Label
+            key={`${value}-${i}`}
+            isCompact
+            color={color}
+            className={breakAnywhere ? 'admin-break-anywhere' : undefined}
+          >
             {String(value)}
           </Label>
         );
@@ -231,14 +252,55 @@ export function UsageCell({ used, total, format, unit, reason }) {
   );
 }
 
+// How much of a digest is shown before the ellipsis. Twelve hex characters is
+// what `kubectl`, `docker images` and the OpenShift console all settle on: it
+// is enough to tell two images on one cluster apart at a glance, and short
+// enough that the column it sits in is a column rather than a page.
+const DIGEST_PREFIX = 12;
+
 /**
- * Container images, shortened to `repo:tag` with the full reference on hover.
+ * One image reference as a table cell shows it: `repo:tag`, or a digest cut to
+ * its first twelve hex characters, with the full reference on hover either way.
  *
  * The registry host and org are the same for every row in almost every cluster,
  * so showing them in full pushes the tag — the only part that differs between a
- * working workload and the one that just broke — off the right edge of the
- * column. The full reference stays reachable, because "which registry is this
- * pulling from" is exactly the question an ImagePullBackOff raises.
+ * working workload and the one that just broke — off the right edge.
+ *
+ * A digest is the case that has to be handled separately, and it is not a
+ * cosmetic one. `sha256:f57b7e3868d9126c0d347397aba7f186242ae0ac6f54eed93a19a5cbca65ce9e`
+ * carries no slash to cut at, and CSS finds no break opportunity in it either —
+ * not at the colon, not anywhere — so the whole 71 characters became the Images
+ * column's MINIMUM width, and an automatic table layout has to honour a column
+ * minimum. The Pods table was drawn 552px wider than the card holding it, and
+ * the operator read the cluster through a window they dragged left and right.
+ *
+ * Matched anywhere in the reference rather than only at the start, because both
+ * forms turn up on a real cluster and only one of them is a bare digest:
+ * kubelet reports a pulled-by-digest container as `sha256:f724…`, and a
+ * Deployment pinned by digest reads `registry.example:5000/checkout@sha256:f724…`
+ * — cutting that one at its last slash still leaves 71 unbreakable characters.
+ *
+ * The ellipsis is not decoration: `sha256:f72407be9e08` looks like a digest and
+ * would be read as the whole of one. The full reference is in `title`, on the
+ * pod's own page, and in the YAML.
+ */
+const DIGEST = /sha256:[0-9a-f]{16,}/i;
+
+function shortImage(image) {
+  // The registry and org first, so a digest-pinned reference loses its host
+  // before it is measured rather than after.
+  const short = image.includes('/') ? image.slice(image.lastIndexOf('/') + 1) : image;
+  const found = DIGEST.exec(short);
+  if (!found) return { text: short, digest: false };
+  const cut = `${found[0].slice(0, 'sha256:'.length + DIGEST_PREFIX)}…`;
+  return { text: short.replace(DIGEST, cut), digest: true };
+}
+
+/**
+ * Container images, shortened by `shortImage` with the full reference on hover.
+ *
+ * The full reference stays reachable, because "which registry is this pulling
+ * from" is exactly the question an ImagePullBackOff raises.
  */
 export function ImagesCell({ images, max = 2 }) {
   const list = (images ?? []).filter(Boolean);
@@ -250,10 +312,21 @@ export function ImagesCell({ images, max = 2 }) {
     // with `!important`.
     <span className="admin-cell-inline">
       {shown.map((image) => {
-        const short = image.includes('/') ? image.slice(image.lastIndexOf('/') + 1) : image;
+        const { text, digest } = shortImage(image);
         return (
-          <code key={image} title={image} style={{ fontSize: '0.85em' }}>
-            {short}
+          // `admin-break-anywhere` only on a digest, and that narrowness is the
+          // point: it is the one string here with no break opportunity at all,
+          // so it is the one that may be broken mid-token. Put on every image,
+          // the same rule collapsed the column's minimum to a single character
+          // and the layout then split `checkout:1.9.2` across two lines to make
+          // room for something else.
+          <code
+            key={image}
+            title={image}
+            className={digest ? 'admin-break-anywhere' : undefined}
+            style={{ fontSize: '0.85em' }}
+          >
+            {text}
           </code>
         );
       })}
@@ -945,6 +1018,7 @@ function ResourceTabBody({ tab, catalog, createGate }) {
         // title: the title is display text that a rename would silently orphan.
         tableId={`resources:${tab.group}/${tab.version}/${tab.plural}`}
         manageableColumns
+        defaultHiddenColumns={tab.defaultHiddenColumns}
         columns={columns}
         rows={listing.items}
         rowKey={tab.rowKey}
