@@ -16,7 +16,7 @@
  * and the filter below matches on the detail too — filtering to "Running" and
  * being shown a crash-looping pod would reintroduce the lie one layer up.
  */
-import { useMemo, useState } from 'react';
+import { Suspense, lazy, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Button } from '@patternfly/react-core';
 import SyncAltIcon from '@patternfly/react-icons/dist/esm/icons/sync-alt-icon';
@@ -32,7 +32,6 @@ import {
   StatusBadge,
   Toolbar,
 } from '../components/ui';
-import ImportYamlDialog from '../components/ImportYamlDialog';
 import { templatesFor } from '../components/templates';
 import { useCluster } from '../contexts/ClusterContext';
 import { useDensity } from '../contexts/DensityContext';
@@ -45,6 +44,12 @@ import {
   TruncationFooter,
   menuAction,
 } from './_parts';
+
+// Lazy, like the copy in `Layout.jsx`, and for the same reason: this dialog
+// carries `objectFormModel.js` and `templates.js`, and a single static import
+// of it anywhere pulls both back into the chunk that does the importing. The
+// saving only exists if every call site is `lazy`, so this one is too.
+const ImportYamlDialog = lazy(() => import('../components/ImportYamlDialog'));
 
 const CHECKS = [
   { id: 'logs', verb: 'get', group: 'core', resource: 'pods', subresource: 'log' },
@@ -285,16 +290,18 @@ export default function Pods() {
       />
 
       {createOpen && (
-        <ImportYamlDialog
-          isOpen
-          title="Create Pod"
-          templates={templatesFor({ apiVersion: 'v1', kind: 'Pod' })}
-          onClose={() => setCreateOpen(false)}
-          onApplied={() => {
-            setCreateOpen(false);
-            listing.reload();
-          }}
-        />
+        <Suspense fallback={null}>
+          <ImportYamlDialog
+            isOpen
+            title="Create Pod"
+            templates={templatesFor({ apiVersion: 'v1', kind: 'Pod' })}
+            onClose={() => setCreateOpen(false)}
+            onApplied={() => {
+              setCreateOpen(false);
+              listing.reload();
+            }}
+          />
+        </Suspense>
       )}
     </>
   );

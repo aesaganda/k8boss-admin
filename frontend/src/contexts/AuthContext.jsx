@@ -51,6 +51,17 @@ export function AuthProvider({ children }) {
     setLoading(true);
     setError(null);
     try {
+      // Two round trips, in this order, on purpose. `Promise.all` would shave a
+      // few milliseconds off first paint and introduce a race: on a console with
+      // application authentication off, `/auth/me` answers 401, `api/client.js`
+      // fires `k8boss-authentication-required` on that expected refusal, and the
+      // listener below calls `clearSession`, which asserts `enabled: true`. The
+      // `config()` answer then loses to it whenever it lands second, and the tab
+      // stops sending `X-K8Boss-User` — every write from it is audited as
+      // anonymous on a deployment where proxy mode is how operators are named.
+      // A parallel version has to settle both answers before touching
+      // `setAuthentication`, and suppress the event for the `me()` call it
+      // issued itself. It is one request on one page load; this is cheaper.
       const nextConfig = await authApi.config();
       setConfig(nextConfig);
       setAuthentication({ enabled: nextConfig.enabled, csrfToken: null });

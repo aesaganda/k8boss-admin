@@ -57,7 +57,6 @@ import UserIcon from '@patternfly/react-icons/dist/esm/icons/user-icon';
 import AppNav from './AppNav';
 import BrandMark from './BrandMark';
 import ErrorBoundary from './ErrorBoundary';
-import ImportYamlDialog from './ImportYamlDialog';
 import { LoadingState } from './ui';
 import { wireGroup } from '../api/client';
 import { useCluster } from '../contexts/ClusterContext';
@@ -78,6 +77,23 @@ import { useAuth } from '../contexts/AuthContext';
  * than the dev server.
  */
 const CliPanel = lazy(() => import('./CliPanel'));
+
+/**
+ * The one create dialog, and the same reasoning as `CliPanel` above.
+ *
+ * It carries `objectFormModel.js` and `templates.js` — between them the largest
+ * pair of modules in the app — and this shell renders on every page, so
+ * importing it here put all of it in the first-paint chunk for every operator,
+ * including the ones who never press "+". Every other place that opens it is
+ * behind a route-level lazy boundary, and each of those call sites is `lazy`
+ * too: one static import anywhere pulls the module back into the chunk that
+ * imports it, and the whole saving with it.
+ *
+ * The fallback is `null` on purpose. The chunk is fetched when the button is
+ * clicked and the modal opens when it lands; a placeholder modal would flash a
+ * second dialog frame in front of the one being fetched.
+ */
+const ImportYamlDialog = lazy(() => import('./ImportYamlDialog'));
 
 const STATUS_COLOR = {
   connected: 'var(--pf-t--global--icon--color--status--success--default, #3e8635)',
@@ -285,25 +301,27 @@ function ImportYamlButton() {
         </MenuToggle>
       </Tooltip>
       {open && (
-        <ImportYamlDialog
-          isOpen
-          onClose={() => setOpen(false)}
-          onApplied={(result) => {
-            setOpen(false);
-            // Land on the object that was just created, the way Explorer's own
-            // catalog click does — reusing its `?name=&namespace=` convention
-            // rather than inventing a second one.
-            const target = result?.target;
-            if (!target?.resource) return;
-            const qs = new URLSearchParams();
-            if (target.name) qs.set('name', target.name);
-            if (target.namespace) qs.set('namespace', target.namespace);
-            const suffix = qs.toString() ? `?${qs.toString()}` : '';
-            navigate(
-              `/explorer/${encodeURIComponent(wireGroup(target.group))}/${encodeURIComponent(target.version)}/${encodeURIComponent(target.resource)}${suffix}`,
-            );
-          }}
-        />
+        <Suspense fallback={null}>
+          <ImportYamlDialog
+            isOpen
+            onClose={() => setOpen(false)}
+            onApplied={(result) => {
+              setOpen(false);
+              // Land on the object that was just created, the way Explorer's own
+              // catalog click does — reusing its `?name=&namespace=` convention
+              // rather than inventing a second one.
+              const target = result?.target;
+              if (!target?.resource) return;
+              const qs = new URLSearchParams();
+              if (target.name) qs.set('name', target.name);
+              if (target.namespace) qs.set('namespace', target.namespace);
+              const suffix = qs.toString() ? `?${qs.toString()}` : '';
+              navigate(
+                `/explorer/${encodeURIComponent(wireGroup(target.group))}/${encodeURIComponent(target.version)}/${encodeURIComponent(target.resource)}${suffix}`,
+              );
+            }}
+          />
+        </Suspense>
       )}
     </>
   );

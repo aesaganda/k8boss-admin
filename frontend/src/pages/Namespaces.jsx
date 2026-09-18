@@ -28,7 +28,7 @@
  * first and pressed the second would get an ungoverned namespace and no sign
  * that anything was missing.
  */
-import { useMemo, useState } from 'react';
+import { Suspense, lazy, useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { Button } from '@patternfly/react-core';
 import SyncAltIcon from '@patternfly/react-icons/dist/esm/icons/sync-alt-icon';
@@ -42,7 +42,6 @@ import {
   StatusBadge,
   Toolbar,
 } from '../components/ui';
-import ImportYamlDialog from '../components/ImportYamlDialog';
 import NewProjectDialog from '../components/NewProjectDialog';
 import { templatesFor } from '../components/templates';
 import { namespaces as namespacesApi } from '../api/client';
@@ -50,6 +49,12 @@ import { useCluster } from '../contexts/ClusterContext';
 import { useNamespace } from '../contexts/NamespaceContext';
 import { useAsync, useGates } from './_data';
 import { ActionButton, LabelsCell, Muted, NoClusterState } from './_parts';
+
+// Lazy, like the copy in `Layout.jsx`, and for the same reason: this dialog
+// carries `objectFormModel.js` and `templates.js`, and a single static import
+// of it anywhere pulls both back into the chunk that does the importing. The
+// saving only exists if every call site is `lazy`, so this one is too.
+const ImportYamlDialog = lazy(() => import('../components/ImportYamlDialog'));
 
 // `create namespaces` is the first of the five verbs a project needs and the
 // one every project needs; the other four are preflighted per object by the
@@ -216,20 +221,22 @@ export default function Namespaces() {
       )}
 
       {creatingBare && (
-        <ImportYamlDialog
-          isOpen
-          title="Create Namespace"
-          templates={templatesFor({ apiVersion: 'v1', kind: 'Namespace' })}
-          onClose={() => setCreatingBare(false)}
-          onApplied={() => {
-            setCreatingBare(false);
-            reload();
-            // The masthead selector reads its own copy of this list, and a
-            // namespace it does not know about is one the operator cannot scope
-            // to — which is the first thing they will try to do with it.
-            refreshScope();
-          }}
-        />
+        <Suspense fallback={null}>
+          <ImportYamlDialog
+            isOpen
+            title="Create Namespace"
+            templates={templatesFor({ apiVersion: 'v1', kind: 'Namespace' })}
+            onClose={() => setCreatingBare(false)}
+            onApplied={() => {
+              setCreatingBare(false);
+              reload();
+              // The masthead selector reads its own copy of this list, and a
+              // namespace it does not know about is one the operator cannot scope
+              // to — which is the first thing they will try to do with it.
+              refreshScope();
+            }}
+          />
+        </Suspense>
       )}
     </>
   );

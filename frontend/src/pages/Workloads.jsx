@@ -18,7 +18,7 @@
  * send an operator to grant a permission that would not help. The permission
  * gate is asked second, and only for actions the kind actually has.
  */
-import { useMemo, useState } from 'react';
+import { Suspense, lazy, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Button, Dropdown, DropdownItem, DropdownList, MenuToggle } from '@patternfly/react-core';
 import SyncAltIcon from '@patternfly/react-icons/dist/esm/icons/sync-alt-icon';
@@ -34,7 +34,6 @@ import {
   StatusBadge,
   Toolbar,
 } from '../components/ui';
-import ImportYamlDialog from '../components/ImportYamlDialog';
 import { templatesFor } from '../components/templates';
 import ScaleDialog from '../components/ScaleDialog';
 import RestartDialog from '../components/RestartDialog';
@@ -52,6 +51,12 @@ import {
   useGates,
 } from './_data';
 import { ImagesCell, Muted, NoClusterState, UsageCell, menuAction } from './_parts';
+
+// Lazy, like the copy in `Layout.jsx`, and for the same reason: this dialog
+// carries `objectFormModel.js` and `templates.js`, and a single static import
+// of it anywhere pulls both back into the chunk that does the importing. The
+// saving only exists if every call site is `lazy`, so this one is too.
+const ImportYamlDialog = lazy(() => import('../components/ImportYamlDialog'));
 
 const KIND_OPTIONS = Object.entries(WORKLOAD_KINDS).map(([plural, spec]) => ({
   value: plural,
@@ -416,19 +421,21 @@ export default function Workloads() {
       )}
 
       {createTarget && (
-        <ImportYamlDialog
-          isOpen
-          title={`Create ${createTarget.spec.kind}`}
-          templates={templatesFor({
-            apiVersion: `${createTarget.spec.group}/${createTarget.spec.version}`,
-            kind: createTarget.spec.kind,
-          })}
-          onClose={() => setCreateTarget(null)}
-          onApplied={() => {
-            setCreateTarget(null);
-            reload();
-          }}
-        />
+        <Suspense fallback={null}>
+          <ImportYamlDialog
+            isOpen
+            title={`Create ${createTarget.spec.kind}`}
+            templates={templatesFor({
+              apiVersion: `${createTarget.spec.group}/${createTarget.spec.version}`,
+              kind: createTarget.spec.kind,
+            })}
+            onClose={() => setCreateTarget(null)}
+            onApplied={() => {
+              setCreateTarget(null);
+              reload();
+            }}
+          />
+        </Suspense>
       )}
     </>
   );

@@ -305,6 +305,11 @@ export default function OlmPanel({ gate, onChanged }) {
           autoPreview={false}
           isDanger
           summarize={summarizeInstall}
+          // Consequences only. The per-object preflight refusal that §14's
+          // panel used to check for itself is `MutationDialog`'s own guard now,
+          // applied to every result — this panel not having a copy of it is
+          // exactly how it offered an enabled Confirm for a create the dry
+          // run's preflight had already refused.
           confirmBlockedReason={blockedByConsequences(acknowledged)}
           canPreview={!unacknowledged.length}
           previewDisabledReason={previewBlocked}
