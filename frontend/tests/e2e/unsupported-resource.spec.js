@@ -33,8 +33,8 @@ test.describe('a tab whose primary listing is unsupported', () => {
       }),
     );
 
-    await page.goto('/network');
-    await expectPageRendered(page, 'Network');
+    await page.goto('/network/services');
+    await expectPageRendered(page, 'Services');
 
     await expect(page.getByText('Not present on this cluster')).toBeVisible();
     await expect(page.getByText('That group serves v2 on this cluster.')).toBeVisible();
@@ -60,8 +60,8 @@ test.describe('a tab whose primary listing is unsupported', () => {
       }),
     );
 
-    await page.goto('/network');
-    await expectPageRendered(page, 'Network');
+    await page.goto('/network/services');
+    await expectPageRendered(page, 'Services');
 
     await expect(page.getByTestId('error-state')).toBeVisible();
     await expect(page.getByText('Could not load these resources')).toBeVisible();

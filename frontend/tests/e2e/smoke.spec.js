@@ -24,7 +24,11 @@ test.describe('shell', () => {
     const network = nav.getByRole('button', { name: 'Network' });
     await expect(network).toHaveAttribute('aria-expanded', 'false');
     await network.click();
-    await expect(page).toHaveURL(/\/network$/);
+    // /network redirects to its first section rather than being a page of
+    // its own, so the section header lands on Services.
+    await expect(page).toHaveURL(/\/network\/services$/);
+    await expect(nav.getByRole('link', { name: 'Services', exact: true })).toBeVisible();
+    await expect(nav.getByRole('link', { name: 'Network Policies' })).toBeVisible();
     await expect(nav.getByRole('link', { name: 'Routes', exact: true })).toBeVisible();
     await expect(nav.getByRole('link', { name: 'Gateway (beta)' })).toBeVisible();
   });

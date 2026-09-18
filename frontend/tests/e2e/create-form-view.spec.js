@@ -429,8 +429,7 @@ spec:
     // the default-deny template writes on purpose, at the moment the operator
     // pressed Add.
     await mockApi(page, { preflight: ALLOW_ALL });
-    await page.goto('/network');
-    await page.getByRole('tab', { name: 'Network Policies' }).click();
+    await page.goto('/network/networkpolicies');
     await page.getByRole('button', { name: 'Create NetworkPolicy…' }).click();
     await expect(page.getByTestId('create-form')).toBeVisible();
 
@@ -595,8 +594,7 @@ spec:
     // console wrote — before the operator has typed anything — is a warning
     // that teaches people to click past warnings.
     await mockApi(page, { preflight: ALLOW_ALL });
-    await page.goto('/network');
-    await page.getByRole('tab', { name: 'Network Policies' }).click();
+    await page.goto('/network/networkpolicies');
     await page.getByRole('button', { name: 'Create NetworkPolicy…' }).click();
 
     await expect(page.getByTestId('create-form')).toBeVisible();

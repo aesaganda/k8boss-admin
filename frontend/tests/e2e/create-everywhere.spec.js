@@ -55,10 +55,12 @@ async function selectNamespace(page, name) {
   await page.getByRole('menuitem', { name, exact: true }).click();
 }
 
+// Network's sections are their own URLs, so there is no tab to click for them
+// — `tab` is only passed for the pages that still carry a tab strip.
 async function openTab(page, path, tab, options = {}) {
   await mockApi(page, { preflight: ALLOW_ALL, ...options });
   await page.goto(path);
-  await page.getByRole('tab', { name: tab }).click();
+  if (tab) await page.getByRole('tab', { name: tab }).click();
 }
 
 test.describe('a create button on every listing', () => {
@@ -66,10 +68,10 @@ test.describe('a create button on every listing', () => {
     // "Endpoint Slices" trimmed of its `s` is "Endpoint Slice", and
     // "Network Policies" is "Network Policie". Neither is a kind, and a button
     // offering to create one is the defect standard with a click target on it.
-    await openTab(page, '/network', 'Services');
+    await openTab(page, '/network/services');
     await expect(createButton(page)).toHaveText('Create Service…');
 
-    await page.getByRole('tab', { name: 'Network Policies' }).click();
+    await openTab(page, '/network/networkpolicies');
     await expect(createButton(page)).toHaveText('Create NetworkPolicy…');
   });
 
@@ -77,7 +79,7 @@ test.describe('a create button on every listing', () => {
     // Endpoints advertises get and list and nothing else. Every §9 check here
     // is allowed, so a button reporting RBAC would be reporting a denial that
     // did not happen.
-    await openTab(page, '/network', 'Endpoints');
+    await openTab(page, '/network/endpoints');
 
     const button = createButton(page);
     await expect(button).toHaveAttribute('data-allowed', 'false');
@@ -91,7 +93,7 @@ test.describe('a create button on every listing', () => {
   test('a listing the catalog does not know about is not reported as a denial either', async ({ page }) => {
     // Leases are a tab in this console and absent from the fixture catalog,
     // which is exactly the shape of a cluster that does not serve them.
-    await openTab(page, '/config', 'Leases');
+    await openTab(page, '/config/leases');
 
     const button = createButton(page);
     await expect(button).toHaveText('Create…');
@@ -103,7 +105,7 @@ test.describe('a create button on every listing', () => {
   });
 
   test('a preflight denial names the grant, on the same button', async ({ page }) => {
-    await openTab(page, '/access', 'ServiceAccounts', { preflight: DENY_CREATE_ON('serviceaccounts') });
+    await openTab(page, '/access/serviceaccounts', undefined, { preflight: DENY_CREATE_ON('serviceaccounts') });
 
     const button = createButton(page);
     await expect(button).toHaveText('Create ServiceAccount…');
@@ -111,17 +113,17 @@ test.describe('a create button on every listing', () => {
     await button.hover();
     await expect(page.getByRole('tooltip')).toContainText('Grant `create` on `serviceaccounts`');
 
-    // And the denial is this resource's, not the page's: RoleBindings on the
-    // same page are unaffected, which is what a per-resource check buys.
-    await page.getByRole('tab', { name: 'RoleBindings', exact: true }).click();
+    // And the denial is this resource's, not the page's: RoleBindings in the
+    // same section are unaffected, which is what a per-resource check buys.
+    // Reached through the sidebar, which is where the sections now are.
+    await page.getByRole('link', { name: 'RoleBindings', exact: true }).click();
     await expect(createButton(page)).toHaveAttribute('data-allowed', 'true');
   });
 
   test('the dialog posts to the listing’s own resource, in the selected namespace', async ({ page }) => {
     const creates = [];
     await mockApi(page, { preflight: ALLOW_ALL, resourceCreates: creates });
-    await page.goto('/access');
-    await page.getByRole('tab', { name: 'ServiceAccounts' }).click();
+    await page.goto('/access/serviceaccounts');
     // Scope the console, because a namespaced create with no namespace is
     // refused before it is sent — which is a different assertion.
     await selectNamespace(page, 'prod');
@@ -140,8 +142,7 @@ test.describe('a create button on every listing', () => {
   test('a cluster-scoped listing creates without a namespace', async ({ page }) => {
     const creates = [];
     await mockApi(page, { preflight: ALLOW_ALL, resourceCreates: creates });
-    await page.goto('/storage');
-    await page.getByRole('tab', { name: 'StorageClasses' }).click();
+    await page.goto('/storage/storageclasses');
 
     await expect(createButton(page)).toHaveText('Create StorageClass…');
     await createButton(page).click();
@@ -185,7 +186,7 @@ test.describe('the create button on a CRD', () => {
 
 test.describe('starters', () => {
   test('a kind with two starters offers both, and swapping an untouched one is immediate', async ({ page }) => {
-    await openTab(page, '/network', 'Network Policies');
+    await openTab(page, '/network/networkpolicies');
     await createButton(page).click();
 
     await expect(page.getByTestId('create-starters')).toBeVisible();
@@ -201,7 +202,7 @@ test.describe('starters', () => {
   });
 
   test('swapping a starter the operator has edited is confirmed, and refusing keeps the edit', async ({ page }) => {
-    await openTab(page, '/network', 'Network Policies');
+    await openTab(page, '/network/networkpolicies');
     await createButton(page).click();
     await page.getByTestId('create-view-yaml').check();
 
@@ -249,8 +250,7 @@ test.describe('starters', () => {
           })
         : route.fallback(),
     );
-    await page.goto('/network');
-    await page.getByRole('tab', { name: 'Network Policies' }).click();
+    await page.goto('/network/networkpolicies');
     await selectNamespace(page, 'prod');
 
     await createButton(page).click();

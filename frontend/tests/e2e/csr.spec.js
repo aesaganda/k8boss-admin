@@ -36,8 +36,7 @@ const ALLOW = (checks) =>
   }));
 
 async function openTab(page) {
-  await page.goto('/access');
-  await page.getByRole('tab', { name: 'Certificate requests' }).click();
+  await page.goto('/access/csrs');
   await expect(page.getByRole('row', { name: /csr-kubelet-renew/ })).toBeVisible();
 }
 

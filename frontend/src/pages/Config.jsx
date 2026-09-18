@@ -565,7 +565,7 @@ export default function Config() {
         />
       )}
       <ResourceTabsPage
-        title="Configuration"
+        basePath="/config"
         subtitle="ConfigMaps and Secrets. Secret values are never in a listing; revealing one is a deliberate, audited act."
         tabs={tabs}
       />

@@ -40,13 +40,14 @@ const ALLOW = (checks) =>
     hint: null,
   }));
 
-async function openTab(page, name) {
-  await page.goto('/storage');
-  await page.getByRole('tab', { name }).click();
+// Storage's listings are sidebar links with URLs of their own, so a section
+// is opened by going to it rather than by clicking a tab.
+async function openTab(page, section) {
+  await page.goto(`/storage/${section}`);
 }
 
 async function openSnapshotDialog(page) {
-  await openTab(page, 'PersistentVolumeClaims');
+  await openTab(page, 'pvcs');
   await page.getByRole('row', { name: /postgres-data/ }).getByRole('button').click();
   await page.getByRole('menuitem', { name: 'Snapshot…' }).click();
   await expect(page.getByTestId('snapshot-form')).toBeVisible();
@@ -58,7 +59,7 @@ test.describe('the snapshots table', () => {
   });
 
   test('a snapshot still being taken is neither ready nor failed', async ({ page }) => {
-    await openTab(page, 'Volume Snapshots');
+    await openTab(page, 'volumesnapshots');
 
     const pending = page.getByRole('row', { name: /postgres-before-upgrade/ });
     await expect(pending).not.toContainText('Ready');
@@ -67,14 +68,14 @@ test.describe('the snapshots table', () => {
   });
 
   test('a ready snapshot and a failed one are told apart', async ({ page }) => {
-    await openTab(page, 'Volume Snapshots');
+    await openTab(page, 'volumesnapshots');
 
     await expect(page.getByRole('row', { name: /postgres-nightly/ })).toContainText('Ready');
     await expect(page.getByRole('row', { name: /analytics-failed/ })).toContainText('Not ready');
   });
 
   test('a snapshot with no restore size yet shows an em dash, not zero', async ({ page }) => {
-    await openTab(page, 'Volume Snapshots');
+    await openTab(page, 'volumesnapshots');
 
     // Scoped to the Restore size cell: the row carries an age and a name that
     // would satisfy a looser assertion about the character '0'.
@@ -87,7 +88,7 @@ test.describe('the snapshots table', () => {
   });
 
   test('a snapshot adopted from content is not shown as claim-sourced', async ({ page }) => {
-    await openTab(page, 'Volume Snapshots');
+    await openTab(page, 'volumesnapshots');
 
     await expect(page.getByRole('row', { name: /imported-2026-08/ })).toContainText(
       'adopted content',
@@ -95,7 +96,7 @@ test.describe('the snapshots table', () => {
   });
 
   test('the class table says what deleting a snapshot will do', async ({ page }) => {
-    await openTab(page, 'Snapshot Classes');
+    await openTab(page, 'volumesnapshotclasses');
 
     await expect(page.getByRole('row', { name: /csi-ebs-retain/ })).toContainText('Retain');
     await expect(page.getByRole('row', { name: /csi-ebs\s/ }).first()).toContainText('Delete');

@@ -537,7 +537,7 @@ export default function Storage() {
         />
       )}
       <ResourceTabsPage
-        title="Storage"
+        basePath="/storage"
         subtitle="Claims, the volumes behind them, and the classes that provision them."
         tabs={tabs}
       />
