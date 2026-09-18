@@ -303,8 +303,10 @@ test.describe('the Environment tab', () => {
     // Reporting zero variables from an object we could not read is the
     // empty-is-never-blind failure, hidden inside a container's environment.
     await expect(page.getByText('an unknown set of variables')).toBeVisible();
-    // …and rule 11.1's banner names what failed.
-    await expect(page.getByText('configmaps', { exact: false }).first()).toBeVisible();
+    // …and rule 11.1's banner names what failed. Scoped to the banner: an
+    // unscoped text match also finds the sidebar's ConfigMaps link, which is
+    // in the document whether or not anything failed.
+    await expect(page.getByTestId('partial-banner')).toContainText('configmaps');
   });
 
   test('an overridden variable is shown, struck through, rather than dropped', async ({ page }) => {

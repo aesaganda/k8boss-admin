@@ -23,8 +23,7 @@ import { expect, test } from '@playwright/test';
 import { FIXTURES, mockApi } from './fixtures.js';
 
 async function openPolicies(page) {
-  await page.goto('/network');
-  await page.getByRole('tab', { name: 'Network Policies' }).click();
+  await page.goto('/network/networkpolicies');
 }
 
 test.describe('network policies', () => {
@@ -75,8 +74,7 @@ test.describe('network policies', () => {
   test('a pod no policy selects is reported unrestricted, and an undecidable one is not', async ({
     page,
   }) => {
-    await page.goto('/network');
-    await page.getByRole('tab', { name: 'Pod Isolation' }).click();
+    await page.goto('/network/isolation');
 
     await expect(page.getByRole('row', { name: /legacy-batch-0/ })).toContainText('Unrestricted');
 
@@ -88,8 +86,7 @@ test.describe('network policies', () => {
   });
 
   test('the isolation headline counts unknowns apart from unrestricted pods', async ({ page }) => {
-    await page.goto('/network');
-    await page.getByRole('tab', { name: 'Pod Isolation' }).click();
+    await page.goto('/network/isolation');
 
     const unrestricted = page.getByTestId('metric-card').filter({ hasText: 'Ingress unrestricted' });
     await expect(unrestricted).toContainText('1');

@@ -110,23 +110,62 @@ export default function AppNav() {
           <RouterNavItem to="/pods">Pods</RouterNavItem>
         </NavSection>
 
-        {/* Storage and Configuration are each one page whose resource types are
-            tabs inside it (`ResourceTabsPage`), so each remains one link. */}
-        <RouterNavItem to="/storage">Storage</RouterNavItem>
+        {/* Storage, Network, Configuration and Access control are each one
+            `ResourceTabsPage`, and their listings are links here rather than
+            tabs inside the page: a row of tabs above a table is a selector
+            nobody can send a link to, and a dozen of them is a selector nobody
+            can read either. `to` on the section navigates to the bare path,
+            which redirects to the first listing. */}
+        <NavSection id="storage" title="Storage" routes={['/storage']} to="/storage">
+          <RouterNavItem to="/storage/pvcs">PersistentVolumeClaims</RouterNavItem>
+          <RouterNavItem to="/storage/pvs">PersistentVolumes</RouterNavItem>
+          <RouterNavItem to="/storage/storageclasses">StorageClasses</RouterNavItem>
+          <RouterNavItem to="/storage/volumesnapshots">Volume Snapshots</RouterNavItem>
+          <RouterNavItem to="/storage/volumesnapshotclasses">Snapshot Classes</RouterNavItem>
+          <RouterNavItem to="/storage/volumeattributesclasses">Volume Attributes Classes</RouterNavItem>
+        </NavSection>
         <NavSection
           id="network"
           title="Network"
           routes={['/network', '/routes', '/gateway']}
           to="/network"
         >
+          <RouterNavItem to="/network/services">Services</RouterNavItem>
+          <RouterNavItem to="/network/ingresses">Ingresses</RouterNavItem>
+          <RouterNavItem to="/network/endpoints">Endpoints</RouterNavItem>
+          <RouterNavItem to="/network/endpointslices">Endpoint Slices</RouterNavItem>
+          <RouterNavItem to="/network/ingressclasses">Ingress Classes</RouterNavItem>
+          <RouterNavItem to="/network/networkpolicies">Network Policies</RouterNavItem>
+          <RouterNavItem to="/network/isolation">Pod Isolation</RouterNavItem>
           <RouterNavItem to="/routes">Routes</RouterNavItem>
           {/* Gateway API resources are CRD-backed and often absent. */}
           <RouterNavItem to="/gateway">Gateway (beta)</RouterNavItem>
         </NavSection>
-        <RouterNavItem to="/config">Configuration</RouterNavItem>
+        <NavSection id="config" title="Configuration" routes={['/config']} to="/config">
+          <RouterNavItem to="/config/configmaps">ConfigMaps</RouterNavItem>
+          <RouterNavItem to="/config/secrets">Secrets</RouterNavItem>
+          <RouterNavItem to="/config/hpas">HPAs</RouterNavItem>
+          <RouterNavItem to="/config/vpas">VPAs</RouterNavItem>
+          <RouterNavItem to="/config/poddisruptionbudgets">Pod Disruption Budgets</RouterNavItem>
+          <RouterNavItem to="/config/resourcequotas">Resource Quotas</RouterNavItem>
+          <RouterNavItem to="/config/limitranges">Limit Ranges</RouterNavItem>
+          <RouterNavItem to="/config/priorityclasses">Priority Classes</RouterNavItem>
+          <RouterNavItem to="/config/runtimeclasses">Runtime Classes</RouterNavItem>
+          <RouterNavItem to="/config/leases">Leases</RouterNavItem>
+          <RouterNavItem to="/config/mutatingwebhookconfigurations">Mutating Webhook Configurations</RouterNavItem>
+          <RouterNavItem to="/config/validatingwebhookconfigurations">
+            Validating Webhook Configurations
+          </RouterNavItem>
+        </NavSection>
 
-        <NavSection id="access" title="Access control" routes={['/access']}>
-          <RouterNavItem to="/access">Roles and bindings</RouterNavItem>
+        <NavSection id="access" title="Access control" routes={['/access']} to="/access">
+          <RouterNavItem to="/access/serviceaccounts">ServiceAccounts</RouterNavItem>
+          <RouterNavItem to="/access/roles">Roles</RouterNavItem>
+          <RouterNavItem to="/access/clusterroles">ClusterRoles</RouterNavItem>
+          <RouterNavItem to="/access/rolebindings">RoleBindings</RouterNavItem>
+          <RouterNavItem to="/access/clusterrolebindings">ClusterRoleBindings</RouterNavItem>
+          <RouterNavItem to="/access/csrs">Certificate requests</RouterNavItem>
+          <RouterNavItem to="/access/review">Access review</RouterNavItem>
         </NavSection>
 
         {/* §16. Above Custom Resources, not inside it: an operator is the

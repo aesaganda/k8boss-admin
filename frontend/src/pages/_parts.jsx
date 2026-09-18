@@ -20,7 +20,7 @@
  *                               is, and the operator has no way to notice.
  */
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, Navigate, useParams } from 'react-router-dom';
 import {
   Alert,
   Button,
@@ -777,9 +777,17 @@ export function PodConsoleModal({ pod, initialTab = 'logs', execGate, debugGate,
  * per tab — which is what §9's batch endpoint is for, and what keeps switching
  * tabs from being a permission check each time.
  */
-export function ResourceTabsPage({ title, subtitle, tabs, initialTab }) {
+export function ResourceTabsPage({ title, subtitle, tabs, initialTab, basePath }) {
   const [activeKey, setActiveKey] = useState(initialTab ?? tabs[0]?.key);
-  const active = tabs.find((tab) => tab.key === activeKey) ?? tabs[0];
+  // `basePath` turns the tabs into routes: each section is `<basePath>/<key>`,
+  // reached from the sidebar, and the strip is not rendered at all — it would
+  // be a second selector for the same state, and the two disagree the moment
+  // somebody reloads on a section or sends the link to somebody else. The
+  // heading becomes the section's own name for the same reason: the group name
+  // is already on screen, in the sidebar, next to the highlighted entry.
+  const { section } = useParams();
+  const routed = basePath != null;
+  const active = routed ? tabs.find((tab) => tab.key === section) : (tabs.find((tab) => tab.key === activeKey) ?? tabs[0]);
   const { activeClusterId } = useCluster();
   const { selected: namespace } = useNamespace();
 
@@ -816,19 +824,31 @@ export function ResourceTabsPage({ title, subtitle, tabs, initialTab }) {
   );
   const { gate: createGate } = useGates(createChecks, { enabled: activeClusterId != null });
 
+  // A section nobody serves is sent to the first one rather than rendered as
+  // it: falling back silently would show PersistentVolumeClaims under whatever
+  // was typed, which is the wrong table under a name that says otherwise.
+  if (routed && !active) return <Navigate to={`${basePath}/${tabs[0].key}`} replace />;
+
   return (
     <>
-      <PageHeader title={title} subtitle={subtitle} />
-      <Tabs
-        activeKey={active?.key}
-        onSelect={(_event, key) => setActiveKey(key)}
-        aria-label={`${title} sections`}
-        role="region"
-      >
-        {tabs.map((tab) => (
-          <Tab key={tab.key} eventKey={tab.key} title={<TabTitleText>{tab.title}</TabTitleText>} aria-label={tab.title} />
-        ))}
-      </Tabs>
+      <PageHeader title={routed ? active.title : title} subtitle={subtitle} />
+      {!routed && (
+        <Tabs
+          activeKey={active?.key}
+          onSelect={(_event, key) => setActiveKey(key)}
+          aria-label={`${title} sections`}
+          role="region"
+        >
+          {tabs.map((tab) => (
+            <Tab
+              key={tab.key}
+              eventKey={tab.key}
+              title={<TabTitleText>{tab.title}</TabTitleText>}
+              aria-label={tab.title}
+            />
+          ))}
+        </Tabs>
+      )}
       {/* Keyed on the tab so switching tabs resets the search box, the drawer
           and the accumulated `continue` pages together. Carrying a Secrets
           filter over into ConfigMaps looked like an empty namespace. */}

@@ -465,7 +465,7 @@ export default function Access() {
         />
       )}
       <ResourceTabsPage
-        title="Access control"
+        basePath="/access"
         subtitle="Who can do what to this cluster. These are the objects the console's own ServiceAccount is subject to as well."
         tabs={tabs}
       />

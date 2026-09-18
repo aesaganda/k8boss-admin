@@ -1049,7 +1049,7 @@ export default function Network() {
   return (
     <>
       <ResourceTabsPage
-        title="Network"
+        basePath="/network"
         subtitle="Services, Ingresses, the addresses behind them, and the NetworkPolicies that describe who may reach what. This console reads no service mesh — what is here is what the API server serves."
         tabs={tabs}
       />

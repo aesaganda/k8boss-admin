@@ -48,8 +48,7 @@ const ALLOW = (checks) =>
   }));
 
 async function openHpaTab(page) {
-  await page.goto('/config');
-  await page.getByRole('tab', { name: 'HPAs' }).click();
+  await page.goto('/config/hpas');
 }
 
 async function openBounds(page, name = 'checkout-hpa') {

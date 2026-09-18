@@ -24,8 +24,7 @@ import { expect, test } from '@playwright/test';
 import { mockApi } from './fixtures.js';
 
 async function openReview(page) {
-  await page.goto('/access');
-  await page.getByRole('tab', { name: 'Access review' }).click();
+  await page.goto('/access/review');
   await expect(page.getByTestId('sar-form')).toBeVisible();
 }
 

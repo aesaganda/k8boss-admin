@@ -121,15 +121,25 @@ function ConsoleRoutes() {
                   environment, logs, events, terminal and §7.4's debug, with the
                   active one in `?tab=` so every tab is a link. */}
               <Route path="pods/:namespace/:name" element={<PodDetail />} />
-              <Route path="network" element={<Network />} />
+              {/* The four `ResourceTabsPage` pages put their sections in the
+                  sidebar rather than in a tab strip, so each section is a URL
+                  anybody can send. The bare path is what the sidebar's own
+                  section header navigates to and what every older link says:
+                  it redirects to the first section rather than serving it
+                  under a second path. */}
+              <Route path="network" element={<Navigate to="/network/services" replace />} />
+              <Route path="network/:section" element={<Network />} />
               {/* §13/§14. "routes" is the feature, not react-router's
                   <Route> — the page component is aliased to RoutesPage so
                   the two names cannot be confused at the point of use. */}
               <Route path="routes" element={<RoutesPage />} />
-              <Route path="config" element={<Config />} />
-              <Route path="storage" element={<Storage />} />
+              <Route path="config" element={<Navigate to="/config/configmaps" replace />} />
+              <Route path="config/:section" element={<Config />} />
+              <Route path="storage" element={<Navigate to="/storage/pvcs" replace />} />
+              <Route path="storage/:section" element={<Storage />} />
               <Route path="gateway" element={<Gateway />} />
-              <Route path="access" element={<Access />} />
+              <Route path="access" element={<Navigate to="/access/serviceaccounts" replace />} />
+              <Route path="access/:section" element={<Access />} />
               <Route path="events" element={<Events />} />
 
               {/* One page, two routes: the explorer with no resource chosen is
