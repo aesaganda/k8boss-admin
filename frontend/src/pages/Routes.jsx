@@ -63,21 +63,27 @@ import { ChipList, Muted, NoClusterState } from './_parts';
  * an exposure's age is the least diagnostic fact about it — nothing on this
  * page is answered by "it is 14 days old".
  *
- * `Namespace` is the third, and it is the one to argue about: in "All
- * namespaces" it is a fact you now have to click a row to get. It goes because
- * the alternatives are worse — see below — and because the masthead already
- * carries a namespace scope, so the question it answers has another way to be
- * asked.
+ * `Admitted` is the third, and it is the one that costs something. This
+ * module's own heading calls it one of the two columns carrying the contract
+ * weight, and it is still true: `Unknown` there is the honest state for an
+ * exposure no router has reported on, and permanently the state of every
+ * Ingress. Hidden, "has anything actually taken this exposure" is one click
+ * away rather than on screen — and `Published address`, which stays, answers a
+ * good part of the same question: an exposure no controller has claimed has no
+ * address either. It goes ahead of `Namespace`, which was tried in this slot
+ * first, because losing the namespace off a table that is normally read across
+ * all of them leaves rows that cannot be told apart.
  *
- * What does NOT ship hidden, and why, since all three are bigger: `Kind`,
+ * What does NOT ship hidden, and why, since all of these are bigger: `Kind`,
  * because the row is one exposure and which API it is written in decides what
  * can be changed about it — this module's own heading says it is always
  * visible; `Goes to`, because "where does it go" is half of what this page is
- * for; and `Managed by`, because an edit to an object a controller owns
- * succeeds, reports `applied: true` truthfully, and is reverted seconds later.
- * That column is the only warning of it anywhere in this console.
+ * for; `Namespace`, per above; and `Managed by`, because an edit to an object a
+ * controller owns succeeds, reports `applied: true` truthfully, and is reverted
+ * seconds later. That column is the only warning of it anywhere in this
+ * console.
  */
-const DEFAULT_HIDDEN_COLUMNS = ['tls', 'age_seconds', 'namespace'];
+const DEFAULT_HIDDEN_COLUMNS = ['tls', 'age_seconds', 'admitted'];
 
 /**
  * §9 checks, asked once for the page.

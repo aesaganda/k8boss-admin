@@ -64,7 +64,28 @@ async function pickService(page, index, name) {
   await expect(toggle).toContainText(name);
 }
 
+/**
+ * This table ships with TLS, Age and Admitted hidden, so that ten columns — two
+ * of them holding URLs — fit beside the navigation without the page scrolling
+ * sideways. Several tests below are about those columns, `Admitted` above all:
+ * its tri-state is one of the two things this page's own heading says it
+ * carries the contract weight for. They put the columns back the way an
+ * operator would, by storing what the Manage columns dialog stores, rather than
+ * being retargeted at something else.
+ */
+async function showEveryColumn(page) {
+  await page.addInitScript(() => {
+    try {
+      window.localStorage.setItem('k8boss-admin.columns.Routes', '[]');
+    } catch {
+      // Storage refused. The table falls back to its defaults and the
+      // assertions say so, rather than this helper throwing here.
+    }
+  });
+}
+
 async function openRoutes(page) {
+  await showEveryColumn(page);
   await page.goto('/routes');
   await expectPageRendered(page, 'Routes');
 }
