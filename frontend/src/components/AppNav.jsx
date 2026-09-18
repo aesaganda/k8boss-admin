@@ -12,7 +12,7 @@
  * link mid-click and the navigation silently never fires — a bug that presents
  * as "the sidebar sometimes does nothing".
  */
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { Nav, NavExpandable, NavItem, NavList } from '@patternfly/react-core';
 import { useAuth } from '../contexts/AuthContext';
@@ -39,9 +39,8 @@ function RouterNavItem({ to, end = false, children }) {
 // Module level, not defined inside AppNav: a component declared during render
 // is a new type each time, and every section would remount — collapsing itself
 // on every keystroke anywhere in the app.
-function NavSection({ id, title, routes, children, to }) {
+function NavSection({ id, title, routes, children }) {
   const { pathname } = useLocation();
-  const navigate = useNavigate();
   const [expanded, setExpanded] = useState(() => {
     try {
       const stored = localStorage.getItem(`k8boss-admin.nav.${id}`);
@@ -51,17 +50,28 @@ function NavSection({ id, title, routes, children, to }) {
     }
   });
   const containsActive = routes.some((route) => pathname === route || pathname.startsWith(`${route}/`));
+
+  // Arriving in a section opens it, so a deep link or a reload shows where in
+  // the tree the page is. It runs on the *transition* into the section rather
+  // than on every render, which is what leaves the header free to close a
+  // section the operator is standing in: `isExpanded={expanded || containsActive}`
+  // recomputed that on every render instead, so the one section you were most
+  // likely to want out of the way was the one that sprang open again.
+  useEffect(() => {
+    if (containsActive) setExpanded(true);
+  }, [containsActive]);
+
   return (
     <NavExpandable
       title={title}
       groupId={id}
       isActive={containsActive}
-      // Auto-expand for the active route without overwriting the stored
-      // preference, so collapsing a section does not fight the router.
-      isExpanded={expanded || containsActive}
+      isExpanded={expanded}
+      // The header is a toggle and nothing else. It used to navigate to the
+      // section's first page as well, which made the click that folds a
+      // section away also a click that left the page you were reading.
       onExpand={(_event, value) => {
         setExpanded(value);
-        if (to) navigate(to);
         try {
           localStorage.setItem(`k8boss-admin.nav.${id}`, value ? 'expanded' : 'collapsed');
         } catch {
@@ -114,9 +124,10 @@ export default function AppNav() {
             `ResourceTabsPage`, and their listings are links here rather than
             tabs inside the page: a row of tabs above a table is a selector
             nobody can send a link to, and a dozen of them is a selector nobody
-            can read either. `to` on the section navigates to the bare path,
-            which redirects to the first listing. */}
-        <NavSection id="storage" title="Storage" routes={['/storage']} to="/storage">
+            can read either. The bare paths (`/network`, `/storage`, …) still
+            resolve — they redirect to the first listing — so older links and
+            bookmarks keep working. */}
+        <NavSection id="storage" title="Storage" routes={['/storage']}>
           <RouterNavItem to="/storage/pvcs">PersistentVolumeClaims</RouterNavItem>
           <RouterNavItem to="/storage/pvs">PersistentVolumes</RouterNavItem>
           <RouterNavItem to="/storage/storageclasses">StorageClasses</RouterNavItem>
@@ -128,7 +139,6 @@ export default function AppNav() {
           id="network"
           title="Network"
           routes={['/network', '/routes', '/gateway']}
-          to="/network"
         >
           <RouterNavItem to="/network/services">Services</RouterNavItem>
           <RouterNavItem to="/network/ingresses">Ingresses</RouterNavItem>
@@ -141,7 +151,7 @@ export default function AppNav() {
           {/* Gateway API resources are CRD-backed and often absent. */}
           <RouterNavItem to="/gateway">Gateway (beta)</RouterNavItem>
         </NavSection>
-        <NavSection id="config" title="Configuration" routes={['/config']} to="/config">
+        <NavSection id="config" title="Configuration" routes={['/config']}>
           <RouterNavItem to="/config/configmaps">ConfigMaps</RouterNavItem>
           <RouterNavItem to="/config/secrets">Secrets</RouterNavItem>
           <RouterNavItem to="/config/hpas">HPAs</RouterNavItem>
@@ -158,7 +168,7 @@ export default function AppNav() {
           </RouterNavItem>
         </NavSection>
 
-        <NavSection id="access" title="Access control" routes={['/access']} to="/access">
+        <NavSection id="access" title="Access control" routes={['/access']}>
           <RouterNavItem to="/access/serviceaccounts">ServiceAccounts</RouterNavItem>
           <RouterNavItem to="/access/roles">Roles</RouterNavItem>
           <RouterNavItem to="/access/clusterroles">ClusterRoles</RouterNavItem>

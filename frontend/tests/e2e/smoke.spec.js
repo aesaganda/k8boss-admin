@@ -24,21 +24,37 @@ test.describe('shell', () => {
     const network = nav.getByRole('button', { name: 'Network' });
     await expect(network).toHaveAttribute('aria-expanded', 'false');
     await network.click();
-    // /network redirects to its first section rather than being a page of
-    // its own, so the section header lands on Services.
-    await expect(page).toHaveURL(/\/network\/services$/);
+    await expect(network).toHaveAttribute('aria-expanded', 'true');
     await expect(nav.getByRole('link', { name: 'Services', exact: true })).toBeVisible();
     await expect(nav.getByRole('link', { name: 'Network Policies' })).toBeVisible();
     await expect(nav.getByRole('link', { name: 'Routes', exact: true })).toBeVisible();
     await expect(nav.getByRole('link', { name: 'Gateway (beta)' })).toBeVisible();
+    // The header opens and closes the section and does nothing else: a click
+    // that also navigated would take the operator off the page they were
+    // reading every time they folded a section away.
+    await expect(page).toHaveURL(/\/$/);
+
+    await network.click();
+    await expect(network).toHaveAttribute('aria-expanded', 'false');
+    await expect(nav.getByRole('link', { name: 'Services', exact: true })).toBeHidden();
   });
 
   test('keeps the active network page visible in its navigation group', async ({ page }) => {
     await page.goto('/routes');
 
     const nav = page.getByRole('navigation', { name: 'Console navigation' });
-    await expect(nav.getByRole('button', { name: 'Network' })).toHaveAttribute('aria-expanded', 'true');
+    const network = nav.getByRole('button', { name: 'Network' });
+    await expect(network).toHaveAttribute('aria-expanded', 'true');
     await expect(nav.getByRole('link', { name: 'Routes', exact: true })).toHaveAttribute('aria-current', 'page');
+
+    // And the section you are standing in can still be folded away: the open
+    // state follows arriving in the section, not being in it, so the header
+    // is not fighting the router for the one section most likely to be in the
+    // way. The page underneath is untouched.
+    await network.click();
+    await expect(network).toHaveAttribute('aria-expanded', 'false');
+    await expect(nav.getByRole('link', { name: 'Routes', exact: true })).toBeHidden();
+    await expect(page).toHaveURL(/\/routes$/);
   });
 
   test('keeps the sidebar mounted while a page chunk loads', async ({ page }) => {

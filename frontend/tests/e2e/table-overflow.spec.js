@@ -244,7 +244,9 @@ test.describe('a cell never decides the table width', () => {
   test('the ConfigMaps table fits', async ({ page }) => {
     await mockApi(page);
     await page.goto('/config');
-    await expectPageRendered(page, 'Configuration');
+    // The sections are sidebar links now, so /config redirects to the first
+    // one and the heading is that listing's own name.
+    await expectPageRendered(page, 'ConfigMaps');
     await expect(page.getByRole('grid', { name: 'ConfigMaps' })).toBeVisible();
 
     await expectNoSideScroll(page, 'ConfigMaps');
@@ -338,7 +340,7 @@ test.describe('a list page fits the narrowest desktop window', () => {
     ['/workloads', 'Workloads', 'Workloads'],
     ['/routes', 'Routes', 'Routes'],
     ['/nodes', 'Nodes', 'Nodes'],
-    ['/storage', 'Storage', 'PersistentVolumeClaims'],
+    ['/storage', 'PersistentVolumeClaims', 'PersistentVolumeClaims'],
   ];
 
   for (const [path, heading, table] of PAGES) {
