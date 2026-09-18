@@ -129,6 +129,14 @@ class AuthenticationMiddleware:
         session = load_session(_cookie(scope))
         if session is None:
             if scope["type"] == "websocket":
+                # Accepted first, then closed. A close sent before the accept is
+                # a handshake failure at the transport level, and the browser
+                # never surfaces the code: both viewers then reported an expired
+                # session as "connection lost" and sent the operator to debug a
+                # network that was fine. Accepting costs one frame and makes
+                # 4401 reach `onclose`, which is the only place the frontend can
+                # tell "sign in again" from "something dropped us".
+                await send({"type": "websocket.accept"})
                 await send({"type": "websocket.close", "code": 4401, "reason": "Sign in required"})
                 return
             await _reject_http(scope, receive, send, AuthenticationRequired())
@@ -139,7 +147,13 @@ class AuthenticationMiddleware:
 
         if scope["type"] == "http" and scope.get("method", "GET").upper() not in _SAFE_METHODS:
             supplied = _header(scope, b"x-csrf-token") or ""
-            if not hmac.compare_digest(supplied, session.csrf_token):
+            # Compared as bytes. `compare_digest` refuses a `str` carrying any
+            # non-ASCII character, and the TypeError escapes this middleware as a
+            # 500 rather than the audited refusal a bad CSRF token is supposed to
+            # produce: the header is the attacker's to write, so one non-ASCII
+            # character would trade a recorded security event for an unrecorded
+            # server error.
+            if not hmac.compare_digest(supplied.encode(), session.csrf_token.encode()):
                 await _reject_http(
                     scope,
                     receive,
