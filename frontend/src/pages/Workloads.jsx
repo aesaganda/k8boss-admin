@@ -154,6 +154,21 @@ function CreateWorkloadMenu({ gate, onPick }) {
   );
 }
 
+/**
+ * The two columns this table starts with hidden.
+ *
+ * Nine columns and a row menu do not fit beside the navigation, and these are
+ * the two that cost the least to lose. `Schedule` is CronJob-only and reads
+ * "n/a" on every other row, which on a mixed table is most of them — a column
+ * whose usual answer is "this question does not apply". `Images` is either
+ * identical down the whole column or is read on the workload's own page, and
+ * it is the same column the Pods table ships hidden for the same reason.
+ *
+ * A default, not a filter: every row is still here, a search still matches an
+ * image, and the Manage columns button says how many are off.
+ */
+const DEFAULT_HIDDEN_COLUMNS = ['schedule', 'images'];
+
 export default function Workloads() {
   const { activeClusterId } = useCluster();
   const { selected: namespace } = useNamespace();
@@ -350,6 +365,7 @@ export default function Workloads() {
         ariaLabel="Workloads"
         density={density}
         manageableColumns
+        defaultHiddenColumns={DEFAULT_HIDDEN_COLUMNS}
         columns={namespace ? columns.filter((column) => column.key !== 'namespace') : columns}
         rows={rows}
         rowKey={(row) => `${row.kind}/${row.namespace}/${row.name}`}

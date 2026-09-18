@@ -44,7 +44,26 @@ async function dragColumn(page, key, dx) {
   await page.mouse.up();
 }
 
+/**
+ * The Workloads table ships with Schedule and Images hidden so that nine
+ * columns fit beside the navigation. These tests are about the Images column —
+ * it is the widest cell with inline content, which is what makes it the one
+ * worth measuring — so they put it back the way an operator would, by storing
+ * what the Manage columns dialog stores.
+ */
+async function showEveryColumn(page) {
+  await page.addInitScript(() => {
+    try {
+      window.localStorage.setItem('k8boss-admin.columns.Workloads', '[]');
+    } catch {
+      // Storage refused. The table falls back to its defaults and the
+      // assertions below say so, rather than this helper throwing here.
+    }
+  });
+}
+
 async function openWorkloads(page) {
+  await showEveryColumn(page);
   await mockApi(page);
   await page.goto('/workloads');
   await expectPageRendered(page, 'Workloads');
@@ -428,8 +447,10 @@ test.describe('resizable table columns', () => {
     await expectPageRendered(page, 'Pods');
 
     // Every column but the trailing one, which absorbs the leftover width.
+    // Named from the columns this table shows by default — QoS and Images ship
+    // hidden, and a handle for a column that is not on screen is not a handle.
     await expect(page.getByTestId('column-resizer-name')).toBeVisible();
-    await expect(page.getByTestId('column-resizer-containers')).toBeVisible();
+    await expect(page.getByTestId('column-resizer-restarts')).toBeVisible();
     await expect(page.getByTestId('column-resizer-age_seconds')).toBeVisible();
 
     // Named for the column, not "resize handle" repeated nine times: a screen

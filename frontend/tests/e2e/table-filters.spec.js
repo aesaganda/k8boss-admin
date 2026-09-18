@@ -27,6 +27,12 @@ import { expectPageRendered, mockApi } from './fixtures.js';
  * **Hiding a column hides a column, not a row.** And the choice is remembered,
  * where a filter deliberately is not — a filter that came back days later would
  * be rows missing from a table that looks complete.
+ *
+ * **A table may ship with a column hidden, and an operator's choice outranks
+ * it — including the choice to show all of them.** That last one is not
+ * hypothetical: storage that deleted the key when nothing was hidden made
+ * "show me everything" read back as "never asked", so the default reasserted
+ * itself on the next reload and undid the edit.
  */
 
 /**
@@ -310,8 +316,9 @@ test.describe('manage columns', () => {
 
     await expect(header(page, 'Node')).toHaveCount(0);
     // And the button says the table is not showing everything, so a missing
-    // column is never a mystery.
-    await expect(page.getByTestId('manage-columns')).toHaveText('Manage columns (8 of 9)');
+    // column is never a mystery. Six of nine, not eight: this table ships with
+    // QoS and Images hidden, and Node is the third.
+    await expect(page.getByTestId('manage-columns')).toHaveText('Manage columns (6 of 9)');
   });
 
   test('cancel discards the edit', async ({ page }) => {
@@ -324,7 +331,7 @@ test.describe('manage columns', () => {
     await expect(header(page, 'Node')).toBeVisible();
   });
 
-  test('restore default columns brings them all back', async ({ page }) => {
+  test('restore default columns goes back to what the table ships with', async ({ page }) => {
     await openPods(page);
     await hideNode(page);
 
@@ -332,7 +339,65 @@ test.describe('manage columns', () => {
     await page.getByTestId('manage-columns-restore').click();
     await page.getByTestId('manage-columns-save').click();
 
+    // Node comes back and QoS does not. "Restore defaults" that showed more
+    // than a first visit does would be a button whose label is wrong on
+    // exactly the tables where it matters.
     await expect(header(page, 'Node')).toBeVisible();
+    await expect(header(page, 'QoS')).toHaveCount(0);
+    await expect(page.getByTestId('manage-columns')).toHaveText('Manage columns (7 of 9)');
+  });
+
+  test('the table ships with QoS and Images hidden, and says so', async ({ page }) => {
+    await openPods(page);
+
+    // Nine columns and a row menu do not fit a 1280px window beside the
+    // navigation, so two of them start off. Which two is a judgement; that the
+    // absence is stated rather than discovered is not.
+    await expect(header(page, 'QoS')).toHaveCount(0);
+    await expect(header(page, 'Images')).toHaveCount(0);
+    await expect(header(page, 'Status')).toBeVisible();
+    await expect(header(page, 'Restarts')).toBeVisible();
+    await expect(page.getByTestId('manage-columns')).toHaveText('Manage columns (7 of 9)');
+
+    // A default, not a filter: every row is still on the page.
+    await expect(bodyRows(page)).toHaveCount(4);
+  });
+
+  test('a hidden-by-default column is still searchable and still filterable', async ({ page }) => {
+    await openPods(page);
+
+    // The column is off the screen, not out of the table. A search that stopped
+    // matching an image the moment the column was hidden would turn a display
+    // choice into a silent narrowing of what the page can find.
+    await page.getByPlaceholder('Filter by name, node, image…').fill('payments');
+    await expect(bodyRows(page)).toHaveCount(1);
+
+    await page.getByPlaceholder('Filter by name, node, image…').fill('');
+    await openFilterMenu(page);
+    await page.getByTestId('facet-qos_class-Guaranteed').click();
+    await closeFilterMenu(page);
+    await expect(bodyRows(page)).toHaveCount(1);
+    await expect(page.getByTestId('filter-chip-qos_class-Guaranteed')).toBeVisible();
+  });
+
+  test('showing every column outlives a reload', async ({ page }) => {
+    await openPods(page);
+
+    await page.getByTestId('manage-columns').click();
+    await page.getByTestId('manage-column-qos_class').click();
+    await page.getByTestId('manage-column-containers').click();
+    await page.getByTestId('manage-columns-save').click();
+    await expect(header(page, 'QoS')).toBeVisible();
+
+    await page.reload();
+    await expectPageRendered(page, 'Pods');
+
+    // The bug this guards: with nothing hidden, the stored choice used to be
+    // deleted rather than written, so "show me all of them" read back as
+    // "never asked" and the default put both columns away again — the
+    // operator's own edit, undone by the thing it was overriding.
+    await expect(header(page, 'QoS')).toBeVisible();
+    await expect(header(page, 'Images')).toBeVisible();
     await expect(page.getByTestId('manage-columns')).toHaveText('Manage columns');
   });
 
@@ -348,22 +413,25 @@ test.describe('manage columns', () => {
     await expect(name).toBeDisabled();
   });
 
-  test('a filter on a hidden column keeps filtering, and keeps saying so', async ({ page }) => {
+  test('a filter survives hiding the column it is set on, and keeps saying so', async ({ page }) => {
     await openPods(page);
     await openFilterMenu(page);
-    await page.getByTestId('facet-qos_class-Guaranteed').click();
+    await page.getByTestId('facet-phase-CrashLoopBackOff').click();
     await closeFilterMenu(page);
     await expect(bodyRows(page)).toHaveCount(1);
 
+    // Status rather than QoS, because QoS is hidden before this test starts and
+    // the transition being checked is a visible column going away underneath a
+    // filter that is already set.
     await page.getByTestId('manage-columns').click();
-    await page.getByTestId('manage-column-qos_class').click();
+    await page.getByTestId('manage-column-phase').click();
     await page.getByTestId('manage-columns-save').click();
 
     // The column is gone and the filter is not. Dropping the filter with the
     // column would put rows back on screen without anybody asking; keeping it
     // silently would hide them. The chip is what makes the third option work.
-    await expect(page.getByRole('columnheader', { name: 'QoS', exact: true })).toHaveCount(0);
+    await expect(header(page, 'Status')).toHaveCount(0);
     await expect(bodyRows(page)).toHaveCount(1);
-    await expect(page.getByTestId('filter-chip-qos_class-Guaranteed')).toBeVisible();
+    await expect(page.getByTestId('filter-chip-phase-CrashLoopBackOff')).toBeVisible();
   });
 });

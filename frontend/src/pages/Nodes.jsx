@@ -53,6 +53,18 @@ function readyStatus(node) {
   return 'Unknown';
 }
 
+/**
+ * The column this table starts with hidden.
+ *
+ * Nine columns and a row menu do not fit beside the navigation, and `Taints` is
+ * the one to lose: it is empty on every node in an ordinary cluster, and where
+ * it is not, the node's own page carries the full editor (§24) — including the
+ * part a table cannot show, which is the pods a `NoExecute` taint deletes.
+ * `Version` was the other candidate and stays: during an upgrade it is the
+ * column the whole page is being read for.
+ */
+const DEFAULT_HIDDEN_COLUMNS = ['taints'];
+
 export default function Nodes() {
   const { activeClusterId } = useCluster();
   const navigate = useNavigate();
@@ -228,6 +240,7 @@ export default function Nodes() {
       <DataTable
         ariaLabel="Nodes"
         manageableColumns
+        defaultHiddenColumns={DEFAULT_HIDDEN_COLUMNS}
         columns={columns}
         rows={rows}
         rowKey="name"

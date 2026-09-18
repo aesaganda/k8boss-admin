@@ -52,6 +52,34 @@ import { useAsync, useGates } from './_data';
 import { ChipList, Muted, NoClusterState } from './_parts';
 
 /**
+ * The three columns this table starts with hidden.
+ *
+ * Ten columns and a row menu do not fit beside the navigation, and unlike most
+ * tables here two of these hold URLs — the one thing on this page an operator
+ * came to read. Something had to give way so those two could be wide enough to
+ * read, and these are the two that give way most cheaply: the termination mode
+ * is told in more detail by the Certificates panel directly below this table,
+ * which names the certificate each exposure points at and when it expires, and
+ * an exposure's age is the least diagnostic fact about it — nothing on this
+ * page is answered by "it is 14 days old".
+ *
+ * `Namespace` is the third, and it is the one to argue about: in "All
+ * namespaces" it is a fact you now have to click a row to get. It goes because
+ * the alternatives are worse — see below — and because the masthead already
+ * carries a namespace scope, so the question it answers has another way to be
+ * asked.
+ *
+ * What does NOT ship hidden, and why, since all three are bigger: `Kind`,
+ * because the row is one exposure and which API it is written in decides what
+ * can be changed about it — this module's own heading says it is always
+ * visible; `Goes to`, because "where does it go" is half of what this page is
+ * for; and `Managed by`, because an edit to an object a controller owns
+ * succeeds, reports `applied: true` truthfully, and is reverted seconds later.
+ * That column is the only warning of it anywhere in this console.
+ */
+const DEFAULT_HIDDEN_COLUMNS = ['tls', 'age_seconds', 'namespace'];
+
+/**
  * §9 checks, asked once for the page.
  *
  * The three route kinds are preflighted separately because they are three
@@ -169,6 +197,10 @@ export default function Routes() {
               values={(row.hosts ?? []).map((h) => `${scheme(row)}://${h}${row.path ?? ''}`)}
               hrefFor={(url) => url}
               max={2}
+              // A URL has no break opportunity — not at a dot, not at a slash —
+              // so one hostname was this column's minimum width and this table
+              // was drawn 254px wider than the page it sits in.
+              breakAnywhere
             />
           ) : (
             <NullableCell
@@ -250,7 +282,7 @@ export default function Routes() {
         value: (row) => (row.addresses ?? []).join(' '),
         cell: (row) =>
           (row.addresses ?? []).length ? (
-            <ChipList values={row.addresses} max={1} color="blue" />
+            <ChipList values={row.addresses} max={1} color="blue" breakAnywhere />
           ) : (
             <NullableCell
               value={null}
@@ -416,6 +448,7 @@ export default function Routes() {
       <DataTable
         ariaLabel="Routes"
         manageableColumns
+        defaultHiddenColumns={DEFAULT_HIDDEN_COLUMNS}
         columns={columns}
         rows={rows}
         rowKey="id"

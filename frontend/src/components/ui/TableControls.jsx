@@ -174,7 +174,15 @@ export function FilterChips({ chips, onRemove, onClearAll }) {
  * an operator can change their mind about a five-column edit without undoing it
  * one box at a time. Cancel and Escape both discard.
  */
-export function ManageColumnsDialog({ isOpen, columns, hiddenSet, lockedKey, onSave, onClose }) {
+export function ManageColumnsDialog({
+  isOpen,
+  columns,
+  hiddenSet,
+  defaultHidden = [],
+  lockedKey,
+  onSave,
+  onClose,
+}) {
   const [staged, setStaged] = useState(() => new Set(hiddenSet));
 
   // Re-seeded each time it opens, not on every render: a poll that re-renders
@@ -245,7 +253,11 @@ export function ManageColumnsDialog({ isOpen, columns, hiddenSet, lockedKey, onS
           variant="link"
           isInline
           className="admin-manage-columns__restore"
-          onClick={() => setStaged(new Set())}
+          // The table's own default, not "everything on". On a table that
+          // ships with a column hidden those are different, and a Restore that
+          // showed more than a first visit does would be a button whose label
+          // is wrong on exactly the tables it matters on.
+          onClick={() => setStaged(new Set(defaultHidden))}
           data-testid="manage-columns-restore"
         >
           Restore default columns

@@ -98,6 +98,26 @@ const PHASE_OPTIONS = [
 
 const QOS_OPTIONS = ['Guaranteed', 'Burstable', 'BestEffort'];
 
+/**
+ * The two columns this table starts with hidden.
+ *
+ * Nine columns plus a row menu do not fit a 1280px window beside the navigation
+ * — not because of anything in them, but because ten columns each have a
+ * minimum and ten minimums are wider than the space. Something has to go, and
+ * these two are it: QoS is a scheduling class that does not change and is not
+ * what anyone opens this page to find out, and Images is a reference that is
+ * either identical down the whole column or is read on the pod's own page.
+ * Status, Ready, Restarts and Node — the four an incident is actually about —
+ * stay, and they are wider for it.
+ *
+ * A default and not a filter: every row is still here, every one of them still
+ * matches a search on its image, the QoS facet still filters, and the Manage
+ * columns button says "7 of 9" so the absence is on screen rather than
+ * discovered. One visit to that dialog replaces this for good — see
+ * `columnVisibility.js` on why an empty choice is stored rather than deleted.
+ */
+const DEFAULT_HIDDEN_COLUMNS = ['qos_class', 'containers'];
+
 export default function Pods() {
   const { activeClusterId } = useCluster();
   const { selected: namespace } = useNamespace();
@@ -245,6 +265,7 @@ export default function Pods() {
         ariaLabel="Pods"
         density={density}
         manageableColumns
+        defaultHiddenColumns={DEFAULT_HIDDEN_COLUMNS}
         columns={namespace ? columns.filter((column) => column.key !== 'namespace') : columns}
         rows={rows}
         rowKey={(row) => `${row.namespace}/${row.name}`}

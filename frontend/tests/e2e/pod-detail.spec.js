@@ -78,9 +78,10 @@ test.describe('reaching the pod page', () => {
     await page.goto('/pods');
     await expectPageRendered(page, 'Pods');
 
-    // The QoS cell rather than the name: the name is a link, and this is the
-    // row-click path.
-    await page.getByRole('gridcell', { name: 'Burstable', exact: true }).first().click();
+    // The Namespace cell rather than the name: the name is a link, and this is
+    // the row-click path. Namespace rather than QoS, which this table ships
+    // hidden.
+    await page.getByRole('gridcell', { name: 'prod', exact: true }).first().click();
 
     await expect(page).toHaveURL(new RegExp(`${POD_URL}\\?tab=details$`));
     await expectPageRendered(page, 'checkout-7d9f8b6c4-hk2xv');

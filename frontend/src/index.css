@@ -199,6 +199,87 @@ body {
   cursor: help;
 }
 
+/* ── Table headers ──────────────────────────────────────────────────────── */
+
+/*
+ * A column is never narrower than its own heading.
+ *
+ * PatternFly gives a sortable header cell `min-width: calc(6ch + the cell's two
+ * paddings + the sort indicator's margin)`. Two things are missing from that
+ * sum: the sort icon itself, and the button's own trailing padding — together
+ * about 30px — so a header with a six-character label already overflows the
+ * width reserved for it, and anything longer is cut with an ellipsis. On a
+ * table whose columns hold short values, which is most of them here, every
+ * column sits at exactly that minimum: "Namespace" rendered as "N…", "Schedule"
+ * as "Sche…", and Ready and Restarts were BOTH headed "R…" — two columns, one
+ * label, and no way to tell which count is which.
+ *
+ * Two changes, and the order matters because the first pays for the second.
+ *
+ * 1. Reclaim the chrome. The button carries a negative `margin-inline-start`
+ *    that cancels its own leading padding, so its text lines up with the cell's
+ *    edge — and no matching one at the end, where those 16px are simply lost.
+ *    This adds it, the same way PatternFly does for its nested column headers.
+ *    The gap between the label and its arrow drops from 16px to 8px, which is
+ *    still a gap.
+ * 2. Size the minimum from the label — from its longest WORD, because the rule
+ *    below also lets a heading wrap onto a second line. `--admin-th-label` is
+ *    that length in `ch`, handed down by `DataTable`, which is the only place
+ *    that knows the text. `ch` is the width of a "0" and runs slightly wide of
+ *    this font's average letter, which is the right way to be wrong here.
+ *
+ * Together these left every table in the console narrower than it was, not
+ * wider: the reclaimed 24px a column is more than the labels asked for.
+ */
+.pf-v6-c-table thead th {
+  --pf-v6-c-table--cell--MinWidth: calc(
+    var(--admin-th-label, 0ch) + var(--pf-v6-c-table--cell--PaddingInlineStart) +
+      var(--pf-v6-c-table--cell--PaddingInlineEnd) + var(--admin-th-inset, 0px)
+  );
+  /*
+   * A heading of two words may take two lines. PatternFly holds every header to
+   * one, which turns a label like "Restarts (24h)" into a 49px demand the
+   * Workloads table could not meet without scrolling sideways — and the width
+   * it was asking for was a space. `--admin-th-label` is the longest word, not
+   * the whole label, precisely so this can happen.
+   */
+  --pf-v6-c-table--cell--WhiteSpace: normal;
+}
+
+.pf-v6-c-table thead .pf-v6-c-table__sort {
+  --pf-v6-c-table__sort-indicator--MarginInlineStart: var(--pf-t--global--spacer--sm, 0.5rem);
+  /*
+   * PatternFly's own sum with two corrections: the label's real length in place
+   * of a flat 6ch, and `+ 1rem` for the sort icon — which their formula leaves
+   * out, and which is most of why a six-character heading did not fit the width
+   * reserved for six characters.
+   */
+  --pf-v6-c-table__sort--MinWidth: calc(
+    var(--admin-th-label, 6ch) + var(--pf-v6-c-table--cell--PaddingInlineStart) +
+      var(--pf-v6-c-table--cell--PaddingInlineEnd) + var(--admin-th-inset, 0px) +
+      var(--pf-v6-c-table__sort-indicator--MarginInlineStart) + 1rem
+  );
+}
+
+.pf-v6-c-table thead .pf-v6-c-table__sort .pf-v6-c-table__button {
+  margin-inline-end: calc(var(--pf-v6-c-table__button--PaddingInlineEnd) * -1);
+}
+
+/*
+ * The first and last cells of a row are drawn with the wider page-chrome inset,
+ * and PatternFly applies it to the `padding` directly without updating the
+ * padding *variables* the sums above read — so those sums come out 8px short on
+ * exactly the Name column, which every table has and whose heading being cut is
+ * the least excusable of the lot. This is the difference, added back.
+ */
+.pf-v6-c-table thead th:first-child,
+.pf-v6-c-table thead th:last-child {
+  --admin-th-inset: calc(
+    var(--pf-v6-c-table--cell--first-last-child--PaddingInline, 1.5rem) -
+      var(--pf-v6-c-table--cell--PaddingInlineEnd, 1rem)
+  );
+}
+
 /* ── Resizable table columns ────────────────────────────────────────────── */
 
 /*
@@ -497,6 +578,68 @@ body.admin-resizing * {
      card layout. */
   min-width: 0;
 }
+
+/*
+ * A string with no break opportunity in it may be broken anywhere.
+ *
+ * `anywhere`, not `break-word`, and the difference is the whole point of the
+ * declaration: only `anywhere` is counted when the browser works out a box's
+ * min-content width. An image pinned by digest carries nothing CSS treats as a
+ * break opportunity — not the colon, and there is no slash, hyphen or space in
+ * sixty-four hex characters — so the whole reference became the Images column's
+ * MINIMUM width. An automatic table layout has to honour a column minimum, so
+ * the Pods table was drawn 552px wider than the card holding it and the
+ * Workloads table 64px wider, and the operator read the cluster through a
+ * window they dragged left and right, losing the Name column off the left edge
+ * every time they went to check the Age on the right. Both densities did it:
+ * clamping drops the lines after the first, it does not make the longest word
+ * any narrower.
+ *
+ * Applied by the cell to one kind of string rather than by this stylesheet to
+ * every cell, which was tried first and was worse. On everything, `anywhere`
+ * collapses EVERY column's minimum to one character, so the layout stops
+ * honouring the width of a word and shares the row out by longest content
+ * instead: `checkout:1.9.2` was split after the first dot, "BestEffort" was
+ * broken as "BestEff/ort", and Ready and Restarts both ended up headed "R…" —
+ * two columns, one label, no way to tell them apart. Prose and tags already
+ * break at their own spaces, dots and hyphens; taking that width away from them
+ * bought nothing.
+ */
+.admin-break-anywhere,
+.admin-break-anywhere .pf-v6-c-label__text {
+  overflow-wrap: anywhere;
+}
+
+/*
+ * A PatternFly Label holds its text to one line and cuts it with an ellipsis,
+ * so `overflow-wrap` never gets a say — `white-space: nowrap` decides first.
+ * That is the right default for a chip holding a word and the wrong one for a
+ * chip holding `https://checkout.apps.example.com/`: the Routes table's two
+ * address columns wanted 429px between them and the page was drawn 254px too
+ * wide.
+ *
+ * Wrapped rather than clipped, which is the same choice made everywhere else in
+ * this console: a hostname cut to "https://checkout.apps.ex…" is a value an
+ * operator cannot read, cannot copy and cannot check against DNS, and the chip
+ * carries no tooltip to recover it from. Two lines of pill is not elegant; a
+ * hostname the console will not show is worse.
+ */
+.admin-break-anywhere .pf-v6-c-label__text {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  /*
+   * And a floor, because `anywhere` alone takes the column's minimum down to a
+   * single character — after which the table layout, which shares width out by
+   * longest content, gives this column almost none of it. Without this the
+   * Routes address columns came out 4px wide and a hostname was drawn four
+   * characters to a line. The floor is in `ch` so it tracks the font rather
+   * than a pixel count that is right on one machine.
+   */
+  min-width: 12ch;
+}
+
+
 
 /*
  * One line per row, and what does not fit ends in an ellipsis.

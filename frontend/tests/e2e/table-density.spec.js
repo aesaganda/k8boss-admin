@@ -101,7 +101,26 @@ async function rowHeight(page, table) {
   return (await row.boundingBox()).height;
 }
 
+/**
+ * The Workloads table ships with Schedule and Images hidden so that nine
+ * columns fit beside the navigation. These tests are about the Images column —
+ * it is the widest cell with inline content, which is what makes it the one
+ * worth measuring — so they put it back the way an operator would, by storing
+ * what the Manage columns dialog stores.
+ */
+async function showEveryColumn(page) {
+  await page.addInitScript(() => {
+    try {
+      window.localStorage.setItem('k8boss-admin.columns.Workloads', '[]');
+    } catch {
+      // Storage refused. The table falls back to its defaults and the
+      // assertions below say so, rather than this helper throwing here.
+    }
+  });
+}
+
 async function openWorkloads(page, options = {}) {
+  await showEveryColumn(page);
   await mockApi(page, { workloads: LONG_WORKLOADS, ...options });
   await page.goto('/workloads');
   await expectPageRendered(page, 'Workloads');

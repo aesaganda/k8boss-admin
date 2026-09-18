@@ -25,6 +25,11 @@
  *   modifier    Th/Td text modifier, e.g. 'truncate', 'nowrap', 'breakWord'
  *   searchable  set false to keep a column out of `filterText` matching
  *
+ * `manageableColumns` puts the Manage columns dialog on the table, and
+ * `defaultHiddenColumns` says which keys a browser that has never opened it
+ * starts with hidden — a default, never a filter: the rows are all there and
+ * the dialog names what is missing. See `columnVisibility.js`.
+ *
  * Columns are resizable from their header. Every column but the trailing one
  * carries a drag handle at its inline-end edge; the width it is dragged to is
  * remembered per table in localStorage and survives a reload and every poll.
@@ -68,6 +73,13 @@ import { sortBy as sortRows } from '../../utils/format';
 
 const SKELETON_ROWS = 5;
 
+/** Characters in the longest whitespace-separated run of a heading. */
+function longestWord(text) {
+  return String(text ?? '')
+    .split(/\s+/)
+    .reduce((longest, word) => Math.max(longest, word.length), 0);
+}
+
 function defaultValue(column, row) {
   if (typeof column.value === 'function') return column.value(row);
   return row?.[column.key];
@@ -110,6 +122,7 @@ export function DataTable({
   tableId,
   resizableColumns = true,
   manageableColumns = false,
+  defaultHiddenColumns,
   density = 'comfy',
   variant = 'compact',
   isStickyHeader = true,
@@ -160,6 +173,7 @@ export function DataTable({
     tableId: tableId ?? ariaLabel,
     columns: declaredColumns,
     enabled: manageableColumns,
+    defaultHidden: defaultHiddenColumns,
   });
   const [columnsDialogOpen, setColumnsDialogOpen] = useState(false);
 
@@ -307,6 +321,19 @@ export function DataTable({
           return (
             <Th
               key={columnId}
+              // The longest WORD of the label, in `ch`, for the minimum width
+              // the stylesheet computes from it. PatternFly's own minimum for a
+              // sortable header is a flat 6ch and does not count the sort icon
+              // or the button's trailing padding, so "Namespace" rendered as
+              // "N…" and Ready and Restarts were both headed "R…" — two
+              // columns, one label, no way to tell them apart.
+              //
+              // The longest word rather than the whole label, because the
+              // stylesheet lets a heading wrap: "Restarts (24h)" demanding one
+              // unbroken line cost 49px that the Workloads table did not have,
+              // and it reads perfectly well on two. Measured here rather than
+              // in CSS because only this component knows the text.
+              style={{ '--admin-th-label': `${longestWord(columnName)}ch` }}
               // The ref is what a drag measures the column from, so it is only
               // wanted on the columns that can be dragged.
               ref={resizable ? headerRef(columnId) : undefined}
@@ -542,6 +569,7 @@ export function DataTable({
           isOpen
           columns={declaredColumns}
           hiddenSet={hiddenSet}
+          defaultHidden={defaultHiddenColumns}
           lockedKey={lockedKey}
           onClose={() => setColumnsDialogOpen(false)}
           onSave={(hidden) => {
