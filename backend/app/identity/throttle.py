@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import datetime
 import logging
+import random
 
 from sqlalchemy import delete, func, select
 
@@ -108,7 +109,13 @@ def reserve(actor: str) -> int | None:
         db.commit()
 
         count = _count(db, actor)
-        if count % _PRUNE_EVERY == 0:
+        # Sampled across reservations, not keyed to this actor's streak. The
+        # trigger used to be `count % _PRUNE_EVERY == 0`, which only ever fires
+        # for an actor who already has rows in the window — and the attacker
+        # this table exists to measure sweeps a *different* username every
+        # attempt, so every count stayed at 1, the prune never ran, and the
+        # table grew without bound on an unauthenticated endpoint.
+        if random.randrange(_PRUNE_EVERY) == 0:
             _prune(db)
         return count
     except Exception:  # noqa: BLE001 - see the module docstring

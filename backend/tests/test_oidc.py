@@ -780,3 +780,40 @@ def test_a_provider_failure_is_recorded_as_failed_not_denied(client, monkeypatch
 def _no_session(response) -> bool:
     """True when the response did not hand out a console session."""
     return settings.auth_cookie_name not in response.cookies
+
+
+def test_a_non_ascii_state_is_refused_rather_than_becoming_a_server_error(
+    client, issuer
+):
+    """`compare_digest` raises TypeError on a `str` that is not pure ASCII.
+
+    `state` is the caller's to write. Before the comparison was made on bytes,
+    one non-ASCII character in it turned this audited refusal into a 500
+    rendered outside the error handlers — an attacker trading a recorded
+    security event for an unrecorded one.
+    """
+    start_handshake(client)
+
+    response = callback(client, "not-the-state-we-issued-ü")
+
+    assert "state_mismatch" in response.headers["location"]
+    assert _no_session(response)
+    denied = [
+        r for r in recorder.query(category="console")["items"]
+        if r["verb"] == "login" and r["outcome"] == "denied"
+    ]
+    assert len(denied) == 1
+
+
+def test_a_non_ascii_nonce_is_refused_rather_than_becoming_a_server_error(
+    client, issuer, signing_key
+):
+    """The same trap on the same comparison: the `nonce` claim is the token
+    author's, so a replayed token can carry whatever bytes suit it."""
+    state, _ = start_handshake(client)
+    issuer["token_response"] = {"id_token": mint(signing_key, nonce="a-nonce-ü")}
+
+    response = callback(client, state)
+
+    assert "auth_error=" in response.headers["location"]
+    assert _no_session(response)

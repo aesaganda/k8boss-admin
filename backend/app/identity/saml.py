@@ -52,8 +52,14 @@ also produces an identity from it.
   outright: they carry no ``InResponseTo``, so nothing binds them to anything,
   and accepting them means accepting an assertion anyone can replay into anyone
   else's browser.
-* **``Recipient`` and ``Destination``**, against this console's ACS URL. An
-  assertion addressed to another endpoint was not meant for this one.
+* **``Recipient``**, against this console's ACS URL, and **required** rather
+  than checked when it happens to be there. An assertion addressed to another
+  endpoint was not meant for this one, and the party replaying it here can omit
+  the attribute — so a check that only ran when it was present checked nothing
+  in the one case it exists for. The response wrapper's ``Destination`` is not
+  checked: on the assertion-signed shape (Shibboleth, Keycloak, Okta) it sits
+  outside the signature, so it is a value the replayer writes, and a check
+  against it would read as protection without being any.
 * **``NotBefore`` / ``NotOnOrAfter``**, on both the conditions and the subject
   confirmation, with configurable leeway. An assertion with no expiry that
   verifies is a permanent credential.
@@ -491,10 +497,22 @@ def validate_assertion(assertion, *, request_id: str, acs_url: str) -> None:
             # Unsolicited, IdP-initiated. Refused: nothing binds it to a browser,
             # so it can be replayed into anybody's.
             continue
-        if not secrets.compare_digest(in_response_to, request_id):
+        # Compared as bytes. `compare_digest` refuses a `str` carrying any
+        # non-ASCII character, and the TypeError would escape as a 500 rather
+        # than the audited refusal a replay is supposed to produce: the
+        # attribute is the replayer's to write, so one non-ASCII character
+        # would buy them an unrecorded server error instead.
+        if not secrets.compare_digest(in_response_to.encode(), request_id.encode()):
             continue
         recipient = (data.get("Recipient") or "").strip()
-        if recipient and recipient != acs_url:
+        if recipient != acs_url:
+            # Required, not checked-when-present. An assertion replayed at a
+            # different service provider's endpoint is one somebody copied, and
+            # the attribute that catches it is one they can simply leave out —
+            # so validating it only when it happened to be there validated
+            # nothing in the single case the check exists for. SAML core makes
+            # it mandatory on bearer confirmation data, so no conforming IdP
+            # loses a sign-in to this.
             continue
         try:
             _check_window(
