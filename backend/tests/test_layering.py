@@ -1,5 +1,5 @@
 """
-Which layer may import which.
+Which layer may import which, and which routes may change something.
 
 `docs/architecture.md` states the direction and CLAUDE.md's subsystem map
 repeats it: `admin/` is **every write** and may use `resources/` and
@@ -12,6 +12,12 @@ That is not hypothetical. `app/services/pods.py` imported `read_object` from
 `app/admin/apply.py` for exactly as long as this test did not exist. The
 function was misfiled rather than misused — a read helper living in the write
 module — and the fix was to move it, not to route around it.
+
+The last two tests here read the same tree for a different property: not where
+a write lives, but whether every route that changes something is gated at all.
+Same reason for reading the source rather than the behaviour — the endpoint
+that was missing its gate returned the right shape, the right status, and
+nothing that could fail.
 """
 
 from __future__ import annotations
@@ -140,3 +146,212 @@ def test_the_transport_is_not_owned_by_the_write_layer():
     assert "app.admin" not in {
         module for module in _imports(APP / "resources" / "transport.py")
     }
+
+
+# --------------------------------------------------------------------------- #
+# Who may change something
+# --------------------------------------------------------------------------- #
+
+#: The dependencies from `app.identity.dependencies` that decide a *role*.
+#:
+#: Matched by name rather than by substring on purpose: `app.admin.mutate`
+#: exports `require_open`, which gates on `ADMIN_ALLOW_MUTATIONS` and says
+#: nothing about who is calling. A substring rule would read that as a role
+#: check and wave through the exact class of endpoint this test exists to catch.
+ROLE_DEPENDENCIES = {"require_admin", "require_console_admin"}
+
+#: State-changing routes that are neither funnelled nor role-gated, and why
+#: each one is allowed to be. `(module, handler)` → the reason.
+#:
+#: **Every entry is a decision, not an observation.** If a route you just wrote
+#: fails the test below, the answer is a gate or a funnel call — adding a line
+#: here because the test is red turns it into a list of everything that exists,
+#: which is a test that can never fail again.
+UNGATED_BY_DESIGN = {
+    ("auth.py", "login"): (
+        "establishes the identity every other gate reads. A role dependency here "
+        "is a deadlock: nobody could ever acquire the role. Throttled by "
+        "app.identity.throttle and recorded in the trail like a cluster write"
+    ),
+    ("auth.py", "logout"): (
+        "ends the caller's own session and can touch nobody else's — the session "
+        "cookie is the whole input"
+    ),
+    ("auth.py", "saml_acs"): (
+        "the identity provider POSTs the assertion here, unauthenticated by "
+        "definition. What it trusts is the signature on the assertion, checked in "
+        "app.identity.saml — not a console role the browser does not have yet"
+    ),
+    ("quota.py", "preview_quota"): (
+        "arithmetic, not admission (§29). POST carries a pod spec too large for a "
+        "query string; `advise()` reads and returns a verdict, and writes nothing "
+        "to a cluster or to this console"
+    ),
+    ("access.py", "post_preflight"): (
+        "§9 is a question about permissions, not a use of them. "
+        "SelfSubjectAccessReview asks about the caller's own access"
+    ),
+    ("access.py", "post_subject_review"): (
+        "§23 asks the API server what another subject may do and takes no action "
+        "as them. Privileged enough to audit, which it does — one row per request "
+        "naming who asked about whom — but still a read"
+    ),
+    ("clusters.py", "test_cluster"): (
+        "stamps the outcome of a connection the registered row already describes: "
+        "`status`, `server_version`, `last_connected`. Every field written is "
+        "derived from that round trip rather than from the caller, so unlike the "
+        "three CRUD endpoints beside it there is no input that could re-point a "
+        "cluster or retarget its stored token"
+    ),
+}
+
+
+def _admin_modules_reaching_the_funnel() -> set[str]:
+    """Which `app/admin/*.py` stems end at `mutate()`, directly or via a sibling.
+
+    Importing *something* from `app.admin` is not the property worth asserting:
+    `preflight` and `access_review` live there and are explicitly not writes, so
+    a handler that called one of them would otherwise look funnelled. The
+    reachable set is computed instead, so `routes`, `portal`, `olm` and
+    `namespace_delete` — which reach `mutate` through `app.admin.apply` — count,
+    and the two authorization modules do not.
+    """
+    calls: dict[str, bool] = {}
+    siblings: dict[str, set[str]] = {}
+    for path in sorted((APP / "admin").glob("*.py")):
+        stem = path.stem
+        tree = ast.parse(path.read_text())
+        calls[stem] = any(
+            isinstance(node, ast.Call)
+            and (
+                (isinstance(node.func, ast.Name) and node.func.id == "mutate")
+                or (isinstance(node.func, ast.Attribute) and node.func.attr == "mutate")
+            )
+            for node in ast.walk(tree)
+        )
+        siblings[stem] = {
+            alias.name if node.module == "app.admin" else node.module.split(".")[2]
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom)
+            and node.module
+            and (node.module == "app.admin" or node.module.startswith("app.admin."))
+            for alias in node.names
+        }
+
+    # `mutate` is seeded rather than detected: `mutate.py` defines the funnel and
+    # has no reason to call it, so the call scan alone would leave the one module
+    # that *is* the answer out of the set of modules that reach it.
+    reaching = {"mutate"} | {stem for stem, hit in calls.items() if hit}
+    while True:
+        grown = reaching | {
+            stem for stem, imported in siblings.items() if imported & reaching
+        }
+        if grown == reaching:
+            return reaching
+        reaching = grown
+
+
+def _admin_bindings(tree: ast.Module) -> dict[str, str]:
+    """Local name → the `app/admin/` module stem it came from.
+
+    Covers both spellings in use: `from app.admin import routes as routes_admin`
+    binds the module, `from app.admin.scale import scale_workload` binds a
+    function out of it.
+    """
+    bound: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom) or not node.module:
+            continue
+        if node.module == "app.admin":
+            for alias in node.names:
+                bound[alias.asname or alias.name] = alias.name
+        elif node.module.startswith("app.admin."):
+            for alias in node.names:
+                bound[alias.asname or alias.name] = node.module.split(".")[2]
+    return bound
+
+
+def _state_changing_routes():
+    """Every POST/PUT/PATCH/DELETE handler in `app/api/`, with how it is gated.
+
+    Yields `(module, handler, method, route_source, admin_stems, role_deps)`.
+    The route is kept as written rather than evaluated — several are built from
+    a module-level prefix constant — because it is only ever shown to a human
+    reading a failure.
+    """
+    for path in sorted((APP / "api").glob("*.py")):
+        tree = ast.parse(path.read_text())
+        bound = _admin_bindings(tree)
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for dec in node.decorator_list:
+                if not isinstance(dec, ast.Call) or not isinstance(dec.func, ast.Attribute):
+                    continue
+                if dec.func.attr not in {"post", "put", "patch", "delete"}:
+                    continue
+                names = {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
+                # Both places a dependency can be declared: in the decorator's
+                # `dependencies=[...]`, and as a `Depends()` default on a
+                # parameter. The funnel-backed endpoints use neither, so missing
+                # one would not show up as a pass — it would show up here.
+                declared = set(names)
+                for kw in dec.keywords:
+                    if kw.arg == "dependencies":
+                        declared |= {
+                            n.id for n in ast.walk(kw.value) if isinstance(n, ast.Name)
+                        }
+                yield (
+                    path.name,
+                    node.name,
+                    dec.func.attr.upper(),
+                    ast.unparse(dec.args[0]) if dec.args else "?",
+                    {bound[name] for name in names if name in bound},
+                    declared & ROLE_DEPENDENCIES,
+                )
+
+
+def test_every_state_changing_route_is_funnelled_or_role_gated():
+    """A write reaches `mutate()` or it names the role allowed to make it.
+
+    Cluster create/update/delete carried neither. Any signed-in user could PUT a
+    new `api_server` onto a registered cluster while omitting `token` — which
+    keeps the stored credential, exactly as `ClusterUpdate` promises — and the
+    next request handed that cluster's real bearer token to a host the caller
+    picked. It is fixed, and nothing in this suite would have noticed a fourth
+    endpoint arriving beside those three without the gate: same envelope, same
+    status, no failing test, and the damage is silent.
+
+    Two ways to be safe, because there are two kinds of write here. A cluster
+    write goes through `app/admin/`, where §0.2's preflight decides against the
+    operator's own RBAC. A write to *this console's* database — registrations,
+    users — has no cluster RBAC to consult, so it has to say out loud which role
+    may perform it.
+    """
+    funnel = _admin_modules_reaching_the_funnel()
+
+    ungated = {}
+    for module, handler, method, route, stems, roles in _state_changing_routes():
+        if stems & funnel or roles:
+            continue
+        if (module, handler) in UNGATED_BY_DESIGN:
+            continue
+        ungated[f"{module}::{handler}"] = f"{method} {route}"
+
+    assert ungated == {}, (
+        "these routes change state and are neither routed through app/admin/ nor "
+        f"gated on a role: {ungated}. Add the gate, or — if it genuinely needs "
+        "neither — add it to UNGATED_BY_DESIGN with the reason"
+    )
+
+
+def test_the_exemptions_still_name_routes_that_exist():
+    """An allowlist nobody prunes is how one grows into a list of everything.
+
+    A stale entry is worse than a missing one: it silently pre-approves whatever
+    handler later takes that name back.
+    """
+    live = {(module, handler) for module, handler, *_ in _state_changing_routes()}
+    stale = sorted(entry for entry in UNGATED_BY_DESIGN if entry not in live)
+
+    assert stale == [], f"UNGATED_BY_DESIGN names routes that are gone: {stale}"
