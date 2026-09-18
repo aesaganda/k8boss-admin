@@ -342,6 +342,49 @@ def test_reveal_is_refused_when_the_deployment_has_not_opted_in(
     assert "SECRET_REVEAL_ENABLED" in response.json()["hint"]
 
 
+def test_a_reveal_refused_by_the_switch_is_recorded_as_the_deployment_refusing(
+    client, fake_k8s, api_server,
+):
+    """Otherwise the trail holds reveals that worked and reveals that were denied,
+    and nothing at all for somebody asking for production Secret values while the
+    feature was switched off — which is what probing looks like."""
+    api_server({"/api/v1/namespaces/prod/secrets/db": _secret()})
+
+    response = client.get("/api/resources/core/v1/secrets/db?namespace=prod&reveal=true")
+
+    assert response.status_code == 403
+    (row,) = audit_rows()
+    assert row["outcome"] == "failed", "the deployment refused, not an authorizer"
+    assert row["detail"] == (
+        "Secret values requested while SECRET_REVEAL_ENABLED is false"
+    )
+    assert SECRET_VALUE not in str(row), "the audit trail is not a copy of the Secret"
+
+
+def test_a_reveal_whose_access_review_could_not_be_decided_is_not_recorded_as_denied(
+    client, fake_k8s, api_server, monkeypatch,
+):
+    """`allowed: false` with an evaluation error is "we could not find out". A row
+    calling that a denial reports a permissions decision nobody made, and sends
+    whoever reads it to widen a ClusterRole that was already correct."""
+    monkeypatch.setattr(settings, "secret_reveal_enabled", True)
+    api_server({"/api/v1/namespaces/prod/secrets/db": _secret()})
+    fake_k8s.authorization_v1.returns("create_self_subject_access_review", obj(
+        status=obj(allowed=False, reason=None, denied=False,
+                   evaluation_error="the authorization webhook timed out"),
+    ))
+
+    response = client.get("/api/resources/core/v1/secrets/db?namespace=prod&reveal=true")
+
+    assert response.status_code == 502
+    assert SECRET_B64 not in response.text
+    (row,) = audit_rows()
+    assert row["outcome"] == "failed"
+    assert row["detail"] == (
+        "Secret values requested; the access review could not be decided"
+    )
+
+
 def test_a_reveal_the_operator_may_not_perform_is_refused_and_recorded(
     client, fake_k8s, api_server, monkeypatch,
 ):
