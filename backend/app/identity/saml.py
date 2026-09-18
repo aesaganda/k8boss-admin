@@ -106,6 +106,7 @@ from app.errors import Invalid, PermissionDenied
 from app.identity import handshake as handshake_service
 from app.identity import sso
 from app.identity.sso import Begin, FederatedIdentity
+from app.identity import provider_config
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +119,16 @@ BINDING = "form"
 #: administrator registers, and a console that called its endpoint something else
 #: would be asking them to mistype it into a form they fill in once.
 CALLBACK_SUFFIX = "acs"
+
+def _cfg() -> provider_config.ProviderConfig:
+    """This deployment's saml configuration: the stored row, else the environment.
+
+    Resolved per call rather than held, because a cached provider configuration
+    outlives the edit that changed it — see :mod:`app.identity.provider_store`
+    on why nothing there is cached.
+    """
+    return provider_config.resolve(NAME)
+
 
 SAML_NS = "urn:oasis:names:tc:SAML:2.0:assertion"
 SAMLP_NS = "urn:oasis:names:tc:SAML:2.0:protocol"
@@ -144,20 +155,22 @@ def enabled() -> bool:
     broken identity provider. Withholding the button instead is the same rule the
     other three providers follow for a missing client id.
     """
+    cfg = _cfg()
     return bool(
-        settings.saml_enabled
-        and settings.saml_idp_sso_url.strip()
-        and settings.saml_idp_certificate.strip()
+        cfg.enabled
+        and cfg.idp_sso_url.strip()
+        and cfg.idp_certificate.strip()
         and settings.auth_cookie_secure
     )
 
 
 def require_enabled() -> None:
+    cfg = _cfg()
     if not enabled():
         if (
-            settings.saml_enabled
-            and settings.saml_idp_sso_url.strip()
-            and settings.saml_idp_certificate.strip()
+            cfg.enabled
+            and cfg.idp_sso_url.strip()
+            and cfg.idp_certificate.strip()
             and not settings.auth_cookie_secure
         ):
             # Named separately, because "not configured" would send an
@@ -173,21 +186,25 @@ def require_enabled() -> None:
             )
         raise sso.not_configured(
             NAME,
-            "Set SAML_ENABLED, SAML_IDP_SSO_URL and SAML_IDP_CERTIFICATE, then "
-            "restart the console.",
+            provider_config.configure_hint(
+                cfg, "SAML_ENABLED, SAML_IDP_SSO_URL and SAML_IDP_CERTIFICATE"
+            ),
         )
 
 
 def label() -> str:
-    return settings.saml_button_label
+    cfg = _cfg()
+    return cfg.button_label
 
 
 def admin_group() -> str:
-    return settings.saml_admin_group
+    cfg = _cfg()
+    return cfg.admin_group
 
 
 def configured_callback_url() -> str:
-    return settings.saml_acs_url.strip()
+    cfg = _cfg()
+    return cfg.acs_url.strip()
 
 
 def entity_id(*, acs_url: str) -> str:
@@ -200,7 +217,8 @@ def entity_id(*, acs_url: str) -> str:
     otherwise every assertion is refused for an audience mismatch, which is the
     correct refusal for the wrong reason.
     """
-    return settings.saml_sp_entity_id.strip() or acs_url
+    cfg = _cfg()
+    return cfg.sp_entity_id.strip() or acs_url
 
 
 def certificates() -> list[str]:
@@ -215,7 +233,8 @@ def certificates() -> list[str]:
     publishes two and signs with either, so accepting a list is what makes the
     rotation a config change rather than a window in which every sign-in fails.
     """
-    raw = settings.saml_idp_certificate.strip()
+    cfg = _cfg()
+    raw = cfg.idp_certificate.strip()
     if not raw:
         return []
     if "-----BEGIN CERTIFICATE-----" in raw:
@@ -409,7 +428,8 @@ def _check_window(
     reject every assertion — a symptom that reads as a broken identity provider
     and sends nobody to look at NTP.
     """
-    leeway = datetime.timedelta(seconds=settings.saml_clock_skew_seconds)
+    cfg = _cfg()
+    leeway = datetime.timedelta(seconds=cfg.clock_skew_seconds)
 
     if not_before:
         start = _instant(not_before)
@@ -437,11 +457,12 @@ def validate_assertion(assertion, *, request_id: str, acs_url: str) -> None:
     anything else makes every check below a check on a document the identity
     provider never vouched for.
     """
+    cfg = _cfg()
     now = datetime.datetime.now(datetime.timezone.utc)
 
     issuer = assertion.find("saml:Issuer", _NS)
     stated = (issuer.text or "").strip() if issuer is not None else ""
-    expected_issuer = settings.saml_idp_entity_id.strip()
+    expected_issuer = cfg.idp_entity_id.strip()
     if expected_issuer and stated != expected_issuer:
         # A certificate this console trusts must not be able to assert an
         # identity for a different issuer. On a shared IdP platform that is the
@@ -572,11 +593,12 @@ def attributes(assertion) -> dict[str, list[str]]:
 
 def identity_from_assertion(assertion) -> FederatedIdentity:
     """Reduce a *verified* assertion to the identity this console stores."""
+    cfg = _cfg()
     values = attributes(assertion)
     name_id = assertion.find("saml:Subject/saml:NameID", _NS)
     subject = (name_id.text or "").strip() if name_id is not None else ""
 
-    configured_username = settings.saml_username_attribute.strip()
+    configured_username = cfg.username_attribute.strip()
     if configured_username:
         username = next(iter(values.get(configured_username, [])), "") or subject
     else:
@@ -597,12 +619,12 @@ def identity_from_assertion(assertion) -> FederatedIdentity:
         # second person arriving under a recycled name.
         subject = username
 
-    email = next(iter(values.get(settings.saml_email_attribute.strip(), [])), None)
+    email = next(iter(values.get(cfg.email_attribute.strip(), [])), None)
     display = next(
-        iter(values.get(settings.saml_display_name_attribute.strip(), [])), None
+        iter(values.get(cfg.display_name_attribute.strip(), [])), None
     )
 
-    groups_attribute = settings.saml_groups_attribute.strip()
+    groups_attribute = cfg.groups_attribute.strip()
     # Absent stays absent: an assertion with no groups attribute is "the IdP did
     # not tell us", which must not demote an administrator, and it is a different
     # fact from an attribute present with no values.
@@ -619,12 +641,13 @@ def identity_from_assertion(assertion) -> FederatedIdentity:
 
 
 def check_group_allowlist(identity: FederatedIdentity) -> None:
+    cfg = _cfg()
     sso.check_group_allowlist(
         identity,
-        allowed=settings.saml_allowed_groups,
+        allowed=cfg.allowed_groups,
         provider=NAME,
         source_hint=(
-            f"The assertion carried no {settings.saml_groups_attribute!r} "
+            f"The assertion carried no {cfg.groups_attribute!r} "
             "attribute. Release the group attribute for this service provider, "
             "or clear SAML_ALLOWED_GROUPS."
         ),
@@ -641,13 +664,14 @@ def authn_request(*, acs_url: str, request_id: str, issued_at: str) -> str:
 
     Not signed: see the module docstring.
     """
+    cfg = _cfg()
     return (
         '<samlp:AuthnRequest '
         f'xmlns:samlp="{SAMLP_NS}" xmlns:saml="{SAML_NS}" '
         f'ID="{request_id}" Version="2.0" IssueInstant="{issued_at}" '
         'ProtocolBinding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST" '
         f'AssertionConsumerServiceURL="{acs_url}" '
-        f'Destination="{settings.saml_idp_sso_url.strip()}">'
+        f'Destination="{cfg.idp_sso_url.strip()}">'
         f'<saml:Issuer>{entity_id(acs_url=acs_url)}</saml:Issuer>'
         '</samlp:AuthnRequest>'
     )
@@ -665,6 +689,7 @@ def redirect_url(*, acs_url: str, request_id: str) -> str:
     because several IdPs publish an SSO endpoint with a tenant parameter already
     in it and ``?SAMLRequest=`` after that is not a parameter at all.
     """
+    cfg = _cfg()
     issued_at = (
         datetime.datetime.now(datetime.timezone.utc)
         .replace(microsecond=0)
@@ -678,7 +703,7 @@ def redirect_url(*, acs_url: str, request_id: str) -> str:
     deflated = compressor.compress(document.encode("utf-8")) + compressor.flush()
     encoded = base64.b64encode(deflated).decode("ascii")
 
-    base = settings.saml_idp_sso_url.strip()
+    base = cfg.idp_sso_url.strip()
     separator = "&" if "?" in base else "?"
     return f"{base}{separator}{urlencode({'SAMLRequest': encoded})}"
 

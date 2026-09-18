@@ -1,130 +1,208 @@
 """
-Which sign-in methods this deployment is configured with, as data.
+What sign-in methods this deployment has, where each one points, and where it
+was configured — as data an administrator can read and edit (§12.8, ADR-0011).
 
-§12.8. The Users page shows the accounts that exist; this answers the question
-that page raises and cannot answer by itself — *how* can anybody sign in here,
-and which group made this person an administrator. Both were previously only
-visible by reading the container's environment, which is not where an operator
-looking at a console user is.
+The Users page shows the accounts that exist; this answers the question that
+page raises and cannot: *how can anybody sign in here, and which group made
+this person an administrator.* Before ADR-0011 the only place those answers
+lived was the container's environment, which is not where somebody looking at a
+console user is.
 
-**Read-only, and that is the feature rather than a shortcut.** Every provider is
-configured from the environment (§12.4), one of each kind per deployment, and
-the contract says out loud that several concurrent providers of the same kind is
-a design change — a table, a CRUD surface, per-row encrypted secrets and a
-subject-collision story across issuers — and not something this console
-half-does. An Edit button here would be a button that cannot write: the values
-live in the process environment, a console that offered to change them would be
-offering to change a copy, and "saved" would be the confidently wrong answer
-this project is built against. What the panel does instead is name the variable
-to change, so the operator ends up in the right place.
+## Three states, not two
 
-**Not public.** Everything here is precisely what ``GET /api/auth/config``
-withholds — an issuer, an API server address, a directory URL, the configured
-groups — because that endpoint is the one unauthenticated route in the API and
-returning them there would let anyone who can reach the console enumerate its
-identity infrastructure. The route in front of this module requires the ``admin``
-console role for the same reason §12.6 does.
+A card here reports ``enabled`` — what an operator switched on — and ``usable``
+— whether a sign-in through it can actually complete. They are different
+questions and collapsing them is a lie in one direction or the other:
+
+* enabled and usable: the login page offers it.
+* enabled and **not** usable: a required value is missing. The login page
+  withholds the button (a button that leads to an error reads as a broken
+  console rather than an unconfigured one), so without this distinction the
+  screen would say "enabled" while nothing appeared on the login page and
+  nothing anywhere explained the gap. ``missing`` names the fields.
+* not enabled: switched off, whatever else is filled in.
+
+``usable`` is not recomputed here. It is each provider module's own
+``enabled()``, so the panel and the login page's buttons cannot disagree — one
+rule, one place.
+
+## What is never returned
+
+Secret values. A row reports which of its secret fields **have** something
+stored (``secrets_stored``) and whether the stored blob can still be decrypted
+(``secrets_unreadable``), and never the values themselves — not even to an
+administrator, because a screen that can display a bind password is a screen
+that puts one in a browser cache and a screenshot.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from app.config import settings
-from app.identity import sso
+from sqlalchemy.orm import Session
 
-#: Where each single sign-on provider points, per provider name.
-#:
-#: A mapping here rather than an ``endpoint()`` member on the provider modules:
-#: the registry in :mod:`app.identity.sso` is the interface the *routes* drive,
-#: and a sign-in flow does not need to know how to describe itself. Adding a
-#: member for a panel would make every future provider implement a display
-#: accessor before it could authenticate anybody.
-#:
-#: The cost is that a fifth provider can be registered and missing from here,
-#: which would render as a provider pointing nowhere. ``tests/test_sessions.py``
-#: asserts the two stay in step, so that is caught by a red test rather than by
-#: an operator reading a hole.
-_SSO_ENDPOINTS = {
-    "oidc": lambda: settings.oidc_issuer,
-    "oauth": lambda: settings.oauth_authorization_url,
-    "openshift": lambda: settings.openshift_api_url,
-    "saml": lambda: settings.saml_idp_sso_url,
-}
+from app.identity import provider_config, provider_store, sso
 
-#: The environment prefix that configures each method, quoted to the operator.
-_SETTINGS_PREFIXES = {
-    "local": "AUTH_",
-    "ldap": "LDAP_",
-    "oidc": "OIDC_",
-    "oauth": "OAUTH_",
-    "openshift": "OPENSHIFT_",
-    "saml": "SAML_",
-}
+#: The label the console gives its own password table. Not a provider: nobody
+#: configures it and it cannot be switched off.
+LOCAL_LABEL = "Local accounts"
 
 
-def _text(value: str | None) -> str | None:
+def _usable(kind: str, cfg: provider_config.ProviderConfig) -> bool:
+    """Whether a sign-in through this kind can complete right now.
+
+    Delegated to the provider module for the four single sign-on kinds, which is
+    the whole point: ``enabled()`` is what the login page consults, so asking it
+    here means the two can never disagree. LDAP has no registry entry — it has
+    no handshake and no callback — and its condition is the fields its
+    search-and-bind actually needs.
+    """
+    module = sso.get(kind)
+    if module is not None:
+        return bool(module.enabled())
+    return bool(
+        cfg.enabled
+        and str(cfg.url).strip()
+        and str(cfg.user_search_base).strip()
+        and "{username}" in str(cfg.user_search_filter)
+    )
+
+
+def _missing(kind: str, cfg: provider_config.ProviderConfig) -> list[str]:
+    """Required fields with nothing in them, so "incomplete" can say which."""
+    return [
+        field.name
+        for field in provider_config.spec(kind).fields
+        if field.required and not str(cfg.values.get(field.name, "")).strip()
+    ]
+
+
+def _describe(
+    kind: str, row: Any | None, cfg: provider_config.ProviderConfig
+) -> dict[str, Any]:
+    spec = provider_config.spec(kind)
+    secret_fields = [field.name for field in spec.fields if field.secret]
+    stored_secrets = provider_store.decrypt_secrets(row) if row is not None else {}
+    button_label = (
+        str(cfg.values.get(spec.label_field, "")).strip()
+        if spec.label_field
+        else ""
+    )
+    return {
+        # `name` rather than `kind`, kept from §12.8's first shape so an
+        # already-loaded build of the SPA keeps rendering the panel.
+        "name": kind,
+        "title": spec.title,
+        "summary": spec.summary,
+        "caveat": spec.caveat,
+        "label": button_label or spec.title,
+        "enabled": bool(cfg.enabled),
+        "usable": _usable(kind, cfg),
+        "missing": _missing(kind, cfg),
+        # Which of the two possible configurations answered. "Why is this on"
+        # has two answers and this is the only thing that tells them apart.
+        "source": cfg.source,
+        # Whether a row exists at all, which is what decides whether DELETE has
+        # anything to remove and whether deleting falls back to something.
+        "stored": row is not None,
+        "endpoint": _text(cfg.values.get(spec.endpoint_field)) if spec.endpoint_field else None,
+        "admin_group": (
+            _text(cfg.values.get(spec.admin_group_field))
+            if spec.admin_group_field
+            else None
+        ),
+        "settings_prefix": f"{kind.upper()}_",
+        "editable": True,
+        # Everything the edit form needs, minus every secret. The form is
+        # rendered from `fields`, so a field the flow reads cannot be missing
+        # from the screen that configures it.
+        "fields": provider_config.schema(kind),
+        "values": {
+            field.name: cfg.values[field.name]
+            for field in spec.fields
+            if not field.secret
+        },
+        "secrets_stored": [name for name in secret_fields if stored_secrets.get(name)],
+        # True when a blob exists and could not be decrypted — the encryption
+        # key changed. Reported rather than shown as "configured", because the
+        # second sends an administrator to debug the directory instead of the
+        # key.
+        "secrets_unreadable": row is not None and not provider_store.secrets_readable(row),
+    }
+
+
+def _text(value: Any) -> str | None:
     """A configured string, or ``None`` when nothing is set.
 
-    Empty string is every one of these settings' default, and it means "not
+    Empty string is every one of these fields' default and means "not
     configured". Passing it through would render as a blank cell, which reads as
     a value the console failed to show rather than one nobody set.
     """
-    text = (value or "").strip()
+    text = str(value or "").strip()
     return text or None
 
 
-def sign_in_methods() -> list[dict[str, Any]]:
+def sign_in_methods(db: Session) -> list[dict[str, Any]]:
     """Every method this console can authenticate with, configured or not.
 
-    The unconfigured ones are included deliberately. An administrator asking
+    The unconfigured ones are included deliberately: an administrator asking
     "can we use our SAML provider here" is asking about a method this build
-    supports and this deployment has not set up, and a list that showed only what
-    is switched on cannot tell that apart from a method the console does not have
-    at all. ``enabled`` carries the difference, and a provider is enabled only
-    when **every** value its flow needs is present — the same rule the login
-    page's buttons follow, so the panel and the buttons cannot disagree.
+    supports and this deployment has not set up, and a list showing only what is
+    switched on cannot tell that apart from a method the console does not have.
+
+    Takes the request's session and reads every row in one query, rather than
+    letting each kind resolve itself: five short-lived sessions would answer the
+    same question five times, and a row added between two of them would produce
+    a listing that never existed.
+
+    **A failed read is not swallowed here.** ``resolve()`` falls back to the
+    environment on the sign-in path because a login page that cannot render is
+    worse than a stale one; this is the configuration screen, where quietly
+    showing environment values while the database is unreadable would be the
+    wrong answer delivered confidently to somebody about to act on it. The
+    exception propagates and §1.3 renders it.
     """
-    rows: list[dict[str, Any]] = [
+    rows = provider_store.list_rows(db)
+    methods: list[dict[str, Any]] = [
         {
             "name": "local",
-            "label": "Local accounts",
-            # Always available when the console authenticates at all, which it
-            # is doing if this response is being served. It is the method that
-            # cannot be switched off: `ensure_bootstrap_admin` refuses to start
-            # an AUTH_ENABLED deployment with neither a local administrator nor
-            # a directory.
+            "title": LOCAL_LABEL,
+            "summary": (
+                "This console's own accounts, with passwords hashed here. "
+                "Always available: a deployment with neither a local "
+                "administrator nor a directory refuses to start."
+            ),
+            "caveat": None,
+            "label": LOCAL_LABEL,
             "enabled": True,
+            "usable": True,
+            "missing": [],
+            "source": provider_config.SOURCE_ENVIRONMENT,
+            "stored": False,
             "endpoint": None,
             "admin_group": None,
-            "settings_prefix": _SETTINGS_PREFIXES["local"],
-        },
-        {
-            "name": "ldap",
-            "label": "LDAP / Active Directory",
-            "enabled": bool(settings.ldap_enabled),
-            "endpoint": _text(settings.ldap_url),
-            "admin_group": _text(settings.ldap_admin_group_dn),
-            "settings_prefix": _SETTINGS_PREFIXES["ldap"],
-        },
-    ]
-    rows.extend(
-        {
-            "name": module.NAME,
-            # The provider's own button text, so the panel names each method the
-            # way the login page does. A deployment that relabelled its OIDC
-            # button "Okta" is a deployment where "OpenID Connect" is the wrong
-            # answer to which one this is.
-            "label": module.label(),
-            "enabled": module.enabled(),
-            "endpoint": _text(_SSO_ENDPOINTS[module.NAME]())
-            if module.NAME in _SSO_ENDPOINTS
-            else None,
-            "admin_group": _text(module.admin_group()),
-            "settings_prefix": _SETTINGS_PREFIXES.get(
-                module.NAME, f"{module.NAME.upper()}_"
-            ),
+            "settings_prefix": "AUTH_",
+            # The one method with nothing to configure. Reported rather than
+            # omitted, because an operator who cannot see local accounts on
+            # this screen concludes they are not a way in.
+            "editable": False,
+            "fields": [],
+            "values": {},
+            "secrets_stored": [],
+            "secrets_unreadable": False,
         }
-        for module in sso.providers().values()
-    )
-    return rows
+    ]
+    for kind in provider_config.KINDS:
+        row = rows.get(kind)
+        cfg = (
+            provider_config.from_row(
+                kind,
+                enabled=row.enabled,
+                config=row.config or {},
+                secrets=provider_store.decrypt_secrets(row),
+            )
+            if row is not None
+            else provider_config.from_env(kind)
+        )
+        methods.append(_describe(kind, row, cfg))
+    return methods

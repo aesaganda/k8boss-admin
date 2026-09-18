@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 from app import database
 from app.config import settings
 from app.errors import Invalid, PermissionDenied
-from app.identity import roles
+from app.identity import provider_config, roles
 from app.models import AuthSession, User, rfc3339, utcnow
 
 logger = logging.getLogger(__name__)
@@ -279,7 +279,12 @@ def authenticate(db: Session, *, username: str, password: str, source: str = "au
         db.refresh(row)
         return row
 
-    if source == "local" or not settings.ldap_enabled:
+    # ADR-0011: the stored row when there is one, this deployment's LDAP_*
+    # settings otherwise. Resolved once and reused below for the admin group,
+    # so a row edited between the two reads cannot make this sign-in check one
+    # configuration and map its role from another.
+    ldap_cfg = provider_config.resolve("ldap")
+    if source == "local" or not ldap_cfg.enabled:
         verify_password(password, _DUMMY_PASSWORD_HASH)
         return None
 
@@ -303,7 +308,7 @@ def authenticate(db: Session, *, username: str, password: str, source: str = "au
     row.role = _resolved_role(
         roles.role_from_groups(
             profile.groups,
-            admin_group=settings.ldap_admin_group_dn,
+            admin_group=ldap_cfg.admin_group_dn,
             provider="ldap",
         ),
         existing=existing,
@@ -664,7 +669,7 @@ def ensure_bootstrap_admin() -> None:
             create_local_user(db, username=username, password=password, role="admin")
             logger.warning("Created bootstrap administrator %s", normalize_username(username))
             return
-        if not settings.ldap_enabled:
+        if not provider_config.resolve("ldap").enabled:
             raise RuntimeError(
                 "AUTH_ENABLED is true but no users exist. Set AUTH_BOOTSTRAP_USERNAME "
                 "and AUTH_BOOTSTRAP_PASSWORD, or configure LDAP_ENABLED."

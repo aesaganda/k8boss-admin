@@ -446,15 +446,11 @@ export const users = {
 };
 
 /**
- * §12.7 active sessions, and §12.8 the sign-in methods this deployment has.
+ * §12.7 active sessions. Administrator-only.
  *
- * Both administrator-only. `id` on a session row is the stored SHA-256 digest
- * the table is keyed by, not a bearer token — holding it authenticates nobody,
- * which is why it is safe to put in a URL here.
- *
- * `providers` is read-only on purpose and there is no writer to pair with it:
- * every provider is configured from the backend's environment (§12.4), so a
- * save here would be a save of a copy. See `app/identity/inventory.py`.
+ * `id` on a session row is the stored SHA-256 digest the table is keyed by, not
+ * a bearer token — holding it authenticates nobody, which is why it is safe to
+ * put in a URL here.
  */
 export const sessions = {
   list: () => api.get('/auth/sessions'),
@@ -462,7 +458,30 @@ export const sessions = {
     method: 'DELETE',
     expect: 'none',
   }),
-  providers: () => api.get('/auth/providers'),
+};
+
+/**
+ * §12.8 identity providers, configured from the console (ADR-0011).
+ *
+ * Administrator-only. One provider per kind, so the kind *is* the identity of
+ * the row: `save` is a create-or-replace PUT and there is no id to allocate.
+ *
+ * `save` sends `{enabled, values}`. **An omitted secret keeps the stored one**
+ * and an empty string clears it — the listing never returns a secret's value,
+ * so the form has none to send back, and a plain replace would wipe the bind
+ * password every time somebody corrected a typo elsewhere.
+ *
+ * `remove` deletes the stored row, after which that kind reads the backend's
+ * `LDAP_*` / `OIDC_*` environment variables again. That is "go back to what the
+ * deployment ships with", not "switch it off".
+ */
+export const identityProviders = {
+  list: () => api.get('/auth/providers'),
+  save: (kind, body) => api.put(`/auth/providers/${encodeURIComponent(kind)}`, body),
+  remove: (kind) => request(`/auth/providers/${encodeURIComponent(kind)}`, {
+    method: 'DELETE',
+    expect: 'none',
+  }),
 };
 
 /* ── §3 Clusters ────────────────────────────────────────────────────────── */

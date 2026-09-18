@@ -10,7 +10,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.identity import inventory, sso
+from app.identity import provider_config, sso
 from app.identity.service import create_local_user
 from app.models import AuditRecord, AuthSession, User, utcnow
 
@@ -274,30 +274,49 @@ def test_sign_in_methods_name_where_each_one_points_and_what_confers_admin(
     rows = {row["name"]: row for row in client.get("/api/auth/providers").json()["items"]}
 
     assert rows["local"]["enabled"] is True
-    assert rows["ldap"] == {
-        "name": "ldap",
-        "label": "LDAP / Active Directory",
-        "enabled": True,
-        "endpoint": "ldaps://directory.internal.example:636",
-        "admin_group": "cn=platform-admins,ou=groups",
-        "settings_prefix": "LDAP_",
-    }
+    assert rows["local"]["editable"] is False
+    ldap = rows["ldap"]
+    assert ldap["title"] == "LDAP / Active Directory"
+    assert ldap["enabled"] is True
+    assert ldap["endpoint"] == "ldaps://directory.internal.example:636"
+    assert ldap["admin_group"] == "cn=platform-admins,ou=groups"
+    assert ldap["settings_prefix"] == "LDAP_"
+    # ADR-0011: nothing is stored, so this is the deployment's environment
+    # answering — and the console says which of the two it was.
+    assert ldap["source"] == "environment"
+    assert ldap["stored"] is False
     # Unconfigured methods are listed too, and `enabled` is what tells them
     # apart from a method this console does not have at all.
     assert rows["saml"]["enabled"] is False
     assert rows["saml"]["endpoint"] is None
 
 
-def test_every_registered_provider_knows_where_it_points():
-    """The guard `inventory` promises: a fifth provider fails here, not on screen.
+def test_a_provider_field_the_environment_cannot_answer_is_a_broken_spec():
+    """Every field in every spec must have an environment setting behind it.
 
-    `_SSO_ENDPOINTS` is a mapping rather than a member on each provider module,
-    which means a newly registered provider can be absent from it. The failure
-    that would produce is a row in the panel pointing nowhere, which reads as a
-    misconfigured deployment rather than as a missing line of code.
+    `from_env` builds the fallback by reading ``settings.{kind}_{field}``, so a
+    field whose name does not match a setting reads as empty forever — an
+    administrator would see the field on the form, leave it alone, and get a
+    silently blank value rather than the deployment's configured one. There is
+    no runtime signal for that at all, so it is asserted here.
     """
-    assert set(sso.providers()) == set(inventory._SSO_ENDPOINTS)
-    assert set(sso.providers()) <= set(inventory._SETTINGS_PREFIXES)
+    for kind in provider_config.KINDS:
+        for field in provider_config.spec(kind).fields:
+            attribute = f"{kind}_{field.name}"
+            assert hasattr(settings, attribute), (
+                f"{kind}.{field.name} has no {attribute} setting behind it"
+            )
+
+
+def test_every_single_sign_on_provider_has_a_spec():
+    """A fifth registry provider fails here rather than on screen.
+
+    The §12.8 panel is built from `provider_config.SPECS`, so a provider that
+    can complete a sign-in and has no spec would be missing from the screen that
+    configures it — and from the screen an administrator checks to find out how
+    people are getting in.
+    """
+    assert set(sso.providers()) <= set(provider_config.SPECS)
 
 
 def test_deactivating_a_user_removes_their_sessions_from_the_list(

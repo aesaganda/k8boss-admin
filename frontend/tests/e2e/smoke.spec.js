@@ -128,12 +128,13 @@ test.describe('console authentication', () => {
     await page.getByRole('button', { name: 'Sign in' }).click();
 
     await expect(page.getByRole('heading', { name: 'Users' })).toBeVisible();
-    // §12.8: how people sign in, above the accounts it produced. It replaced an
-    // LDAP-only banner that named the variable the admin group lives in; this
-    // says which directory and which group.
-    await expect(page.getByRole('grid', { name: 'Sign-in methods' })).toContainText(
-      'LDAP / Active Directory',
-    );
+    // §12.8 moved to its own page (ADR-0011), because it stopped being a
+    // read-only panel and became the screen the providers are configured on.
+    // What belongs here is that an administrator can get to it.
+    await expect(
+      page.getByRole('navigation', { name: 'Console navigation' })
+        .getByRole('link', { name: 'Identity providers' }),
+    ).toBeVisible();
     await expect(page.getByRole('grid', { name: 'Console users' })).toContainText('Directory Admin');
     await expect(page.getByRole('navigation', { name: 'Console navigation' }).getByRole('link', { name: 'Users' })).toBeVisible();
   });

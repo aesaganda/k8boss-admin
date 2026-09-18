@@ -1736,6 +1736,33 @@ body.admin-resizing * {
   height: 100%;
 }
 
+/* §12.8's provider cards. A definition list rather than a table: three facts
+   per provider, each one a label and a value, and a table of three rows across
+   five cards is four more table headers than anybody needs to read. */
+.admin-provider__facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.125rem 0.75rem;
+  margin: 0.75rem 0 0;
+}
+
+.admin-provider__facts dt {
+  color: var(--admin-muted);
+  font-size: var(--pf-t--global--font--size--body--sm, 0.875rem);
+}
+
+.admin-provider__facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.admin-provider__actions {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  margin-block-start: 1rem;
+}
+
 /* The whole tile is the control. It is a real <button> so it is tabbable and
    announces itself, and the card is only chrome around it. */
 .admin-tile__button {
