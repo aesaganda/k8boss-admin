@@ -1,6 +1,7 @@
 # k8boss-admin — local and small-scale deployment.
 #
-#   docker compose up --build      →  console on http://localhost:8021
+#   docker compose up --build      →  console on http://localhost:8021, built from source
+#   docker compose pull && docker compose up -d   →  same console, pulled from ghcr.io
 #
 # The frontend is the only thing you open. It serves the SPA and reverse-proxies
 # /api (and the /api/ws WebSockets for pod logs and exec) to the backend, so the
@@ -16,7 +17,12 @@ services:
       # at the top of backend/Dockerfile.
       context: .
       dockerfile: backend/Dockerfile
-    image: k8boss-admin-backend:local
+    # Published multi-arch (linux/amd64, linux/arm64) to ghcr.io. Naming it here
+    # rather than `k8boss-admin-backend:local` means `docker compose pull` fetches
+    # the same tag `--build` would produce, so a host with no source checkout can
+    # still run this file. IMAGE_TAG pins to a specific build (e.g. a git short
+    # sha) instead of the floating `latest`.
+    image: ghcr.io/aesaganda/k8boss-admin-backend:${IMAGE_TAG:-latest}
     container_name: k8boss-admin-backend
     # `restart: unless-stopped` only fires on container EXIT — a wedged event
     # loop that stops accepting connections but never crashes the process stays
@@ -243,7 +249,9 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
-    image: k8boss-admin-frontend:local
+    # Same IMAGE_TAG as the backend, so `docker compose pull` fetches a matched
+    # pair rather than a frontend and backend built weeks apart.
+    image: ghcr.io/aesaganda/k8boss-admin-frontend:${IMAGE_TAG:-latest}
     container_name: k8boss-admin-frontend
     ports:
       - "${UI_PORT:-8021}:8021"
