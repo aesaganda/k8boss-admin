@@ -58,7 +58,13 @@ from app.admin import preflight
 from app.admin.diff import build_diff, digest
 from app.audit import recorder
 from app.config import settings
-from app.errors import AdminError, Conflict, MutationsDisabled, from_api_exception
+from app.errors import (
+    AdminError,
+    Conflict,
+    MutationsDisabled,
+    RBACDenied,
+    from_api_exception,
+)
 from app.resources.catalog import normalize_group
 from app.resources.shaping import get_field
 
@@ -153,6 +159,30 @@ def _audit(
         # the trail cannot be searched or it cannot be understood.
         error=None if error is None else f"{error.code}: {error.message}",
     )
+
+
+def _outcome_for(error: AdminError) -> str:
+    """The §10 outcome an error *is*, decided from the error and not from the step.
+
+    Which step raised is not the question the trail is asked. Preflight returns
+    ``upstream_error`` when the ``SelfSubjectAccessReview`` could not be decided,
+    and filing that as ``denied`` records "this operator was refused" where the
+    truth is "we could not find out whether this operator may act" — the two
+    :mod:`app.admin.preflight` exists to keep apart, collapsed again months later
+    with the authority of a record, and sending somebody from the audit page to
+    widen a ClusterRole that was already correct. The apply step had the mirror
+    of it: an API server 403 arriving as an unmapped ``ApiException`` is a
+    denial, and deciding from the exception type filed it as ``failed``.
+
+    ``mutations_disabled`` has no branch here on purpose: :func:`_require_open`
+    writes its own row and raises before step 2, so this is never asked about
+    one, and a branch that can never run is a branch a reader has to disprove.
+    """
+    if isinstance(error, RBACDenied):
+        return "denied"
+    if isinstance(error, Conflict):
+        return "conflict"
+    return "failed"
 
 # --------------------------------------------------------------------------- #
 # The gate
@@ -388,7 +418,10 @@ def mutate(
 
     # 2. Preflight (§0.2). A clean denial and a review that could not be
     #    evaluated are different errors, and preflight.require keeps them apart —
-    #    both are audited, because both mean the write did not happen.
+    #    both are audited, because both mean the write did not happen, and
+    #    `_outcome_for` keeps them apart in the row as well as in the response.
+    #    A hard-coded `denied` here re-made the collapse preflight refuses, in
+    #    the one place that outlives the operator who saw the 502.
     #
     #    Each `also_requires` subresource is reviewed too, and a denial there is
     #    audited against *that* subresource rather than the object: a row saying
@@ -408,8 +441,8 @@ def mutate(
                 namespace=namespace, name=name, subresource=required,
             )
         except AdminError as e:
-            _audit(verb=verb, target=audited, dry_run=dry_run, outcome="denied",
-                   detail=detail, error=e)
+            _audit(verb=verb, target=audited, dry_run=dry_run,
+                   outcome=_outcome_for(e), detail=detail, error=e)
             raise
 
     # 3. Apply. The only step that reaches the cluster.
@@ -422,13 +455,11 @@ def mutate(
         # therefore produce an rbac_denied naming nothing.
         mapped = from_api_exception(e, context={**target, "verb": verb})
         _audit(verb=verb, target=target, dry_run=dry_run,
-               outcome="conflict" if isinstance(mapped, Conflict) else "failed",
-               detail=detail, error=mapped)
+               outcome=_outcome_for(mapped), detail=detail, error=mapped)
         raise mapped from e
     except AdminError as e:
         _audit(verb=verb, target=target, dry_run=dry_run,
-               outcome="conflict" if isinstance(e, Conflict) else "failed",
-               detail=detail, error=e)
+               outcome=_outcome_for(e), detail=detail, error=e)
         raise
 
     # 4. Diff, and 5. audit the success.
@@ -459,4 +490,12 @@ def mutate(
     }
 
 
-__all__ = ["ApplyFn", "Detail", "FeatureGate", "Switch", "mutate", "read_only_switch", "require_open"]
+__all__ = [
+    "ApplyFn",
+    "Detail",
+    "FeatureGate",
+    "Switch",
+    "mutate",
+    "read_only_switch",
+    "require_open",
+]

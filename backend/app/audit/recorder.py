@@ -196,8 +196,12 @@ def record(
 
     Every write reaches this function, including the refused ones. ``outcome``
     carries which: ``applied`` (it reached the cluster), ``dry_run`` (it was
-    projected), ``denied`` (the mutations gate or preflight refused it),
-    ``conflict`` (a resourceVersion mismatch), ``failed`` (anything else).
+    projected), ``denied`` (the mutations gate refused it, or preflight got a
+    clean denial — an access review that could not be *decided* is ``failed``,
+    because filing "we could not find out whether this operator may act" as "this
+    operator was refused" sends somebody from the audit page to widen a
+    ClusterRole that was already correct), ``conflict`` (a resourceVersion
+    mismatch), ``failed`` (anything else).
 
     ``actor`` and ``source_ip`` default to the request context and should stay
     there for every cluster write — see the module docstring on why a caller that

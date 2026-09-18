@@ -27,6 +27,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from kubernetes.client.rest import ApiException
 
 from app.admin import cli_pod
 from app.admin import node_debug
@@ -571,7 +572,8 @@ def test_a_preflight_that_could_not_be_decided_is_not_reported_as_a_denial(
     db_engine, fake_k8s, allow_mutations,
 ):
     """The permission may well be held. 403 here would send the operator to edit
-    a ClusterRole that is already correct."""
+    a ClusterRole that is already correct — and so would a `denied` row, months
+    later and with the authority of the trail behind it."""
     allow(fake_k8s, allowed=False, evaluation_error="webhook authorizer unavailable")
     apply_fn = applier()
 
@@ -580,7 +582,9 @@ def test_a_preflight_that_could_not_be_decided_is_not_reported_as_a_denial(
 
     assert caught.value.http_status == 502
     assert apply_fn.calls == []
-    assert audit_rows()[0]["outcome"] == "denied"
+    (row,) = audit_rows()
+    assert row["outcome"] == "failed"
+    assert row["error"].startswith("upstream_error:")
 
 
 def test_a_dry_run_is_preflighted_too(db_engine, fake_k8s):
@@ -621,6 +625,21 @@ def test_a_failed_apply_is_audited_and_re_raised(db_engine, fake_k8s, allow_muta
     (row,) = audit_rows()
     assert row["outcome"] == "failed"
     assert row["error"] == "invalid: The cluster rejected the object."
+
+
+def test_a_403_the_apply_step_did_not_map_is_audited_as_a_denial(
+    db_engine, fake_k8s, allow_mutations,
+):
+    """Deciding the outcome from which step raised filed this as `failed`. The
+    API server refused it, and an incident review filtering the trail for
+    `denied` would not find the write it is looking for."""
+    allow(fake_k8s)
+
+    with pytest.raises(RBACDenied):
+        run(fake_k8s, applier(raises=ApiException(status=403, reason="Forbidden")),
+            dry_run=False)
+
+    assert audit_rows()[0]["outcome"] == "denied"
 
 
 def test_a_conflict_is_audited_as_a_conflict(db_engine, fake_k8s, allow_mutations):
