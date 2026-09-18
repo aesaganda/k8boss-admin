@@ -49,7 +49,7 @@ import logging
 from typing import Any
 
 from app.admin.apply import MERGE_PATCH, patch_fn
-from app.admin.mutate import FeatureGate, mutate, read_only_switch
+from app.admin.mutate import FeatureGate, audit_conflict, mutate, read_only_switch
 from app.errors import ClusterUnreachable, Conflict, Invalid
 from app.resources import reader
 from app.resources.envelope import collect
@@ -704,7 +704,7 @@ def expand(
     live, current, live_version = _live(namespace, name)
     sent_version = request["resourceVersion"]
     if sent_version and live_version and sent_version != live_version:
-        raise Conflict(
+        conflict = Conflict(
             f"The claim {namespace}/{name} changed while you were reading it.",
             detail=(
                 f"You are editing version {sent_version}; the cluster has "
@@ -719,6 +719,19 @@ def expand(
                 "currentCapacity": current["capacity"],
             },
         )
+        # Rule 5 applies to a conflict too, and this one fires before the first
+        # `mutate()` — so without this the trail held nothing to say two people
+        # were resizing the same claim at once, which is the whole question
+        # rule 4 exists to make answerable.
+        audit_conflict(
+            verb="patch", group="", version="v1", plural="persistentvolumeclaims",
+            namespace=namespace, name=name, dry_run=dry_run, error=conflict,
+            detail=(
+                f"expand pvc {namespace}/{name}: refused, editing "
+                f"{sent_version} and the cluster has {live_version}"
+            ),
+        )
+        raise conflict
 
     expansion = expansion_support(current["storage_class"], unavailable)
     mounts = mounted_by(namespace, name, unavailable)

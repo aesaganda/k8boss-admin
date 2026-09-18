@@ -582,6 +582,28 @@ def test_a_stale_resource_version_is_a_conflict_carrying_the_live_one(
     assert calls == []
 
 
+def test_a_conflict_that_never_reaches_the_funnel_is_still_in_the_trail(
+    cluster, monkeypatch, db_engine, allow_mutations,
+):
+    """Rule 5 covers the writes that conflicted, and this refusal fires before
+    `mutate()` — so nothing else would record that two people were changing the
+    same namespace's level at once, which is what rule 4 exists to make
+    answerable."""
+    stub_read(monkeypatch, live=namespace(**psa_labels(enforce="restricted")))
+    stub_patch(monkeypatch)
+
+    with pytest.raises(Conflict):
+        podsecurity.set_level(
+            NAME, {**request_body(enforce="privileged"), "resourceVersion": "3000"},
+            dry_run=False, acknowledge_consequences=ALL_CODES,
+        )
+
+    (row,) = audit_rows()
+    assert row["outcome"] == "conflict"
+    assert row["target"]["name"] == NAME
+    assert "3000" in row["detail"] and "4021" in row["detail"]
+
+
 def test_a_namespace_read_that_did_not_answer_stops_the_write(
     cluster, monkeypatch, db_engine, allow_mutations,
 ):

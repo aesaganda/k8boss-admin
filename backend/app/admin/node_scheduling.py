@@ -57,7 +57,7 @@ import logging
 from typing import Any
 
 from app.admin.apply import MERGE_PATCH, patch_fn
-from app.admin.mutate import FeatureGate, mutate, read_only_switch
+from app.admin.mutate import FeatureGate, audit_conflict, mutate, read_only_switch
 from app.admin.nodes import controller_ref, list_node_pods, read_node
 from app.errors import Conflict, Invalid
 from app.resources.envelope import collect
@@ -768,16 +768,25 @@ def _require_acknowledgement(
     )
 
 
-def _require_version(name: str, sent: str | None, live: str | None, **extra: Any) -> None:
+def _require_version(
+    name: str, sent: str | None, live: str | None, *, what: str, dry_run: bool,
+    **extra: Any,
+) -> None:
     """§0.4, locally, so the operator gets a fresh diff rather than a bare 409.
 
     Enforced again by the API server, because the patch carries the caller's
     ``resourceVersion``: this check loses the race between the read above and
     the write below, and the API server's does not.
+
+    Audited before it raises, because it fires before the first :func:`mutate`
+    and the funnel — which records every other terminal state — never runs. Rule
+    5 covers the writes that conflicted as much as the ones that landed, and
+    "two people were editing this node at once during the incident" is exactly
+    what rule 4 exists to make answerable afterwards.
     """
     if not sent or not live or sent == live:
         return
-    raise Conflict(
+    conflict = Conflict(
         f"The node {name} changed while you were reading it.",
         detail=f"You are editing version {sent}; the cluster has {live}.",
         hint="Reload the node and preview again against what it says now.",
@@ -788,6 +797,14 @@ def _require_version(name: str, sent: str | None, live: str | None, **extra: Any
             **extra,
         },
     )
+    audit_conflict(
+        verb="patch", group=GROUP, version=VERSION, plural=PLURAL,
+        namespace=None, name=name, dry_run=dry_run, error=conflict,
+        detail=(
+            f"node {what} {name}: refused, editing {sent} and the cluster has {live}"
+        ),
+    )
+    raise conflict
 
 
 def _blocked(refusal: Invalid) -> dict[str, Any]:
@@ -914,7 +931,8 @@ def set_taints(
     current = current_taints(live)
 
     sent_version = payload.get("resourceVersion")
-    _require_version(name, sent_version, live_version, currentTaints=current)
+    _require_version(name, sent_version, live_version, what="taints",
+                     dry_run=dry_run, currentTaints=current)
 
     diff = diff_taints(current, requested)
     refusal = _no_change(diff, "taints")
@@ -1039,7 +1057,8 @@ def set_labels(
     current = current_labels(live)
 
     sent_version = payload.get("resourceVersion")
-    _require_version(name, sent_version, live_version, currentLabels=current)
+    _require_version(name, sent_version, live_version, what="labels",
+                     dry_run=dry_run, currentLabels=current)
 
     diff = diff_labels(current, requested)
     refusal = _no_change(diff, "labels")

@@ -908,6 +908,26 @@ def test_a_stale_version_is_a_conflict_before_anything_is_written(cluster):
     assert cluster.of("PATCH") == []
 
 
+def test_a_conflict_that_never_reaches_the_funnel_is_still_in_the_trail(cluster):
+    """Rule 5 covers the writes that conflicted, and this refusal fires before
+    `mutate()` — so nothing else would record that two administrators were
+    editing the same binding's subject list at once, which is what rule 4 exists
+    to make answerable."""
+    live = binding(subjects=[subject("User", "bob")], version="9001")
+    cluster.at(BINDINGS, listing([live]))
+    cluster.at(f"{BINDINGS}/view", live)
+    cluster.at(CLUSTER_BINDINGS, listing([]))
+    cluster.at(f"{BASE}/clusterroles/view", role_object("view", rules=[rule()]))
+
+    with pytest.raises(Conflict):
+        grants.apply_grant(NAMESPACE, request(resourceVersion="1"), dry_run=False)
+
+    (row,) = audit_rows()
+    assert row["outcome"] == "conflict"
+    assert row["target"]["namespace"] == NAMESPACE
+    assert "9001" in row["detail"]
+
+
 def test_an_unacknowledged_consequence_refuses_before_the_write(cluster):
     cluster.at(BINDINGS, listing([]))
     cluster.at(CLUSTER_BINDINGS, listing([]))

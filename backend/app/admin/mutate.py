@@ -184,6 +184,44 @@ def _outcome_for(error: AdminError) -> str:
         return "conflict"
     return "failed"
 
+
+def audit_conflict(
+    *,
+    verb: str,
+    group: str,
+    version: str,
+    plural: str,
+    namespace: str | None,
+    name: str | None,
+    dry_run: bool,
+    detail: "str | Callable[[], str | None] | None",
+    error: Conflict,
+    subresource: str | None = None,
+) -> None:
+    """Rule 5's row for a rule 4 conflict raised *before* the funnel runs.
+
+    Six writes compare the ``resourceVersion`` they were handed against the live
+    one and raise ``409`` before the first :func:`mutate`, so the funnel — which
+    records every other terminal state — never runs, and the trail held nothing
+    to say that two operators were editing the same object during an incident.
+    That is the question rule 4 exists to make answerable, asked of the trail
+    that outlives the response the second operator saw.
+
+    The row is assembled by :func:`_audit` like every other one, from request
+    context: a helper that took the actor as an argument is a helper that can be
+    passed the wrong one. Never raises — see :mod:`app.audit`. A failed INSERT
+    must not turn a 409 into a 500, which would tell the operator the console is
+    broken rather than that their edit is stale.
+    """
+    _audit(
+        verb=verb,
+        target=_target(group, version, plural, namespace, name, subresource),
+        dry_run=dry_run,
+        outcome="conflict",
+        detail=detail,
+        error=error,
+    )
+
 # --------------------------------------------------------------------------- #
 # The gate
 # --------------------------------------------------------------------------- #
@@ -495,6 +533,7 @@ __all__ = [
     "Detail",
     "FeatureGate",
     "Switch",
+    "audit_conflict",
     "mutate",
     "read_only_switch",
     "require_open",

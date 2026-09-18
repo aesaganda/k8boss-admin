@@ -54,7 +54,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.admin import preflight
-from app.admin.mutate import FeatureGate, mutate, read_only_switch
+from app.admin.mutate import FeatureGate, audit_conflict, mutate, read_only_switch
 from app.errors import Conflict, Invalid
 from app.resources import catalog, reader
 from app.resources.shaping import (
@@ -500,7 +500,7 @@ def decide(
     raw, row, live_version = _live(name)
 
     if resource_version and live_version and resource_version != live_version:
-        raise Conflict(
+        conflict = Conflict(
             f"The request {name} changed while you were reading it.",
             detail=f"You are deciding version {resource_version}; the cluster has {live_version}.",
             hint="Reload the request and preview again against what it says now.",
@@ -511,6 +511,21 @@ def decide(
                 "currentState": row["state"],
             },
         )
+        # Rule 5 applies to a conflict too, and this one fires before the first
+        # `mutate()` — so without this the trail held nothing to say two people
+        # were deciding the same request at once, which is the whole question
+        # rule 4 exists to make answerable. On a signing request that matters
+        # the losing decision is the one nobody can find afterwards.
+        audit_conflict(
+            verb="update", group=GROUP, version=VERSION, plural=PLURAL,
+            namespace=None, name=name, subresource=SUBRESOURCE,
+            dry_run=dry_run, error=conflict,
+            detail=(
+                f"csr {name}: refused, deciding {resource_version} and the "
+                f"cluster has {live_version}"
+            ),
+        )
+        raise conflict
 
     refusal = _already_decided(row)
     if refusal:

@@ -708,6 +708,26 @@ def test_a_stale_resource_version_is_a_conflict_carrying_the_live_size(
     assert calls == []
 
 
+def test_a_conflict_that_never_reaches_the_funnel_is_still_in_the_trail(
+    cluster, monkeypatch, db_engine,
+):
+    """Rule 5 covers the writes that conflicted, and this refusal fires before
+    `mutate()` — so nothing else would record that two people were resizing the
+    same claim at once, which is what rule 4 exists to make answerable."""
+    stub_reads(monkeypatch, pods=[])
+    stub_patch(monkeypatch)
+
+    with pytest.raises(Conflict):
+        pvc.expand(NAMESPACE, NAME, {"size": "100Gi", "resourceVersion": "6000"},
+                   dry_run=False, acknowledge_consequences=ALWAYS)
+
+    (row,) = audit_rows()
+    assert row["outcome"] == "conflict"
+    assert row["target"]["name"] == NAME
+    assert row["error"].startswith("conflict:")
+    assert "6000" in row["detail"] and "7710" in row["detail"]
+
+
 def test_the_preflight_asks_for_patch_on_claims_in_this_namespace(
     cluster, monkeypatch, db_engine, fake_k8s, allow_mutations
 ):
