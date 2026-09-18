@@ -222,7 +222,7 @@ for it; the parenthetical says where it lives.
 | 1 | `Cluster.impersonation_enabled`, nullable and read through `bool()`; echoed by `to_public_dict`; refused at the form by `_validate_impersonation` when the console has no OIDC | `test_a_cluster_that_did_not_ask_is_not_impersonated`, `test_a_null_flag_is_off_rather_than_a_third_state`, `test_the_flag_is_surfaced_like_skip_tls_verify`, `test_turning_it_on_without_oidc_is_refused_at_the_form` |
 | 2 | `impersonation.decide` against `IMPERSONATION_SOURCES`, and again on `settings.auth_enabled` for legacy proxy mode | `test_a_password_session_cannot_become_a_cluster_identity`, `test_legacy_proxy_mode_cannot_impersonate`, `test_the_refusal_is_not_rbac_denied`, `test_only_the_two_cluster_native_sources_may_impersonate`, `test_a_saml_session_cannot_act_as_a_cluster_identity`, `test_an_openshift_session_may_act_as_the_cluster_identity` |
 | 3 | `decide` on `idp_groups is None`; `_decode_groups` degrades an unparseable blob to absent rather than empty | `test_an_absent_groups_claim_refuses`, `test_an_empty_groups_claim_impersonates` |
-| 4 | `decide` raises inside `get_clients` before a bundle exists; `impersonatable` is a property of the transport; `as_service_account` is the only suppression and its call sites are enumerated | `test_a_refused_session_never_receives_a_transport`, `test_a_transport_that_may_never_impersonate_ignores_the_decision`, `test_the_service_account_exemptions_are_exactly_these` |
+| 4 | `decide` raises inside `get_clients` before a bundle exists; `impersonatable` is a property of the transport; `as_service_account` is the only suppression and its call sites are enumerated; §7's exec refuses, because its channel cannot carry the headers at all — see *Pod exec refuses rather than running as the console*, below | `test_a_refused_session_never_receives_a_transport`, `test_a_transport_that_may_never_impersonate_ignores_the_decision`, `test_the_service_account_exemptions_are_exactly_these`, `test_exec_is_refused_when_the_cluster_acts_as_the_operator` |
 | 5 | `AuditRecord.impersonated_user` read from request context; `subject` on every `PreflightResult` and in `RBACDenied.message` | `test_the_audit_row_records_the_console_user_and_the_cluster_identity`, `test_a_denial_names_the_subject_it_was_refused_for` |
 | 6 | `deploy/rbac.yaml`, commented out, with `resourceNames` on both rules | asserted by reading the file: no live rule carries the `impersonate` verb |
 
@@ -329,6 +329,70 @@ all three recompute to something other than what is stored. What the omission
 costs is the ability to distinguish "written before the column existed" from
 "written by a console acting as itself", and those are the same fact about
 attribution: the API server saw the ServiceAccount.
+
+### Pod exec refuses rather than running as the console
+
+*Amendment, recorded when an audit went looking at §7 and found that condition 4
+had never been true there.* The condition says a request that could not build
+impersonation headers **fails**; it does not proceed as the console. Exec
+proceeded as the console, and nothing noticed for a simple reason: the
+enforcement above is a list of `as_service_account` call sites, and exec never
+calls it. It is a third kind of exemption — a transport that *may* impersonate,
+whose headers are thrown away below it.
+
+`kubernetes.stream` opens the channel through `ws_client.create_websocket`, which
+builds its header list from `authorization` and `sec-websocket-protocol` and
+drops everything else. So `Impersonate-User` never reaches the API server. The
+protocol has no objection and neither does the API server, which accepts
+impersonation on an upgrade request like any other; this is a client-library
+limitation and nothing more.
+
+What shipped, therefore, was the worst available arrangement: the preflight was
+evaluated **as the operator** — correctly, through the typed client — and the
+shell then ran **as the ServiceAccount**. The console checked a permission it did
+not use, and handed somebody a root prompt under an identity the cluster never
+saw. On an impersonating cluster the ServiceAccount is usually the *wider* of the
+two, so the operator's own RBAC stopped being the thing that bounded their shell.
+
+**The decision is to refuse**, with `impersonation_unavailable`, before the
+preflight runs. That is not a new rule; it is condition 4 applied to a path that
+had escaped it. Asking the API server whether the operator may exec is pointless
+once the answer cannot be used — and asked in that order, an operator who lacks
+`create pods/exec` would be told they lack it, and would go and widen a
+ClusterRole that would not have helped.
+
+**Naming exec a ServiceAccount exemption was rejected.** Every existing exemption
+is a call where impersonation would be *wrong*: the cluster list and `/api/health`
+are about the console, the shared discovery cache would leak one operator's view
+to another, and the connection test is a question about the stored credential.
+Exec is the opposite — impersonation is exactly right there and merely
+unimplementable through this library — and a shell is the last call in this
+console that should hold a blanket exemption from the identity model.
+
+**Vendoring the handshake was rejected too**, though it is the fix that keeps the
+feature. `WSClient.__init__` calls the module-level `create_websocket` directly,
+so there is no seam: carrying the headers means a private copy of that function
+including its TLS and proxy handling, maintained against a dependency that
+changes it without a changelog entry. When such a copy drifts, the symptom is a
+shell quietly running as the console again — the exact failure being closed here,
+reintroduced by the machinery meant to prevent it. A refusal is one branch and it
+fails loudly. If exec on an impersonating cluster becomes something operators
+actually need, that is the work, and it should arrive with a test that asserts
+the headers reach the wire.
+
+**What it costs**, stated rather than argued away: on a cluster with
+impersonation on, this console does not open shells. `kubectl exec` with the
+operator's own credentials does, and that path has their identity end to end.
+The alternative is to turn impersonation off for that cluster, which is a
+deliberate downgrade of attribution for every other call — and it should be
+deliberate, not a side effect of wanting a terminal.
+
+One observation worth leaving behind, because it looks like condition 5 holding
+and is not: an exec audit row carries no `impersonated_user`. That is true of
+what the API server saw, but it is true by accident — the handler runs each step
+through `asyncio.to_thread`, which copies the context, so the decision pinned
+inside one thread's copy is invisible to the audit write in another's. Nothing
+should be built on it.
 
 ## The boundary
 

@@ -19,6 +19,18 @@ matter from the write path and skips the two that do not:
   and not this. Preflighting the parent would report allowed and then fail at the
   API server with a bare forbidden naming nothing.
 
+**And a third gate this path needs and the write path does not: a cluster that
+impersonates gets a refusal, not a shell.** The channel is a WebSocket, and
+``ws_client.create_websocket`` builds its header list from ``authorization`` and
+``sec-websocket-protocol`` alone — so ``Impersonate-User`` cannot reach the API
+server here. Opened anyway, the session would run as this console's
+ServiceAccount while the preflight above answered for the operator: a permission
+checked and not used, and a root prompt under an identity the cluster never saw.
+ADR-0007's fourth condition decides it — a request that could not build
+impersonation headers fails rather than proceeding as the console — and the ADR's
+*Pod exec refuses rather than running as the console* records why a blanket
+exemption was refused instead.
+
 **Audited on open and on close, as two records.** One record written at the end
 would be lost entirely if the process were restarted mid-session — precisely the
 sessions worth knowing about. The open record says a shell was opened and by
@@ -58,7 +70,14 @@ from app.api.logs import (
 )
 from app.audit import recorder
 from app.config import settings
-from app.errors import AdminError, Invalid, MutationsDisabled, from_api_exception
+from app.errors import (
+    AdminError,
+    ImpersonationUnavailable,
+    Invalid,
+    MutationsDisabled,
+    from_api_exception,
+)
+from app.k8s import impersonation
 from app.k8s.client import get_clients
 
 logger = logging.getLogger(__name__)
@@ -167,6 +186,24 @@ def _parse_command(values: list[str]) -> list[str]:
                      "limit": _MAX_COMMAND_ARGS},
         )
     return command
+
+
+def _acts_as_the_operator() -> bool:
+    """Whether this request would reach the cluster as the signed-in operator.
+
+    Resolved here rather than read from the handler, because ADR-0007's decision
+    is made inside ``get_clients`` and ``asyncio.to_thread`` runs on a *copy* of
+    the context: a decision made in another thread's copy is not visible in the
+    handler's, and reading it there would report every session as the console's.
+    The same copying is why an exec audit row carries no ``impersonated_user``,
+    which happens to be true of what the API server saw — by accident of
+    threading rather than by design, so do not rely on it elsewhere.
+
+    ``get_clients`` is the call that decides; it is cached, so asking here costs
+    nothing that step 2 was not about to pay anyway.
+    """
+    get_clients()
+    return impersonation.get_current().active
 
 
 def _open_exec(
@@ -435,6 +472,53 @@ async def exec_in_pod(websocket: WebSocket, namespace: str, name: str) -> None:
             )
             await terminator.send(error_frame(error))
             return
+
+        # 1.5 ADR-0007, and the reason this refusal exists rather than a shell.
+        #     `kubernetes.stream` opens the channel through
+        #     `ws_client.create_websocket`, which builds its header list from
+        #     `authorization` and `sec-websocket-protocol` and drops everything
+        #     else — so `Impersonate-User` cannot reach the API server on this
+        #     path. Nothing about the protocol forbids it; the client library
+        #     does.
+        #
+        #     Left alone, the preflight below answers for the operator while the
+        #     shell runs as the console's ServiceAccount: the console would check
+        #     a permission it then does not use, and hand somebody a root shell
+        #     under an identity the cluster never saw. ADR-0007's fourth
+        #     condition is the rule that decides this — a request that could not
+        #     build impersonation headers fails, it does not proceed as the
+        #     console — and a shell is the last call that should be the exception
+        #     to it.
+        #
+        #     Before the preflight on purpose: whether we can act as the operator
+        #     at all is a question about the session and the cluster, and asking
+        #     the API server whether *they* may exec is pointless once the answer
+        #     cannot be used.
+        if await asyncio.to_thread(_acts_as_the_operator):
+            error = ImpersonationUnavailable(
+                "This cluster acts as the signed-in operator, and a shell cannot.",
+                detail=(
+                    "Pod exec is opened over a WebSocket, and the upgrade request "
+                    "carries no impersonation headers — so the session would run "
+                    "as this console's ServiceAccount, not as you."
+                ),
+                hint=(
+                    "Use `kubectl exec` with your own credentials, or turn "
+                    "impersonation off for this cluster if the console is meant "
+                    "to act as itself."
+                ),
+                context={**_target(namespace, name), "verb": "create"},
+            )
+            await asyncio.to_thread(
+                _audit, namespace, name, outcome="denied",
+                detail=f"exec refused (cannot impersonate over a WebSocket): {' '.join(command)}",
+                error=f"{error.code}: {error.message}",
+            )
+            logger.warning(
+                "Refused an exec into %s: the cluster impersonates and the exec "
+                "channel cannot carry the operator's identity.", label,
+            )
+            raise error
 
         # 2. Preflight the subresource RBAC actually names (§0.2).
         try:

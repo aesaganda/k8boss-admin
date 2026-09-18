@@ -29,6 +29,7 @@ import time
 from kubernetes.stream.ws_client import ERROR_CHANNEL, RESIZE_CHANNEL
 
 import app.api.exec_ws as exec_ws
+from app.k8s import impersonation
 from tests.conftest import obj
 
 
@@ -170,6 +171,113 @@ def test_exec_is_refused_when_mutations_are_disabled(client, fake_k8s, registere
     assert rows[0].target["name"] == "checkout"
     assert rows[0].cluster_name == "prod-eu"
     assert "mutations_disabled" in rows[0].error
+
+
+def _impersonating(monkeypatch, fake_k8s):
+    """Make ``get_clients`` pin an active decision, the way the real one does.
+
+    ``app.k8s.client.get_clients`` is where ADR-0007's ``decide`` runs and where
+    ``set_current`` is called, and the fake bundle replaces it — so a test about
+    an impersonating request has to put the decision back. Pinned inside the
+    replacement rather than in the test body on purpose: ``asyncio.to_thread``
+    copies the context, so a decision set out here would be invisible to the
+    code under test, which is the whole reason that check lives where it does.
+    """
+    decision = impersonation.Decision(
+        impersonation=impersonation.Impersonation(
+            username="ada@example.test", groups=("platform-admins",),
+        ),
+        subject="ada@example.test",
+    )
+
+    def get_clients():
+        impersonation.set_current(decision)
+        return fake_k8s
+
+    monkeypatch.setattr(exec_ws, "get_clients", get_clients)
+
+
+def test_exec_is_refused_when_the_cluster_acts_as_the_operator(
+    client, fake_k8s, allow_mutations, monkeypatch, registered_cluster,
+):
+    """ADR-0007 condition 4, on the one path that cannot carry the headers.
+
+    ``kubernetes.stream`` opens the channel through ``create_websocket``, which
+    forwards only ``authorization`` and ``sec-websocket-protocol``, so
+    ``Impersonate-User`` never reaches the API server. Running the shell anyway
+    would hand somebody a root prompt under an identity the cluster never saw,
+    after checking a permission the console then does not use.
+    """
+    _allow(fake_k8s)
+    _impersonating(monkeypatch, fake_k8s)
+
+    with client.websocket_connect(
+        f"/api/ws/pods/prod/checkout/exec?cluster_id={registered_cluster.id}"
+    ) as ws:
+        frames, closed = _drain(ws)
+
+    assert len(frames) == 1
+    assert frames[0]["type"] == "error"
+    assert frames[0]["reason"] == "impersonation_unavailable"
+    assert closed
+
+    rows = _audit_rows()
+    assert len(rows) == 1
+    assert (rows[0].verb, rows[0].outcome) == ("create", "denied")
+    assert rows[0].target["subresource"] == "exec"
+    assert "impersonation_unavailable" in rows[0].error
+
+
+def test_the_impersonation_refusal_comes_before_the_access_review(
+    client, fake_k8s, allow_mutations, monkeypatch, registered_cluster,
+):
+    """Whether we can act as the operator is not a question about permissions.
+
+    Asked in the other order, the console reviews a permission it has already
+    decided it cannot use — and an operator who *lacks* exec would be told they
+    lack exec, sending them to widen a ClusterRole that would not have helped.
+    """
+    _allow(fake_k8s)
+    _impersonating(monkeypatch, fake_k8s)
+
+    with client.websocket_connect(
+        f"/api/ws/pods/prod/checkout/exec?cluster_id={registered_cluster.id}"
+    ) as ws:
+        _drain(ws)
+
+    assert fake_k8s.authorization_v1.calls == []
+    assert fake_k8s.core_v1.calls == []
+
+
+def test_a_cluster_that_does_not_impersonate_still_opens_a_shell(
+    client, fake_k8s, allow_mutations, monkeypatch, registered_cluster,
+):
+    """The refusal is about impersonation, not about exec.
+
+    Worth asserting because the cheap way to write the guard — refusing whenever
+    a decision exists at all — would close exec on every cluster, and every other
+    test here would still pass by way of the fake never pinning one.
+    """
+    _allow(fake_k8s)
+    fake_k8s.core_v1.returns("read_namespaced_pod", _pod(("app",)))
+    monkeypatch.setattr(exec_ws, "k8s_stream",
+                        lambda *a, **k: FakeExecClient([("exit", '{"status":"Success"}')]))
+
+    def get_clients():
+        impersonation.set_current(
+            impersonation.Decision(impersonation=None, subject="system:serviceaccount")
+        )
+        return fake_k8s
+
+    monkeypatch.setattr(exec_ws, "get_clients", get_clients)
+
+    with client.websocket_connect(
+        f"/api/ws/pods/prod/checkout/exec?cluster_id={registered_cluster.id}"
+    ) as ws:
+        frames, _ = _drain(ws)
+
+    assert [f["type"] for f in frames] == ["end"]
+    assert [row.outcome for row in _audit_rows()] == ["applied", "applied"]
 
 
 def test_the_websocket_scope_carries_the_cluster_context(client, fake_k8s,
