@@ -32,6 +32,34 @@ body {
 
 /* ── Shell ──────────────────────────────────────────────────────────────── */
 
+/*
+ * The sidebar is dark in both themes.
+ *
+ * Not a second colour system: these are the very tokens PatternFly's own dark
+ * theme redefines, set to the values it gives them, scoped to the sidebar and
+ * to light mode — dark mode already resolves them at :root, so the rule would
+ * be a no-op there and is not asked for. The dark--* aliases PF uses (
+ * `--pf-t--global--dark--background--color--100`) only exist inside
+ * `:root:where(.pf-v6-theme-dark)`, so the palette tokens they point at are
+ * named here instead; those are defined once at :root for both themes.
+ *
+ * Token overrides rather than element rules, because everything in the sidebar
+ * reads them: the nav links, their hover and current states, the expandable
+ * arrows. Styling the elements instead would leave whatever gets added to the
+ * sidebar next drawing itself dark-on-dark.
+ */
+:root[data-theme='light'] .pf-v6-c-page__sidebar {
+  --pf-v6-c-page__sidebar--BackgroundColor: var(--pf-t--color--gray--95, #151515);
+  --pf-v6-c-page__sidebar--xl--BackgroundColor: var(--pf-t--color--gray--95, #151515);
+  --pf-t--global--background--color--action--plain--alt--hover: var(--pf-t--color--gray--80, #292929);
+  --pf-t--global--background--color--action--plain--alt--clicked: var(--pf-t--color--gray--80, #292929);
+  --pf-t--global--text--color--regular: var(--pf-t--color--white, #fff);
+  --pf-t--global--text--color--subtle: var(--pf-t--color--gray--30, #c7c7c7);
+  --pf-t--global--icon--color--regular: var(--pf-t--color--gray--10, #f2f2f2);
+  --pf-t--global--icon--color--subtle: var(--pf-t--color--gray--40, #a3a3a3);
+  --pf-t--global--border--color--default: var(--pf-t--color--gray--60, #4d4d4d);
+}
+
 .admin-brand {
   display: inline-flex;
   align-items: center;
