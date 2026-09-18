@@ -59,7 +59,7 @@ from app.api.logs import (
 from app.audit import recorder
 from app.config import settings
 from app.errors import AdminError, Invalid, MutationsDisabled, from_api_exception
-from app.k8s.client import get_core_v1
+from app.k8s.client import get_clients
 
 logger = logging.getLogger(__name__)
 
@@ -175,9 +175,23 @@ def _open_exec(
     """Open the exec channel. Runs on a worker thread; returns a ``WSClient``.
 
     ``_preload_content=False`` is what makes this a live channel rather than a
-    call that collects the whole output and returns it; it is also the flag
-    ``app.k8s.client._is_streaming`` looks for when choosing the read deadline,
-    so an idle shell is not torn down after 30 seconds.
+    call that collects the whole output and returns it, so an idle shell is not
+    torn down when the output pauses.
+
+    **On a client of its own, not the cached bundle's.** See
+    :meth:`app.k8s.client.ClusterClients.stream_core_v1`: ``kubernetes.stream``
+    opens the channel by assigning over ``ApiClient.request``, which on a shared
+    transport hijacks every other caller for the length of the handshake and,
+    when two handshakes overlap, permanently.
+
+    That client is also why nothing here says anything about a read deadline.
+    The stream replaces ``request`` above ``rest_client``, so neither the
+    deadline nor the ``ClusterUnreachable`` translation installed by
+    ``_cluster_api_client`` runs on this path, and ``_is_streaming`` never sees
+    the call — the handshake is governed by ``websocket-client``'s own default,
+    which is no timeout at all. Worth fixing; it is not fixed here, and a
+    docstring claiming a deadline this path does not have was how it stayed
+    invisible.
 
     ``stderr`` is requested even with a TTY. The API server merges the two
     streams in TTY mode, so the ``stderr`` frames simply never fire there — which
@@ -186,7 +200,7 @@ def _open_exec(
     session and conclude the command produced nothing.
     """
     return k8s_stream(
-        get_core_v1().connect_get_namespaced_pod_exec,
+        get_clients().stream_core_v1().connect_get_namespaced_pod_exec,
         name,
         namespace,
         container=container,

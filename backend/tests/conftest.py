@@ -236,6 +236,19 @@ class FakeClusterClients:
         self.version_api = FakeApi("version_api")
         self.dynamic = FakeApi("dynamic")
 
+    def stream_core_v1(self):
+        """The exec path's own client, which here is simply ``core_v1``.
+
+        The real one hands back a *fresh* ``CoreV1Api`` over an unshared
+        ``ApiClient`` so ``kubernetes.stream``'s assignment over
+        ``ApiClient.request`` cannot reach anything else. There is no transport
+        to isolate in a fake, and the stubs a test registers are on ``core_v1``,
+        so returning it keeps those visible. The property the real method exists
+        for is asserted against a real client bundle in
+        ``tests/test_exec_transport.py``, not here.
+        """
+        return self.core_v1
+
     def close(self) -> None:
         """No transport to release; present so production cleanup paths work."""
 

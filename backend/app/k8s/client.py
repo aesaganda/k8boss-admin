@@ -221,6 +221,44 @@ class ClusterClients:
             self._dynamic = DynamicClient(self.api_client)
         return self._dynamic
 
+    def stream_core_v1(self) -> client.CoreV1Api:
+        """A ``CoreV1Api`` whose ``ApiClient`` nothing else shares, for ``kubernetes.stream``.
+
+        ``kubernetes.stream.stream`` opens its channel by assigning a websocket
+        function over ``ApiClient.request`` and restoring it in a ``finally``.
+        ``ApiClient.__call_api`` reaches the transport only through that
+        attribute, so on the cached per-cluster bundle the assignment is
+        process-wide for the length of the handshake: another thread arriving in
+        that window is handed the websocket function instead of its own request,
+        and comes back as ``ApiException(status=0)`` — which ``from_api_exception``
+        reads as ``cluster_unreachable`` and the operator is told to go and check
+        a CA certificate that is fine.
+
+        Worse, the restore writes back a *captured* value rather than deleting
+        the attribute. Two overlapping handshakes therefore leave the websocket
+        function installed for good: the second captures the first's function as
+        the thing to restore, the first restores the real method, and the second
+        then puts the websocket function back permanently. Every later call on
+        that cluster — listings, the §0.2 preflights, the whole write funnel, the
+        dynamic client — is routed into it, so the console reports a cluster it
+        can no longer read as unreachable until the process restarts, while
+        ``kubectl`` against the same API server works.
+
+        **A fresh client per call, never cached.** Caching it would put two
+        concurrent exec sessions back on one transport, which is the bug.
+
+        **A plain ``ApiClient``, deliberately not** :func:`_cluster_api_client`.
+        The stream replaces ``request`` above ``rest_client``, so that wrapper's
+        deadline, error translation and impersonation headers cannot run on this
+        path whatever we install here; installing them would be a comment
+        claiming a behaviour the code does not have. The ``Configuration`` is
+        shared rather than rebuilt, so there is no second token to decrypt, no
+        second CA file to write and no second TLS handshake — and
+        ``update_params_for_auth`` still applies the bearer token, because that
+        happens in ``__call_api`` before ``request`` is reached.
+        """
+        return client.CoreV1Api(client.ApiClient(configuration=self.api_client.configuration))
+
     def close(self) -> None:
         """Release the transport and the CA temp file. Safe to call twice."""
         try:
