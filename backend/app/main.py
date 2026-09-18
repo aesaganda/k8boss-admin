@@ -55,6 +55,7 @@ from app.api.cluster_status import router as cluster_status_router
 from app.api.clusters import router as clusters_router
 from app.api.debug import router as debug_router
 from app.api.events import router as events_router
+from app.api.identity_providers import router as identity_providers_router
 from app.api.exec_ws import router as exec_ws_router
 from app.api.health import router as health_router
 from app.api.logs import router as logs_router
@@ -164,6 +165,12 @@ register_exception_handlers(app)
 
 app.include_router(health_router)
 app.include_router(auth_router)
+# ADR-0011. Its own module rather than more of `auth.py`: the sign-in
+# routes are a flow and these are CRUD over one table, and `auth.py` was
+# already the longest router in the tree. Registered after it so the
+# narrower `/api/auth/providers` paths are matched before `auth.py`'s
+# `/api/auth/{provider}/...` patterns can see them.
+app.include_router(identity_providers_router)
 app.include_router(clusters_router)
 app.include_router(cluster_status_router)
 app.include_router(resources_router)

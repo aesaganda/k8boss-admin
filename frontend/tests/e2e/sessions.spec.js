@@ -16,9 +16,6 @@
  *                             em dash with a reason, never as an empty cell —
  *                             an administrator revoking by elimination reads
  *                             that cell as evidence (rule 11.2).
- *   not configured vs absent  An unconfigured provider is named as such. A
- *                             panel that simply omitted it could not tell that
- *                             apart from a method this console does not have.
  */
 import { expect, test } from '@playwright/test';
 
@@ -84,56 +81,5 @@ test.describe('§12.7 active sessions', () => {
 
     await expect(page.getByText('Session management is disabled')).toBeVisible();
     await expect(page.getByRole('grid', { name: 'Active console sessions' })).toHaveCount(0);
-  });
-});
-
-test.describe('§12.8 configured sign-in methods', () => {
-  test('the Users page names how people sign in and what confers admin', async ({ page }) => {
-    await mockApi(page, ADMIN);
-    await page.goto('/users');
-
-    const grid = page.getByRole('grid', { name: 'Sign-in methods' });
-    await expect(grid).toContainText('LDAP / Active Directory');
-    await expect(grid).toContainText('ldaps://directory.internal.example:636');
-    // The answer to "why is this person an administrator", which the accounts
-    // table below cannot give.
-    await expect(grid).toContainText('cn=platform-admins,ou=groups');
-    // The variable to change, because the values themselves are read-only here.
-    await expect(grid).toContainText('LDAP_');
-
-    // Unconfigured methods are named rather than dropped, and they are not rows
-    // in the table an administrator came for.
-    await expect(grid).not.toContainText('SAML single sign-on');
-    await expect(page.getByText(/Not configured on this deployment/)).toContainText(
-      'SAML single sign-on (SAML_*)',
-    );
-  });
-
-  test('a failed read says so instead of reporting no methods', async ({ page }) => {
-    await mockApi(page, ADMIN);
-    // Registered after mockApi, so it wins: Playwright matches routes in
-    // reverse registration order.
-    await page.route('**/api/auth/providers**', (route) =>
-      route.fulfill({
-        status: 502,
-        contentType: 'application/json',
-        body: JSON.stringify({
-          error: 'upstream_error',
-          message: 'the console database is unavailable',
-          detail: null,
-          hint: null,
-          context: {},
-        }),
-      }),
-    );
-    await page.goto('/users');
-
-    // An empty panel would be a visibly impossible answer on a console that
-    // just authenticated the request, so the page reports the failure and the
-    // accounts table below still renders.
-    await expect(
-      page.getByText('The configured sign-in methods could not be read'),
-    ).toBeVisible();
-    await expect(page.getByRole('grid', { name: 'Console users' })).toBeVisible();
   });
 });

@@ -90,7 +90,7 @@ export default function AppNav() {
   const administrationRoutes = [
     '/clusters',
     '/audit',
-    ...(canManageUsers ? ['/users', '/sessions'] : []),
+    ...(canManageUsers ? ['/identity-providers', '/users', '/sessions'] : []),
   ];
 
   return (
@@ -209,6 +209,12 @@ export default function AppNav() {
         <NavSection id="administration" title="Administration" routes={administrationRoutes}>
           <RouterNavItem to="/clusters">Clusters</RouterNavItem>
           <RouterNavItem to="/audit">Audit log</RouterNavItem>
+          {/* §12.8, ADR-0011. Before Users, because it is where the accounts
+              below it come from: configure the directory, then look at who has
+              signed in through it. */}
+          {canManageUsers && (
+            <RouterNavItem to="/identity-providers">Identity providers</RouterNavItem>
+          )}
           {canManageUsers && <RouterNavItem to="/users">Users</RouterNavItem>}
           {/* §12.7. Below Users and gated with it: revoking somebody else's
               session is the same administrator's job as deactivating their

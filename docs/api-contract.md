@@ -1679,8 +1679,9 @@ is noise in the one table that must not have any.
 
 ### 12.4 Single sign-on
 
-**Four providers, one of each per deployment**, all configured from the
-environment exactly as LDAP is:
+**Four providers, one of each per deployment**, configured from the environment
+or from the console (§12.8, [ADR-0011](adr-0011-database-backed-identity-providers.md)),
+exactly as LDAP is:
 
 | `name` | What it is | Where identity comes from | Settings |
 |---|---|---|---|
@@ -1695,6 +1696,30 @@ across issuers — not a config key, and the console says it does not do that
 rather than half-doing it. Four different kinds do not collide the same way: each
 account row carries the `auth_source` that owns it, so a username two of them
 assert is refused rather than merged (see **Account binding** below).
+
+**ADR-0011 narrowed that sentence rather than dropping it.** A provider's
+configuration is now editable from the console (§12.8), stored **one row per
+kind** — `kind` is unique in `identity_providers`, so a second issuer of the same
+kind cannot exist, and the subject collision above therefore cannot arise. Three
+of the four costs are paid (a table, a CRUD surface, encrypted secrets); the
+fourth does not apply. *N* providers of one kind remains refused on exactly the
+terms above.
+
+Where a kind's configuration comes from, in order:
+
+1. a row in `identity_providers` — **including a disabled row**, which is this
+   deployment's decision that the kind is off;
+2. otherwise the `{KIND}_*` environment variables.
+
+A row therefore wins over an enabled variable, and **deleting a row falls back to
+the environment rather than to off**. Both halves are normative. An operator who
+switches a provider off in the console must not have it switched back on by a
+variable in a Compose file they have never read; and an operator who deletes a
+row must get the deployment's own configuration back, because a delete that
+silently removed the only way into a console would be the worst button in this
+API. Every read reports which of the two answered, and a refusal's `hint` names
+whichever one is in effect — telling somebody to set `OIDC_ISSUER` while a stored
+row is live sends them to change something that changes nothing.
 
 The routes are generic. There is one `/start`, one callback per binding, and one
 place where the throttle, the audit calls, the account provisioning and the
@@ -2035,15 +2060,28 @@ the first tells an incident review that access was cut when it was not. A
 `token_hash` that is not 64 hex characters is `422 invalid` rather than `404`:
 a 404 would claim the shape was right and the row was missing.
 
-### 12.8 `GET /api/auth/providers`
+### 12.8 `/api/auth/providers`
 
-Administrator-only, and **read-only**. One entry per sign-in method this build
-supports, configured or not:
+Administrator-only. `GET` returns the standard list envelope of every sign-in
+method this build supports, configured or not; `PUT /{kind}` stores one kind's
+configuration; `DELETE /{kind}` removes what is stored. `kind` is one of `ldap`,
+`oidc`, `oauth`, `openshift`, `saml` — anything else is `422 invalid`, checked
+before any database access. See [ADR-0011](adr-0011-database-backed-identity-providers.md).
 
 ```json
-{ "name": "ldap", "label": "LDAP / Active Directory", "enabled": true,
+{ "name": "ldap", "title": "LDAP / Active Directory",
+  "summary": "Search-and-bind against a directory: …", "caveat": null,
+  "label": "LDAP / Active Directory",
+  "enabled": true, "usable": true, "missing": [],
+  "source": "database", "stored": true,
   "endpoint": "ldaps://directory.internal.example:636",
-  "admin_group": "cn=platform-admins,ou=groups", "settings_prefix": "LDAP_" }
+  "admin_group": "cn=platform-admins,ou=groups",
+  "settings_prefix": "LDAP_", "editable": true,
+  "fields": [ { "name": "url", "label": "Server URL", "type": "str",
+                "secret": false, "required": true, "help": "…",
+                "placeholder": "ldaps://directory.example.com:636" } ],
+  "values": { "url": "ldaps://directory.internal.example:636", "start_tls": false },
+  "secrets_stored": ["bind_password"], "secrets_unreadable": false }
 ```
 
 This is the private counterpart of §12.1. Everything here — an issuer, a
@@ -2052,24 +2090,72 @@ discovery endpoint withholds, because that one is unauthenticated and returning
 these values there would let anyone who can reach the console enumerate its
 identity infrastructure. It answers the question the Users table raises and
 cannot: an `ldap` account with the `admin` role says nothing about *which*
-directory it came from or which group promoted it, and until this endpoint the
-only place those lived was the container's environment.
+directory it came from or which group promoted it.
 
-**Unconfigured methods are included, with `enabled: false`.** A list of only
-what is switched on cannot distinguish "we have not set our SAML provider up"
-from "this console cannot do SAML", and those call for different actions.
-`enabled` follows exactly the rule §12.1 follows: a provider is enabled only
-when every value its flow needs is present, so this panel and the login page's
-buttons cannot disagree.
+**`enabled` and `usable` are separate fields and neither may be derived from the
+other.** `enabled` is what an operator switched on. `usable` is whether a sign-in
+through it can complete, and it is each provider module's own `enabled()` — the
+same function the login page consults, so the two can never disagree. A provider
+that is `enabled` and not `usable` gets no button (a button that leads to an
+error reads as a broken console rather than an unconfigured one), and `missing`
+names the required fields that are empty. A UI that rendered only `enabled` would
+say "on" while nothing appeared where people sign in, with nothing anywhere
+explaining the gap.
 
-**There is no writer, and that is a decision rather than a gap.** Providers are
-environment configuration, one of each kind per deployment (§12.4), and several
-of the same kind is a design change — a table, a CRUD surface, per-row encrypted
-secrets and a subject-collision story across issuers. A form here would edit a
-copy of the process environment and report a save that changed nothing, which is
-the confidently-wrong answer this contract is written against. Each entry names
-the variable prefix that does change it; `endpoint` and `admin_group` are `null`
-when nothing is configured, never `""`.
+**Unconfigured methods are included, with `enabled: false`.** A list of only what
+is switched on cannot distinguish "we have not set our SAML provider up" from
+"this console cannot do SAML", and those call for different actions.
+
+**No secret value is ever returned**, to anybody, including an administrator.
+`secrets_stored` names the secret fields that **have** a stored value;
+`secrets_unreadable` is true when a stored blob exists and could not be
+decrypted, which means the encryption key changed. That third state is reported
+rather than shown as configured, because "the bind password is set" sends an
+administrator to debug the directory while the fault is the key.
+
+`fields` is the kind's own schema, and the console's form is rendered from it.
+That is normative because of what it prevents: a field the sign-in flow reads
+that is missing from the screen that configures it.
+
+#### `PUT /api/auth/providers/{kind}`
+
+Body `{ "enabled": bool, "values": { … } }`. Create-or-replace: the kind *is* the
+identity of the row, so there is no id to allocate and no `POST`/`409` pair.
+
+The submitted values are **merged over what is stored before validation**, so a
+form that sends four fields is not a request to blank the other ten, and
+`required` is checked against the effective configuration rather than against the
+fragment that arrived.
+
+**An omitted secret keeps the stored one; an empty string clears it.** The
+asymmetry is forced by the rule above it: the listing never returns a secret, so
+the form has none to send back, and a plain replace would wipe the bind password
+every time somebody corrected a typo in the search base — surfacing later as a
+credential rejection from a directory that is fine.
+
+**Validation happens at the write, not at the next sign-in.** Every rule mirrors
+a refusal that already exists further in — plain `ldap://` without StartTLS, an
+issuer that is not https, an OAuth or OpenShift endpoint that is not https, a
+search filter with no `{username}` — moved to the moment somebody can still fix
+it. `required` and those rules apply only to a row saved as **enabled**:
+half-filling a provider and leaving it off is how a configuration is staged, and
+refusing that would push an administrator back into editing a file.
+
+#### `DELETE /api/auth/providers/{kind}`
+
+`204`, or `404 not_found` when nothing is stored for that kind — "the stored
+configuration is gone" and "there was nothing stored" are different answers, and
+only the first changed how this deployment authenticates. What remains in effect
+afterwards is the environment (see §12.4), which the UI must say **before** the
+click.
+
+Every state change is recorded in §10 as a `console` record against resource
+`identity_providers` — `create`, `patch` or `delete` — **including the
+refusals**, as `denied`. "Who tried to point our OIDC at a different issuer" is
+the question this table is read for, and a validation error that left nothing
+behind cannot answer it. The `detail` names the fields that were submitted and
+never their values: the trail is append-only, so a bind password written into it
+could not be removed afterwards.
 
 ---
 

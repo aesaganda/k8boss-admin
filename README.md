@@ -105,9 +105,13 @@ Start with `docker compose --env-file .env.auth up --build`, sign in, then open
 users table is empty and never overwrite an existing account. Set
 `AUTH_COOKIE_SECURE=true` behind HTTPS.
 
-That page also lists the sign-in methods this deployment has configured — where
-each one points and which group confers the `admin` role — read-only, because
-they are the environment variables below and a form there would edit a copy.
+**Administration -> Identity providers** lists every sign-in method this build
+supports — where each one points, which group confers the `admin` role, and
+whether it is configured in the console or from the variables below — and
+configures them. One provider of each kind; the variables remain as the fallback
+for a kind with nothing stored, so none of this has to be used. Deleting a stored
+provider gives the variables back rather than switching the provider off. See
+[`docs/adr-0011-database-backed-identity-providers.md`](docs/adr-0011-database-backed-identity-providers.md).
 **Administration -> Sessions** lists every session that can currently act on the
 console, with the address and browser it was opened from, and revokes one. An
 account being active and a session being live are different facts: deactivating
@@ -116,7 +120,9 @@ the session gone and the account left alone.
 
 LDAP is search-and-bind: the service account finds one user DN, then the console
 binds as that DN with the submitted password. Plain-text LDAP is refused; use
-`ldaps://` or StartTLS.
+`ldaps://` or StartTLS. These variables are the fallback — the same values can be
+typed into **Administration -> Identity providers**, which stores them (secrets
+encrypted) and takes precedence from then on.
 
 ```dotenv
 AUTH_ENABLED=true

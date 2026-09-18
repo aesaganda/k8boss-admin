@@ -61,11 +61,11 @@ from urllib.parse import urlencode
 
 import httpx
 
-from app.config import settings
 from app.errors import IdentityProviderUnavailable, PermissionDenied
 from app.identity import handshake as handshake_service
 from app.identity import sso
 from app.identity.sso import Begin, FederatedIdentity
+from app.identity import provider_config
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +73,16 @@ logger = logging.getLogger(__name__)
 NAME = "oauth"
 BINDING = "query"
 CALLBACK_SUFFIX = "callback"
+
+def _cfg() -> provider_config.ProviderConfig:
+    """This deployment's oauth configuration: the stored row, else the environment.
+
+    Resolved per call rather than held, because a cached provider configuration
+    outlives the edit that changed it — see :mod:`app.identity.provider_store`
+    on why nothing there is cached.
+    """
+    return provider_config.resolve(NAME)
+
 
 
 def enabled() -> bool:
@@ -88,12 +98,13 @@ def enabled() -> bool:
     session at that point would be signing people in on the strength of a
     successful HTTP call rather than on any statement about who they are.
     """
+    cfg = _cfg()
     return bool(
-        settings.oauth_enabled
-        and settings.oauth_authorization_url.strip()
-        and settings.oauth_token_url.strip()
-        and settings.oauth_userinfo_url.strip()
-        and settings.oauth_client_id.strip()
+        cfg.enabled
+        and cfg.authorization_url.strip()
+        and cfg.token_url.strip()
+        and cfg.userinfo_url.strip()
+        and cfg.client_id.strip()
     )
 
 
@@ -101,27 +112,34 @@ def require_enabled() -> None:
     if not enabled():
         raise sso.not_configured(
             NAME,
-            "Set OAUTH_ENABLED, OAUTH_AUTHORIZATION_URL, OAUTH_TOKEN_URL, "
-            "OAUTH_USERINFO_URL and OAUTH_CLIENT_ID, then restart the console.",
+            provider_config.configure_hint(
+                _cfg(),
+                "OAUTH_ENABLED, OAUTH_AUTHORIZATION_URL, OAUTH_TOKEN_URL, "
+                "OAUTH_USERINFO_URL and OAUTH_CLIENT_ID",
+            ),
         )
 
 
 def label() -> str:
-    return settings.oauth_button_label
+    cfg = _cfg()
+    return cfg.button_label
 
 
 def admin_group() -> str:
-    return settings.oauth_admin_group
+    cfg = _cfg()
+    return cfg.admin_group
 
 
 def configured_callback_url() -> str:
-    return settings.oauth_redirect_url.strip()
+    cfg = _cfg()
+    return cfg.redirect_url.strip()
 
 
 def _verify_tls() -> bool | str:
+    cfg = _cfg()
     return sso.tls_verify(
-        verify=settings.oauth_verify_tls,
-        ca_file=settings.oauth_ca_certificate_file,
+        verify=cfg.verify_tls,
+        ca_file=cfg.ca_certificate_file,
         provider=NAME,
     )
 
@@ -139,18 +157,19 @@ def authorization_url(*, redirect_uri: str, state: str, code_challenge: str) -> 
     empty: several servers reject ``scope=`` as a malformed parameter, and the
     error page they produce names the parameter without saying it was empty.
     """
+    cfg = _cfg()
     params = {
         "response_type": "code",
-        "client_id": settings.oauth_client_id.strip(),
+        "client_id": cfg.client_id.strip(),
         "redirect_uri": redirect_uri,
         "state": state,
         "code_challenge": code_challenge,
         "code_challenge_method": "S256",
     }
-    scopes = settings.oauth_scopes.strip()
+    scopes = cfg.scopes.strip()
     if scopes:
         params["scope"] = scopes
-    return f"{settings.oauth_authorization_url.strip()}?{urlencode(params)}"
+    return f"{cfg.authorization_url.strip()}?{urlencode(params)}"
 
 
 def exchange_code(*, code: str, code_verifier: str, redirect_uri: str) -> dict[str, Any]:
@@ -159,15 +178,16 @@ def exchange_code(*, code: str, code_verifier: str, redirect_uri: str) -> dict[s
     Most servers this provider exists for require a client secret, which is why
     it is prominent in the README even though it is optional here.
     """
+    cfg = _cfg()
     return sso.exchange_authorization_code(
-        token_url=settings.oauth_token_url.strip(),
-        client_id=settings.oauth_client_id.strip(),
-        client_secret=settings.oauth_client_secret.get_secret_value(),
+        token_url=cfg.token_url.strip(),
+        client_id=cfg.client_id.strip(),
+        client_secret=cfg.client_secret,
         code=code,
         code_verifier=code_verifier,
         redirect_uri=redirect_uri,
         verify=_verify_tls(),
-        timeout=settings.oauth_timeout_seconds,
+        timeout=cfg.timeout_seconds,
         provider=NAME,
     )
 
@@ -180,12 +200,13 @@ def fetch_userinfo(access_token: str) -> dict[str, Any]:
     result is never cached: a cached profile would outlive the account being
     disabled at the provider.
     """
+    cfg = _cfg()
     try:
         with httpx.Client(
-            timeout=settings.oauth_timeout_seconds, verify=_verify_tls()
+            timeout=cfg.timeout_seconds, verify=_verify_tls()
         ) as client:
             response = client.get(
-                settings.oauth_userinfo_url.strip(),
+                cfg.userinfo_url.strip(),
                 headers={
                     "Authorization": f"Bearer {access_token}",
                     "Accept": "application/json",
@@ -207,7 +228,7 @@ def fetch_userinfo(access_token: str) -> dict[str, Any]:
             "just signed in.",
             detail=f"userinfo returned HTTP {response.status_code}",
             hint="The token is missing the scope the userinfo endpoint requires. "
-                 f"OAUTH_SCOPES is currently {settings.oauth_scopes.strip()!r}.",
+                 f"OAUTH_SCOPES is currently {cfg.scopes.strip()!r}.",
             context={"provider": NAME},
         )
     if response.status_code != 200:
@@ -249,46 +270,48 @@ def identity_from_userinfo(document: dict[str, Any]) -> FederatedIdentity:
     sign-in is refused, which is a configuration error an administrator can fix
     in one place, rather than a binding that silently is not one.
     """
-    subject = sso.read_field(document, settings.oauth_subject_field)
+    cfg = _cfg()
+    subject = sso.read_field(document, cfg.subject_field)
     subject = str(subject).strip() if subject is not None else ""
     if not subject:
         raise PermissionDenied(
             "The OAuth provider's profile carried no stable identifier for this "
             "account.",
-            hint=f"OAUTH_SUBJECT_FIELD is {settings.oauth_subject_field!r} and the "
+            hint=f"OAUTH_SUBJECT_FIELD is {cfg.subject_field!r} and the "
                  "userinfo document does not contain it. Set it to the field this "
                  "provider uses — GitHub and GitLab both call it 'id'.",
             context={"provider": NAME},
         )
 
-    username = sso.read_field(document, settings.oauth_username_field)
+    username = sso.read_field(document, cfg.username_field)
     if username is None:
         # Falling back to the email and then to the subject, in that order: an
         # email is a name a person recognises in an audit row, and a numeric
         # subject is not — but a numeric subject is still better than refusing a
         # sign-in over a cosmetic field.
-        username = sso.read_field(document, settings.oauth_email_field) or subject
+        username = sso.read_field(document, cfg.email_field) or subject
 
-    email = sso.read_field(document, settings.oauth_email_field)
-    display_name = sso.read_field(document, settings.oauth_display_name_field)
+    email = sso.read_field(document, cfg.email_field)
+    display_name = sso.read_field(document, cfg.display_name_field)
 
     return FederatedIdentity(
         subject=subject,
         username=str(username),
         display_name=str(display_name) if display_name else None,
         email=str(email) if email else None,
-        groups=sso.parse_groups(sso.read_field(document, settings.oauth_groups_field)),
+        groups=sso.parse_groups(sso.read_field(document, cfg.groups_field)),
     )
 
 
 def check_group_allowlist(identity: FederatedIdentity) -> None:
+    cfg = _cfg()
     sso.check_group_allowlist(
         identity,
-        allowed=settings.oauth_allowed_groups,
+        allowed=cfg.allowed_groups,
         provider=NAME,
         source_hint=(
             f"The provider's userinfo document has no "
-            f"{settings.oauth_groups_field!r} field. Point OAUTH_GROUPS_FIELD at "
+            f"{cfg.groups_field!r} field. Point OAUTH_GROUPS_FIELD at "
             "the field it does use, request the scope that carries it, or clear "
             "OAUTH_ALLOWED_GROUPS."
         ),

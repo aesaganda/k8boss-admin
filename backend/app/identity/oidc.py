@@ -72,11 +72,11 @@ from urllib.parse import urlencode
 
 import httpx
 
-from app.config import settings
 from app.errors import IdentityProviderUnavailable, PermissionDenied
 from app.identity import handshake as handshake_service
 from app.identity import sso
 from app.identity.sso import Begin, FederatedIdentity
+from app.identity import provider_config
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +128,16 @@ NAME = "oidc"
 BINDING = "query"
 CALLBACK_SUFFIX = "callback"
 
+def _cfg() -> provider_config.ProviderConfig:
+    """This deployment's oidc configuration: the stored row, else the environment.
+
+    Resolved per call rather than held, because a cached provider configuration
+    outlives the edit that changed it — see :mod:`app.identity.provider_store`
+    on why nothing there is cached.
+    """
+    return provider_config.resolve(NAME)
+
+
 
 def enabled() -> bool:
     """True when this deployment has a usable OIDC configuration.
@@ -137,10 +147,11 @@ def enabled() -> bool:
     worse than an absent button: the operator concludes SSO is broken rather than
     unconfigured.
     """
+    cfg = _cfg()
     return bool(
-        settings.oidc_enabled
-        and settings.oidc_issuer.strip()
-        and settings.oidc_client_id.strip()
+        cfg.enabled
+        and cfg.issuer.strip()
+        and cfg.client_id.strip()
     )
 
 
@@ -149,21 +160,25 @@ def require_enabled() -> None:
     if not enabled():
         raise sso.not_configured(
             NAME,
-            "Set OIDC_ENABLED, OIDC_ISSUER and OIDC_CLIENT_ID, then restart "
-            "the console.",
+            provider_config.configure_hint(
+                _cfg(), "OIDC_ENABLED, OIDC_ISSUER and OIDC_CLIENT_ID"
+            ),
         )
 
 
 def label() -> str:
-    return settings.oidc_button_label
+    cfg = _cfg()
+    return cfg.button_label
 
 
 def admin_group() -> str:
-    return settings.oidc_admin_group
+    cfg = _cfg()
+    return cfg.admin_group
 
 
 def configured_callback_url() -> str:
-    return settings.oidc_redirect_url.strip()
+    cfg = _cfg()
+    return cfg.redirect_url.strip()
 
 
 def reset_discovery_cache() -> None:
@@ -189,17 +204,19 @@ def _tls_context():
     "the provider's signing keys could not be read" — every sign-in failing on a
     deployment whose CA is configured correctly.
     """
+    cfg = _cfg()
     return sso.tls_context(
-        verify=settings.oidc_verify_tls,
-        ca_file=settings.oidc_ca_certificate_file,
+        verify=cfg.verify_tls,
+        ca_file=cfg.ca_certificate_file,
     )
 
 
 def _verify_tls() -> bool | str:
     """What to hand httpx as ``verify``. See :func:`app.identity.sso.tls_verify`."""
+    cfg = _cfg()
     return sso.tls_verify(
-        verify=settings.oidc_verify_tls,
-        ca_file=settings.oidc_ca_certificate_file,
+        verify=cfg.verify_tls,
+        ca_file=cfg.ca_certificate_file,
         provider=NAME,
     )
 
@@ -217,6 +234,7 @@ def discovery() -> dict[str, Any]:
     send an operator to two completely different places, and the second one is a
     dead end when the first is true.
     """
+    cfg = _cfg()
     global _discovery_cache, _discovery_fetched_at
     if (
         _discovery_cache is not None
@@ -224,11 +242,11 @@ def discovery() -> dict[str, Any]:
     ):
         return _discovery_cache
 
-    issuer = settings.oidc_issuer.strip().rstrip("/")
+    issuer = cfg.issuer.strip().rstrip("/")
     url = f"{issuer}/.well-known/openid-configuration"
     try:
         with httpx.Client(
-            timeout=settings.oidc_timeout_seconds, verify=_verify_tls()
+            timeout=cfg.timeout_seconds, verify=_verify_tls()
         ) as client:
             response = client.get(url)
             response.raise_for_status()
@@ -299,12 +317,13 @@ def authorization_url(
     *, redirect_uri: str, state: str, nonce: str, code_challenge: str
 ) -> str:
     """Where to send the browser to begin the handshake."""
+    cfg = _cfg()
     document = discovery()
     params = {
         "response_type": "code",
-        "client_id": settings.oidc_client_id.strip(),
+        "client_id": cfg.client_id.strip(),
         "redirect_uri": redirect_uri,
-        "scope": settings.oidc_scopes.strip() or "openid profile email",
+        "scope": cfg.scopes.strip() or "openid profile email",
         "state": state,
         "nonce": nonce,
         "code_challenge": code_challenge,
@@ -320,21 +339,22 @@ def exchange_code(*, code: str, code_verifier: str, redirect_uri: str) -> dict[s
     configured) relies on PKCE alone, which is the current recommendation for
     browser-driven flows and is why the secret is optional rather than required.
     """
+    cfg = _cfg()
     document = discovery()
     data = {
         "grant_type": "authorization_code",
         "code": code,
         "redirect_uri": redirect_uri,
-        "client_id": settings.oidc_client_id.strip(),
+        "client_id": cfg.client_id.strip(),
         "code_verifier": code_verifier,
     }
-    secret = settings.oidc_client_secret.get_secret_value()
+    secret = cfg.client_secret
     if secret:
         data["client_secret"] = secret
 
     try:
         with httpx.Client(
-            timeout=settings.oidc_timeout_seconds, verify=_verify_tls()
+            timeout=cfg.timeout_seconds, verify=_verify_tls()
         ) as client:
             response = client.post(document["token_endpoint"], data=data)
     except Exception as exc:  # noqa: BLE001
@@ -378,6 +398,7 @@ def verify_id_token(id_token: str, *, nonce: str | None) -> dict[str, Any]:
     See the module docstring for what each check prevents. Nothing in the token
     is read before this function returns.
     """
+    cfg = _cfg()
     import jwt  # imported here so the module loads where SSO is not configured
 
     document = discovery()
@@ -391,7 +412,7 @@ def verify_id_token(id_token: str, *, nonce: str | None) -> dict[str, Any]:
             jwk_client = jwt.PyJWKClient(
                 jwks_uri,
                 cache_keys=True,
-                timeout=settings.oidc_timeout_seconds,
+                timeout=cfg.timeout_seconds,
                 ssl_context=_tls_context(),
             )
             _jwk_clients[jwks_uri] = jwk_client
@@ -414,7 +435,7 @@ def verify_id_token(id_token: str, *, nonce: str | None) -> dict[str, Any]:
             signing_key.key,
             # Never the token's own `alg`. See ALLOWED_ALGORITHMS.
             algorithms=list(ALLOWED_ALGORITHMS),
-            audience=settings.oidc_client_id.strip(),
+            audience=cfg.client_id.strip(),
             issuer=document["issuer"],
             options={
                 "require": ["exp", "iat", "iss", "aud", "sub"],
@@ -423,7 +444,7 @@ def verify_id_token(id_token: str, *, nonce: str | None) -> dict[str, Any]:
                 "verify_iss": True,
                 "verify_signature": True,
             },
-            leeway=settings.oidc_clock_skew_seconds,
+            leeway=cfg.clock_skew_seconds,
         )
     except jwt.PyJWTError as exc:
         # A token that fails validation is a refusal, not a provider outage. The
@@ -473,6 +494,7 @@ def identity_from_claims(claims: dict[str, Any]) -> OidcIdentity:
     receive it, so the absent case is the common one during setup — exactly when
     an administrator would otherwise be quietly downgraded.
     """
+    cfg = _cfg()
     subject = str(claims.get("sub") or "").strip()
     if not subject:
         # Unreachable while `require: ["sub"]` holds, checked anyway: it is the
@@ -484,17 +506,17 @@ def identity_from_claims(claims: dict[str, Any]) -> OidcIdentity:
         )
 
     username = (
-        _claim(claims, settings.oidc_username_claim)
+        _claim(claims, cfg.username_claim)
         or _claim(claims, "email")
         or subject
     )
-    email = _claim(claims, settings.oidc_email_claim)
-    display_name = _claim(claims, settings.oidc_display_name_claim) or None
+    email = _claim(claims, cfg.email_claim)
+    display_name = _claim(claims, cfg.display_name_claim) or None
 
     # Absent stays absent, and a bare string is split rather than wrapped: see
     # `sso.parse_groups`, which the other three providers use for the same
     # reason.
-    groups = sso.parse_groups(_claim(claims, settings.oidc_groups_claim))
+    groups = sso.parse_groups(_claim(claims, cfg.groups_claim))
 
     return OidcIdentity(
         subject=subject,
@@ -514,12 +536,13 @@ def check_group_allowlist(identity: OidcIdentity) -> None:
     **absent**, the sign-in is refused — the opposite of the role-mapping rule,
     and for the reason :func:`app.identity.sso.check_group_allowlist` states.
     """
+    cfg = _cfg()
     sso.check_group_allowlist(
         identity,
-        allowed=settings.oidc_allowed_groups,
+        allowed=cfg.allowed_groups,
         provider=NAME,
         source_hint=(
-            f"The issuer did not include the {settings.oidc_groups_claim!r} "
+            f"The issuer did not include the {cfg.groups_claim!r} "
             "claim. Add the claim to the client's token mapping, request the "
             "scope that carries it, or clear OIDC_ALLOWED_GROUPS."
         ),

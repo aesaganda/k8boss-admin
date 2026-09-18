@@ -7,10 +7,26 @@ import ssl
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
-from app.config import settings
 from app.errors import IdentityProviderUnavailable
+from app.identity import provider_config
 
 logger = logging.getLogger(__name__)
+
+#: This provider's key in `provider_config.SPECS`. LDAP is not in the single
+#: sign-on registry — it has no handshake and no callback — but it is configured
+#: the same way as the four that are, so it carries the same name.
+NAME = "ldap"
+
+
+def _cfg() -> provider_config.ProviderConfig:
+    """This deployment's ldap configuration: the stored row, else the environment.
+
+    Resolved per call rather than held, because a cached provider configuration
+    outlives the edit that changed it — see :mod:`app.identity.provider_store`
+    on why nothing there is cached.
+    """
+    return provider_config.resolve(NAME)
+
 
 
 @dataclass(frozen=True)
@@ -46,6 +62,7 @@ def _value(entry, attribute: str) -> str | None:
 
 def authenticate(username: str, password: str) -> LDAPProfile | None:
     """Search for a directory user, then prove the password by binding as its DN."""
+    cfg = _cfg()
     try:
         from ldap3 import Connection, Server, SUBTREE, Tls
         from ldap3.core.exceptions import LDAPException
@@ -55,31 +72,41 @@ def authenticate(username: str, password: str) -> LDAPProfile | None:
             "LDAP support is enabled but the ldap3 package is not installed."
         ) from exc
 
-    parsed = urlparse(settings.ldap_url)
+    parsed = urlparse(cfg.url)
     if parsed.scheme not in {"ldap", "ldaps"} or not parsed.hostname:
-        raise IdentityProviderUnavailable("LDAP_URL must be an ldap:// or ldaps:// URL.")
-    use_ssl = parsed.scheme == "ldaps"
-    if not use_ssl and not settings.ldap_start_tls:
         raise IdentityProviderUnavailable(
-            "LDAP credentials may not be sent in clear text. Use ldaps:// or enable LDAP_START_TLS."
+            "The directory URL must be an ldap:// or ldaps:// URL.",
+            hint=provider_config.configure_hint(cfg, "LDAP_URL"),
         )
-    if not settings.ldap_user_search_base:
-        raise IdentityProviderUnavailable("LDAP_USER_SEARCH_BASE is required.")
-    if "{username}" not in settings.ldap_user_search_filter:
+    use_ssl = parsed.scheme == "ldaps"
+    if not use_ssl and not cfg.start_tls:
         raise IdentityProviderUnavailable(
-            "LDAP_USER_SEARCH_FILTER must contain the {username} placeholder."
+            "LDAP credentials may not be sent in clear text. Use ldaps:// or "
+            "enable StartTLS.",
+            hint=provider_config.configure_hint(cfg, "LDAP_URL or LDAP_START_TLS"),
+        )
+    if not cfg.user_search_base:
+        raise IdentityProviderUnavailable(
+            "A user search base is required to find anybody in the directory.",
+            hint=provider_config.configure_hint(cfg, "LDAP_USER_SEARCH_BASE"),
+        )
+    if "{username}" not in cfg.user_search_filter:
+        raise IdentityProviderUnavailable(
+            "The user search filter must contain the {username} placeholder, or "
+            "it matches the same entry for everybody.",
+            hint=provider_config.configure_hint(cfg, "LDAP_USER_SEARCH_FILTER"),
         )
 
     tls = Tls(
-        validate=ssl.CERT_REQUIRED if settings.ldap_tls_validate else ssl.CERT_NONE,
-        ca_certs_file=settings.ldap_ca_certificate_file or None,
+        validate=ssl.CERT_REQUIRED if cfg.tls_validate else ssl.CERT_NONE,
+        ca_certs_file=cfg.ca_certificate_file or None,
     )
     server = Server(
         parsed.hostname,
         port=parsed.port or (636 if use_ssl else 389),
         use_ssl=use_ssl,
         tls=tls,
-        connect_timeout=settings.ldap_connect_timeout_seconds,
+        connect_timeout=cfg.connect_timeout_seconds,
     )
 
     def connect(user: str = "", secret: str = ""):
@@ -87,12 +114,12 @@ def authenticate(username: str, password: str) -> LDAPProfile | None:
             server,
             user=user or None,
             password=secret or None,
-            receive_timeout=settings.ldap_connect_timeout_seconds,
+            receive_timeout=cfg.connect_timeout_seconds,
             raise_exceptions=False,
         )
         if not connection.open():
             raise IdentityProviderUnavailable("The LDAP server did not accept a connection.")
-        if settings.ldap_start_tls and not use_ssl and not connection.start_tls():
+        if cfg.start_tls and not use_ssl and not connection.start_tls():
             connection.unbind()
             raise IdentityProviderUnavailable("The LDAP server did not establish StartTLS.")
         return connection
@@ -101,8 +128,8 @@ def authenticate(username: str, password: str) -> LDAPProfile | None:
     user_connection = None
     try:
         search_connection = connect(
-            settings.ldap_bind_dn,
-            settings.ldap_bind_password.get_secret_value(),
+            cfg.bind_dn,
+            cfg.bind_password,
         )
         if not search_connection.bind():
             raise IdentityProviderUnavailable("The LDAP search account could not bind.")
@@ -112,19 +139,19 @@ def authenticate(username: str, password: str) -> LDAPProfile | None:
                 filter(
                     None,
                     (
-                        settings.ldap_username_attribute,
-                        settings.ldap_display_name_attribute,
-                        settings.ldap_email_attribute,
+                        cfg.username_attribute,
+                        cfg.display_name_attribute,
+                        cfg.email_attribute,
                         "memberOf",
                     ),
                 )
             )
         )
-        search_filter = settings.ldap_user_search_filter.replace(
+        search_filter = cfg.user_search_filter.replace(
             "{username}", escape_filter_chars(username)
         )
         if not search_connection.search(
-            settings.ldap_user_search_base,
+            cfg.user_search_base,
             search_filter,
             search_scope=SUBTREE,
             attributes=attributes,
@@ -156,9 +183,9 @@ def authenticate(username: str, password: str) -> LDAPProfile | None:
                 "cannot read memberOf on that entry.", username,
             )
         return LDAPProfile(
-            username=_value(entry, settings.ldap_username_attribute) or username,
-            display_name=_value(entry, settings.ldap_display_name_attribute),
-            email=_value(entry, settings.ldap_email_attribute),
+            username=_value(entry, cfg.username_attribute) or username,
+            display_name=_value(entry, cfg.display_name_attribute),
+            email=_value(entry, cfg.email_attribute),
             groups=groups,
         )
     except IdentityProviderUnavailable:

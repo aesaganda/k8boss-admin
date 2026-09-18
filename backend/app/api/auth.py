@@ -45,7 +45,7 @@ from app.errors import (
     TooManyAttempts,
 )
 from app.identity import handshake as handshake_service
-from app.identity import inventory, oidc, saml, sso, throttle
+from app.identity import oidc, provider_config, saml, sso, throttle
 from app.identity.dependencies import current_session, require_admin
 from app.identity.service import (
     FEDERATED_SOURCES,
@@ -254,6 +254,11 @@ def auth_config() -> dict:
     upgraded — a console nobody can log in to, produced by a release that changed
     no behaviour.
     """
+    # ADR-0011: the stored row when there is one, the environment otherwise.
+    # Read through the resolver rather than off `settings`, or a directory
+    # configured in the console would be missing from the login page's own
+    # description of how to sign in.
+    ldap_enabled = provider_config.resolve("ldap").enabled
     available = sso.enabled_providers()
     entries = [
         {
@@ -269,11 +274,11 @@ def auth_config() -> dict:
     return {
         "enabled": settings.auth_enabled,
         "localEnabled": True,
-        "ldapEnabled": settings.ldap_enabled,
+        "ldapEnabled": ldap_enabled,
         "oidcEnabled": oidc_entry is not None,
         "methods": [
             "local",
-            *(("ldap",) if settings.ldap_enabled else ()),
+            *(("ldap",) if ldap_enabled else ()),
             *(entry["name"] for entry in entries),
         ],
         "ssoProviders": entries,
@@ -859,23 +864,6 @@ def revoke_console_session(
         detail=f"Revoked an active console session belonging to {username}.",
     )
     return Response(status_code=204)
-
-
-@router.get("/providers")
-def list_sign_in_methods(_admin=Depends(require_admin)) -> dict:
-    """§12.8. How anybody can sign in to this deployment, and what confers admin.
-
-    Administrator-only, and that is the same decision §12.1 makes from the other
-    side: every value here — an issuer, a directory URL, an API server address,
-    a group DN — is what the public discovery endpoint withholds so that nobody
-    who can merely reach the console can enumerate its identity infrastructure.
-
-    Read-only. The values come from the process environment, one provider of each
-    kind (§12.4), and a console that offered to edit them would be editing a copy
-    while reporting a save. Each row names the variable prefix that does change
-    it, which is the actionable half.
-    """
-    return envelope(inventory.sign_in_methods())
 
 
 @router.get("/users")

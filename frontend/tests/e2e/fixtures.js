@@ -309,43 +309,139 @@ export const FIXTURES = {
     unavailable: [],
   },
 
-  // §12.8. Read-only: how this deployment authenticates. The unconfigured
-  // methods are in the list too — `enabled` is what tells "we have not set this
-  // up" apart from "this console cannot do that", and the page renders the two
-  // differently.
+  // §12.8 / ADR-0011. Five kinds and the console's own accounts, in the three
+  // states the page has to keep apart:
+  //
+  //   ldap        enabled, usable, and read from the *environment* — the state
+  //               every deployment that configured LDAP before this feature is
+  //               in. Its card offers Configure, not Delete: there is no stored
+  //               row to remove.
+  //   oidc        stored in the console, switched on, and NOT usable, because
+  //               the client id is empty. The login page withholds the button,
+  //               so a card claiming "Enabled" here would be a screen
+  //               disagreeing with the screen people sign in on.
+  //   oauth/…     nothing configured anywhere: an "add" button rather than a
+  //               card, which is what tells "we have not set this up" apart
+  //               from "this console cannot do it".
   signInMethods: {
     items: [
       {
         name: 'local',
+        title: 'Local accounts',
+        summary: "This console's own accounts, with passwords hashed here.",
+        caveat: null,
         label: 'Local accounts',
         enabled: true,
+        usable: true,
+        missing: [],
+        source: 'environment',
+        stored: false,
         endpoint: null,
         admin_group: null,
         settings_prefix: 'AUTH_',
+        editable: false,
+        fields: [],
+        values: {},
+        secrets_stored: [],
+        secrets_unreadable: false,
       },
       {
         name: 'ldap',
+        title: 'LDAP / Active Directory',
+        summary: 'Search-and-bind against a directory.',
+        caveat: null,
         label: 'LDAP / Active Directory',
         enabled: true,
+        usable: true,
+        missing: [],
+        source: 'environment',
+        stored: false,
         endpoint: 'ldaps://directory.internal.example:636',
         admin_group: 'cn=platform-admins,ou=groups',
         settings_prefix: 'LDAP_',
+        editable: true,
+        fields: [
+          { name: 'url', label: 'Server URL', type: 'str', secret: false, required: true, help: null, placeholder: 'ldaps://directory.example.com:636' },
+          { name: 'start_tls', label: 'StartTLS', type: 'bool', secret: false, required: false, help: null, placeholder: null },
+          { name: 'bind_password', label: 'Search account password', type: 'str', secret: true, required: false, help: null, placeholder: null },
+          { name: 'user_search_base', label: 'User search base', type: 'str', secret: false, required: true, help: null, placeholder: null },
+        ],
+        values: {
+          url: 'ldaps://directory.internal.example:636',
+          start_tls: false,
+          user_search_base: 'ou=people,dc=example,dc=com',
+        },
+        secrets_stored: [],
+        secrets_unreadable: false,
       },
       {
         name: 'oidc',
+        title: 'OpenID Connect',
+        summary: 'An OIDC issuer, verified completely.',
+        caveat: null,
         label: 'Single sign-on',
-        enabled: false,
-        endpoint: null,
+        enabled: true,
+        usable: false,
+        missing: ['client_id'],
+        source: 'database',
+        stored: true,
+        endpoint: 'https://idp.internal.example/realms/main',
         admin_group: null,
         settings_prefix: 'OIDC_',
+        editable: true,
+        fields: [
+          { name: 'issuer', label: 'Issuer URL', type: 'str', secret: false, required: true, help: null, placeholder: null },
+          { name: 'client_id', label: 'Client ID', type: 'str', secret: false, required: true, help: null, placeholder: null },
+          { name: 'client_secret', label: 'Client secret', type: 'str', secret: true, required: false, help: null, placeholder: null },
+        ],
+        values: { issuer: 'https://idp.internal.example/realms/main', client_id: '' },
+        secrets_stored: ['client_secret'],
+        secrets_unreadable: false,
+      },
+      {
+        name: 'oauth',
+        title: 'OAuth 2.0',
+        summary: 'A plain OAuth 2.0 authorization server.',
+        caveat: null,
+        label: 'OAuth 2.0',
+        enabled: false,
+        usable: false,
+        missing: ['authorization_url', 'token_url', 'userinfo_url', 'client_id'],
+        source: 'environment',
+        stored: false,
+        endpoint: null,
+        admin_group: null,
+        settings_prefix: 'OAUTH_',
+        editable: true,
+        fields: [
+          { name: 'authorization_url', label: 'Authorization URL', type: 'str', secret: false, required: true, help: null, placeholder: null },
+        ],
+        values: { authorization_url: '' },
+        secrets_stored: [],
+        secrets_unreadable: false,
       },
       {
         name: 'saml',
+        title: 'SAML 2.0',
+        summary: 'A SAML 2.0 identity provider.',
+        caveat: 'SAML also needs AUTH_COOKIE_SECURE, which is environment configuration and not a field here.',
         label: 'SAML single sign-on',
         enabled: false,
+        usable: false,
+        missing: ['idp_sso_url', 'idp_certificate'],
+        source: 'environment',
+        stored: false,
         endpoint: null,
         admin_group: null,
         settings_prefix: 'SAML_',
+        editable: true,
+        fields: [
+          { name: 'idp_sso_url', label: 'IdP sign-on URL', type: 'str', secret: false, required: true, help: null, placeholder: null },
+          { name: 'idp_certificate', label: 'IdP signing certificate', type: 'text', secret: false, required: true, help: null, placeholder: '-----BEGIN CERTIFICATE-----' },
+        ],
+        values: { idp_sso_url: '', idp_certificate: '' },
+        secrets_stored: [],
+        secrets_unreadable: false,
       },
     ],
     continue: null,
@@ -5009,6 +5105,11 @@ export async function mockApi(
     // answers without those rows, so "the page re-read the backend instead of
     // removing the row locally" is visible from outside the component.
     sessionRevokes = [],
+    // §12.8. Every provider write the page made, in order — `{kind, body}` for a
+    // save and `{kind, deleted: true}` for a removal. A spec asserting on the
+    // *body* is how "an untouched secret is not sent back" and "a cleared one is
+    // sent as an empty string" are checked from outside the component.
+    providerWrites = [],
   } = {},
 ) {
   // Counted so a spec can hand back a different manifest on the second read —
@@ -5074,7 +5175,66 @@ export async function mockApi(
       return route.fulfill({ status: 204, body: '' });
     }
     if (path === '/auth/users') return json(FIXTURES.users);
-    if (path === '/auth/providers') return json(FIXTURES.signInMethods);
+    if (path === '/auth/providers' && route.request().method() === 'GET') {
+      // Answers with what the page last wrote, so a save is visible on the
+      // re-read rather than only in the request log. `usable` is derived the
+      // way the backend derives it — from the required fields actually being
+      // filled in — because a mock that echoed `enabled` would let a card that
+      // conflates the two pass.
+      const items = FIXTURES.signInMethods.items.map((row) => {
+        const write = [...providerWrites].reverse().find((entry) => entry.kind === row.name);
+        if (!write) return row;
+        if (write.deleted) {
+          return { ...row, stored: false, source: 'environment' };
+        }
+        const values = { ...row.values, ...write.body.values };
+        const missing = row.fields
+          .filter((field) => field.required && !String(values[field.name] ?? '').trim())
+          .map((field) => field.name);
+        return {
+          ...row,
+          stored: true,
+          source: 'database',
+          enabled: Boolean(write.body.enabled),
+          usable: Boolean(write.body.enabled) && missing.length === 0,
+          missing,
+          values,
+          endpoint: values[row.name === 'ldap' ? 'url' : 'issuer'] ?? row.endpoint,
+          secrets_stored: row.fields
+            .filter((field) => field.secret)
+            .filter((field) =>
+              field.name in write.body.values
+                ? String(write.body.values[field.name]).length > 0
+                : (row.secrets_stored || []).includes(field.name),
+            )
+            .map((field) => field.name),
+        };
+      });
+      return json({ ...FIXTURES.signInMethods, items });
+    }
+    if (path.startsWith('/auth/providers/') && route.request().method() === 'PUT') {
+      const kind = path.split('/')[3];
+      const body = JSON.parse(route.request().postData() || '{}');
+      providerWrites.push({ kind, body });
+      const row = FIXTURES.signInMethods.items.find((entry) => entry.name === kind);
+      const values = { ...row.values, ...body.values };
+      const missing = row.fields
+        .filter((field) => field.required && !String(values[field.name] ?? '').trim())
+        .map((field) => field.name);
+      return json({
+        ...row,
+        stored: true,
+        source: 'database',
+        enabled: Boolean(body.enabled),
+        usable: Boolean(body.enabled) && missing.length === 0,
+        missing,
+        values,
+      });
+    }
+    if (path.startsWith('/auth/providers/') && route.request().method() === 'DELETE') {
+      providerWrites.push({ kind: path.split('/')[3], deleted: true });
+      return route.fulfill({ status: 204, body: '' });
+    }
     if (path === '/auth/sessions') {
       return json({
         ...FIXTURES.consoleSessions,

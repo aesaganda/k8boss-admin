@@ -75,11 +75,11 @@ from urllib.parse import urlencode
 
 import httpx
 
-from app.config import settings
 from app.errors import IdentityProviderUnavailable, PermissionDenied
 from app.identity import handshake as handshake_service
 from app.identity import sso
 from app.identity.sso import Begin, FederatedIdentity
+from app.identity import provider_config
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +87,16 @@ logger = logging.getLogger(__name__)
 NAME = "openshift"
 BINDING = "query"
 CALLBACK_SUFFIX = "callback"
+
+def _cfg() -> provider_config.ProviderConfig:
+    """This deployment's openshift configuration: the stored row, else the environment.
+
+    Resolved per call rather than held, because a cached provider configuration
+    outlives the edit that changed it — see :mod:`app.identity.provider_store`
+    on why nothing there is cached.
+    """
+    return provider_config.resolve(NAME)
+
 
 #: RFC 8414, served by the API server rather than by an issuer.
 DISCOVERY_PATH = "/.well-known/oauth-authorization-server"
@@ -111,10 +121,11 @@ def enabled() -> bool:
     produces a button that cannot work, and a button that leads to an error
     reads as a broken console rather than an unconfigured one.
     """
+    cfg = _cfg()
     return bool(
-        settings.openshift_enabled
-        and settings.openshift_api_url.strip()
-        and settings.openshift_client_id.strip()
+        cfg.enabled
+        and cfg.api_url.strip()
+        and cfg.client_id.strip()
     )
 
 
@@ -122,35 +133,42 @@ def require_enabled() -> None:
     if not enabled():
         raise sso.not_configured(
             NAME,
-            "Set OPENSHIFT_ENABLED, OPENSHIFT_API_URL and OPENSHIFT_CLIENT_ID, "
-            "then restart the console.",
+            provider_config.configure_hint(
+                _cfg(), "OPENSHIFT_ENABLED, OPENSHIFT_API_URL and OPENSHIFT_CLIENT_ID"
+            ),
         )
 
 
 def label() -> str:
-    return settings.openshift_button_label
+    cfg = _cfg()
+    return cfg.button_label
 
 
 def admin_group() -> str:
-    return settings.openshift_admin_group
+    cfg = _cfg()
+    return cfg.admin_group
 
 
 def configured_callback_url() -> str:
-    return settings.openshift_redirect_url.strip()
+    cfg = _cfg()
+    return cfg.redirect_url.strip()
 
 
 def scopes() -> str:
-    return settings.openshift_scopes.strip() or "user:info"
+    cfg = _cfg()
+    return cfg.scopes.strip() or "user:info"
 
 
 def api_url() -> str:
-    return settings.openshift_api_url.strip().rstrip("/")
+    cfg = _cfg()
+    return cfg.api_url.strip().rstrip("/")
 
 
 def _verify_tls() -> bool | str:
+    cfg = _cfg()
     return sso.tls_verify(
-        verify=settings.openshift_verify_tls,
-        ca_file=settings.openshift_ca_certificate_file,
+        verify=cfg.verify_tls,
+        ca_file=cfg.ca_certificate_file,
         provider=NAME,
     )
 
@@ -175,6 +193,7 @@ def discovery() -> dict[str, Any]:
     send an operator to two completely different places, and the second is a dead
     end when the first is true.
     """
+    cfg = _cfg()
     global _discovery_cache, _discovery_fetched_at
     if (
         _discovery_cache is not None
@@ -186,7 +205,7 @@ def discovery() -> dict[str, Any]:
     url = f"{base}{DISCOVERY_PATH}"
     try:
         with httpx.Client(
-            timeout=settings.openshift_timeout_seconds, verify=_verify_tls()
+            timeout=cfg.timeout_seconds, verify=_verify_tls()
         ) as client:
             response = client.get(url)
             response.raise_for_status()
@@ -234,10 +253,11 @@ def authorization_url(*, redirect_uri: str, state: str, code_challenge: str) -> 
     later reader mistakes for a protection that is in force. ``state`` and PKCE
     are what bind the response to this sign-in.
     """
+    cfg = _cfg()
     document = discovery()
     params = {
         "response_type": "code",
-        "client_id": settings.openshift_client_id.strip(),
+        "client_id": cfg.client_id.strip(),
         "redirect_uri": redirect_uri,
         "scope": scopes(),
         "state": state,
@@ -249,26 +269,28 @@ def authorization_url(*, redirect_uri: str, state: str, code_challenge: str) -> 
 
 def exchange_code(*, code: str, code_verifier: str, redirect_uri: str) -> dict[str, Any]:
     """Trade the authorization code for an access token at the cluster."""
+    cfg = _cfg()
     document = discovery()
     return sso.exchange_authorization_code(
         token_url=document["token_endpoint"],
-        client_id=settings.openshift_client_id.strip(),
-        client_secret=settings.openshift_client_secret.get_secret_value(),
+        client_id=cfg.client_id.strip(),
+        client_secret=cfg.client_secret,
         code=code,
         code_verifier=code_verifier,
         redirect_uri=redirect_uri,
         verify=_verify_tls(),
-        timeout=settings.openshift_timeout_seconds,
+        timeout=cfg.timeout_seconds,
         provider=NAME,
     )
 
 
 def fetch_user(access_token: str) -> dict[str, Any]:
     """Read the authenticated user's own ``User`` object from the cluster."""
+    cfg = _cfg()
     url = f"{api_url()}{USER_PATH}"
     try:
         with httpx.Client(
-            timeout=settings.openshift_timeout_seconds, verify=_verify_tls()
+            timeout=cfg.timeout_seconds, verify=_verify_tls()
         ) as client:
             response = client.get(
                 url,
@@ -352,9 +374,10 @@ def identity_from_user(user: dict[str, Any]) -> FederatedIdentity:
 
 
 def check_group_allowlist(identity: FederatedIdentity) -> None:
+    cfg = _cfg()
     sso.check_group_allowlist(
         identity,
-        allowed=settings.openshift_allowed_groups,
+        allowed=cfg.allowed_groups,
         provider=NAME,
         source_hint=(
             "The cluster's user object carried no group list. Grant the OAuth "

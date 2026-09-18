@@ -294,6 +294,55 @@ class AuthSession(Base):
     last_used_at = Column(DateTime, nullable=True)
 
 
+class IdentityProvider(Base):
+    """One identity provider this console has been configured with (ADR-0011).
+
+    **One row per kind, enforced here by the database rather than by a check in
+    an endpoint.** `kind` is unique, so "two OIDC issuers" is impossible at the
+    storage layer — which is what keeps §12.4's refusal intact while the
+    configuration becomes editable. The collision that refusal was about (two
+    issuers asserting the same subject onto one account) cannot arise if there
+    is only ever one issuer.
+
+    A row is this deployment's decision *about that kind*, including the
+    decision to switch it off: :func:`app.identity.provider_config.resolve`
+    prefers a disabled row over an enabled environment variable, and falls back
+    to the environment only when there is no row at all. Deleting a row is
+    therefore "go back to what the deployment ships with", not "turn this off".
+
+    Non-secret values live in `config` as JSON, keyed by the field names in
+    `provider_config.SPECS`. Five kinds with fourteen-odd fields each would
+    otherwise be seventy-odd columns, most of them NULL on every row, and each
+    new provider field would be a migration. The keys are not a free-for-all:
+    every write goes through `provider_config.validate`, which refuses a field
+    the spec does not declare.
+    """
+
+    __tablename__ = "identity_providers"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    kind = Column(String(32), nullable=False, unique=True)
+    enabled = Column(Boolean, nullable=False, default=False)
+    config = Column(JSON, nullable=False, default=dict)
+
+    # Every secret field of the kind, as one encrypted JSON object — bind
+    # passwords and client secrets. Encrypted with the same key as cluster
+    # tokens (`app.crypto`), because this is the same class of material: a
+    # credential this console holds on the operator's behalf, in a database
+    # whose backups leave the machine.
+    #
+    # One blob rather than a column per secret: the set of secret fields is
+    # per-kind data in `provider_config`, and a schema that enumerated them
+    # would be a second list to keep in step with it.
+    secrets_encrypted = Column(Text, nullable=True)
+
+    created_at = Column(DateTime, nullable=False, default=utcnow)
+    updated_at = Column(DateTime, nullable=False, default=utcnow, onupdate=utcnow)
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<IdentityProvider kind={self.kind!r} enabled={self.enabled}>"
+
+
 #: ``category`` values. Two kinds of record live in one table because they answer
 #: one question — "who did what to this console and its clusters" — and splitting
 #: them into two tables would mean an incident review has to remember to read

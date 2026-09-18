@@ -82,6 +82,7 @@ const Clusters = lazyPage('Clusters', () => import('./pages/Clusters'));
 const Audit = lazyPage('Audit', () => import('./pages/Audit'));
 const Users = lazyPage('Users', () => import('./pages/Users'));
 const Sessions = lazyPage('Sessions', () => import('./pages/Sessions'));
+const IdentityProviders = lazyPage('Identity providers', () => import('./pages/IdentityProviders'));
 
 function NotFound() {
   return (
@@ -181,6 +182,9 @@ function ConsoleRoutes() {
                   that exist and the sessions that are live are two different
                   questions, and the second one gets asked in a hurry. */}
               <Route path="sessions" element={<Sessions />} />
+              {/* §12.8, ADR-0011. Beside Users: the providers are where the
+                  accounts on that page come from. */}
+              <Route path="identity-providers" element={<IdentityProviders />} />
               <Route path="login" element={<Navigate to="/" replace />} />
 
               <Route path="*" element={<NotFound />} />

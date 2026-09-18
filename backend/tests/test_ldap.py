@@ -194,7 +194,14 @@ def test_a_url_that_is_not_an_ldap_endpoint_is_refused(directory, url):
     with pytest.raises(IdentityProviderUnavailable) as caught:
         authenticate()
 
-    assert "LDAP_URL" in caught.value.message
+    # The message says what is wrong with the URL; the *hint* names the
+    # variable, and only because this configuration came from the environment.
+    # ADR-0011: the same refusal on a deployment whose directory was typed into
+    # the console points at that screen instead, because telling somebody to
+    # edit LDAP_URL when a stored row is what is in effect sends them to change
+    # something that changes nothing.
+    assert "ldap:// or ldaps://" in caught.value.message
+    assert "LDAP_URL" in (caught.value.hint or "")
     assert directory.connections == []
 
 
@@ -206,7 +213,8 @@ def test_a_missing_search_base_is_refused_rather_than_searching_the_root(directo
     with pytest.raises(IdentityProviderUnavailable) as caught:
         authenticate()
 
-    assert "LDAP_USER_SEARCH_BASE" in caught.value.message
+    assert "search base is required" in caught.value.message
+    assert "LDAP_USER_SEARCH_BASE" in (caught.value.hint or "")
     assert directory.connections == []
 
 
