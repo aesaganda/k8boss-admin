@@ -163,12 +163,14 @@ def verify_audit(
     limit: int | None = Query(
         None,
         ge=1,
+        le=recorder.MAX_LIMIT,
         description=(
             "Verify only the newest N records. Faster on a long trail, and the "
             "result is always `partial`: a window cannot prove that the records "
             "before it still link back to the first one, and reporting it as "
             "`intact` would be a claim about records nobody read. Omit to verify "
-            "the whole trail, which is the only form that can return `intact`."
+            "the whole trail, which is the only form that can return `intact` — "
+            "and the only form with no row cap, because it streams."
         ),
     ),
 ) -> dict[str, Any]:
@@ -194,6 +196,16 @@ def verify_audit(
     whatever they say today and store it as proof, turning "we do not know" into
     "verified" in the one table where that inversion does the most damage. So the
     count is reported and the verdict withheld.
+
+    ``limit`` is capped at :data:`app.audit.recorder.MAX_LIMIT`, the same bound
+    ``/api/audit`` puts on a page, because it costs the same thing: the windowed
+    walk reads newest-first and reverses, so it holds ``limit`` rows in memory by
+    construction where the unwindowed walk streams. Uncapped, ``?limit=100000000``
+    was the whole-table allocation the streaming rewrite removed, reachable by
+    anyone who can click Verify — and the audit page itself never sends a limit.
+    The cap is a 422 and not a silent clamp on the way in: verifying a thousand
+    records while answering the question that asked about a million is this
+    module's own inversion, a claim about records nobody read.
 
     Read-only, and one read of the console's own database, so ``unavailable`` is
     always empty. A database failure raises the §1.3 error envelope rather than

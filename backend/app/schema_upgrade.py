@@ -189,6 +189,12 @@ ADDITIVE_COLUMNS: tuple[AdditiveColumn, ...] = (
 STANDALONE_INDEXES: tuple[str, ...] = (
     # Used by the audit page's actor filter. The throttle has its own table.
     "CREATE INDEX IF NOT EXISTS ix_audit_actor_ts ON audit_records (actor, ts)",
+    # The audit page's outcome filter, paged by descending id. Named to match
+    # `ix_audit_outcome_id` in app/models.py: a statement here whose name differed
+    # from the model's would leave an upgraded database carrying two indexes over
+    # the same columns, both maintained on every audit INSERT.
+    "CREATE INDEX IF NOT EXISTS ix_audit_outcome_id "
+    "ON audit_records (outcome, id)",
     "CREATE INDEX IF NOT EXISTS ix_login_attempt_actor_ts "
     "ON login_attempts (actor, ts)",
 )

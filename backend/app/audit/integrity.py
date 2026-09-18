@@ -37,8 +37,8 @@ reports itself as unchained.
 Two replicas reading the same chain tip compute the same ``prev_hash``. The
 UNIQUE constraint on that column means the second INSERT is refused by the
 database rather than silently forking the chain into two branches, and the writer
-retries against the new tip (:func:`app.audit.recorder.record`). That is why the
-constraint is on ``prev_hash`` and not merely an index: it converts a race that
+retries against the new tip (:func:`app.audit.recorder.record`). That is why
+``ix_audit_prev_hash`` is UNIQUE and not merely an index: it converts a race that
 would corrupt the chain into a race that costs one retry.
 
 K8Boss serialises the same operation with an in-process ``threading.Lock``, which
@@ -54,7 +54,7 @@ import json
 import logging
 from typing import Any
 
-from sqlalchemy import event, select
+from sqlalchemy import event, func, select
 from sqlalchemy.orm import Session as OrmSession
 
 from app.models import AuditRecord, utcnow
@@ -91,7 +91,7 @@ UNCHAINED_ATTR = "_k8boss_write_unchained"
 #: reachable from GENESIS. It matters because ``GET /api/audit`` pages by
 #: descending id, so moving a record moves it in the operator's listing. The walk
 #: therefore checks separately that chain order and id order agree; see
-#: :func:`_verify_from_genesis`.
+#: :func:`_diagnose_break`.
 HASHED_FIELDS: tuple[str, ...] = (
     "ts",
     "category",
@@ -320,16 +320,18 @@ def verify(session: OrmSession, *, limit: int | None = None) -> dict[str, Any]:
          "anchored": bool, "first_break": {"id":…, "reason":…}|None,
          "tip": str|None, "genesis": str, "window": {...}}
     """
-    total = session.execute(
-        select(AuditRecord.id).order_by(AuditRecord.id)
-    ).scalars().all()
-    total_count = len(total)
-
-    unchained_ids = session.execute(
-        select(AuditRecord.id)
+    # Counted by the database, not by materialising the ids and calling len() on
+    # them. Anyone who can click Verify reaches this, and a list built only to be
+    # measured put an allocation the size of the whole trail behind that click.
+    total_count = int(
+        session.execute(select(func.count()).select_from(AuditRecord)).scalar() or 0
+    )
+    unchained_count, oldest_unchained_id = session.execute(
+        select(func.count(), func.min(AuditRecord.id))
+        .select_from(AuditRecord)
         .where(AuditRecord.event_hash.is_(None))
-        .order_by(AuditRecord.id)
-    ).scalars().all()
+    ).one()
+    unchained_count = int(unchained_count or 0)
 
     # A row with exactly one of the two hashes is a corrupt half-state that no
     # normal write path produces. Reported as a break rather than counted as
@@ -347,13 +349,13 @@ def verify(session: OrmSession, *, limit: int | None = None) -> dict[str, Any]:
 
     base = {
         "verified": 0,
-        "unchained": len(unchained_ids),
+        "unchained": unchained_count,
         "total": total_count,
         "genesis": GENESIS,
         "tip": None,
         "window": {
             "requested_limit": limit,
-            "oldest_unchained_id": unchained_ids[0] if unchained_ids else None,
+            "oldest_unchained_id": oldest_unchained_id,
         },
     }
 
@@ -371,80 +373,53 @@ def verify(session: OrmSession, *, limit: int | None = None) -> dict[str, Any]:
 
     if limit is not None and limit > 0:
         return {**base, **_verify_window(session, limit)}
-    return {**base, **_verify_from_genesis(session, unchained_ids)}
+    return {**base, **_verify_from_genesis(session, unchained_count)}
 
 
-def _verify_from_genesis(
-    session: OrmSession, unchained_ids: list[int]
-) -> dict[str, Any]:
-    """Follow prev_hash → event_hash from GENESIS across the whole trail.
+#: Rows per round trip while the chain walk streams. Bounds what one
+#: verification holds in memory at a time; it is what
+#: :func:`app.audit.recorder.stream` uses for the same reason.
+_WALK_BATCH = 500
 
-    Walking the links rather than iterating by id is what makes deletion,
-    insertion and reordering detectable at all: id order and chain order agree
-    on an untouched table, and the point of the exercise is the table that was
-    touched.
+
+def _verify_from_genesis(session: OrmSession, unchained: int) -> dict[str, Any]:
+    """Walk the whole trail from GENESIS and report the first disagreement.
+
+    Streamed in id order with ``yield_per`` rather than loaded first. The
+    previous version materialised every chained record as an ORM object before
+    checking any of them, and ``GET /api/audit/verify`` is reachable by anyone
+    who can click Verify on the audit page — so at a few hundred thousand
+    records that click was an out-of-memory kill of the single backend replica,
+    repeatable at will by anyone signed in. None of this reduces the SHA-256
+    work, which is the thing actually being asked for; only the memory the
+    answer is assembled in.
+
+    Reading in id order instead of following the links is what makes the walk
+    streamable, and it checks the same things: every chained row is visited
+    exactly once, every hash is recomputed against the link it claims, and a row
+    that does not link to the one before it stops the walk. What id order gives
+    up is the *diagnosis* — from here, "the next link is somewhere else" and
+    "there is no next link" look identical — and :func:`_diagnose_break` buys
+    that back with one indexed lookup on the break path. It has to be bought
+    back: a renumbered record verifies byte for byte and still reaches GENESIS,
+    so if the two collapsed into one answer the only tamper that shows up
+    nowhere else would be reported as a deletion.
     """
-    rows = session.execute(
+    result = session.execute(
         select(AuditRecord)
         .where(AuditRecord.event_hash.is_not(None))
         .order_by(AuditRecord.id)
-    ).scalars().all()
+        .execution_options(yield_per=_WALK_BATCH)
+    )
 
-    if not rows:
-        # No chained rows at all. Not "intact" — there is nothing to be intact.
-        return {
-            "status": STATUS_PARTIAL if unchained_ids else STATUS_INTACT,
-            "anchored": True,
-            "verified": 0,
-            "first_break": None,
-        }
-
-    by_prev: dict[str, list[AuditRecord]] = {}
-    for row in rows:
-        by_prev.setdefault(row.prev_hash, []).append(row)
-
-    prev = GENESIS
+    expected = GENESIS
+    previous: AuditRecord | None = None
     verified = 0
-    seen: set[int] = set()
-    tip: str | None = None
-    previous_id: int | None = None
 
-    while prev in by_prev:
-        candidates = by_prev[prev]
-        if candidates[0].id in seen:
-            # A link that points back into the walk. Reaching this requires a
-            # hash collision, so it cannot happen by accident — but "cannot
-            # happen" is a poor basis for a `while` loop in the one endpoint an
-            # attacker would most like to hang, and the alternative to this check
-            # is asking every future reader to re-derive why the loop terminates.
-            return {
-                "status": STATUS_BROKEN,
-                "anchored": True,
-                "verified": verified,
-                "tip": tip,
-                "first_break": _break(
-                    candidates[0].id,
-                    "chain loop: a record links back to one already walked, which "
-                    "no writer produces and no hash function permits by accident",
-                ),
-            }
-        if len(candidates) > 1:
-            # The UNIQUE constraint makes this unreachable through the ORM. It is
-            # still checked, because the constraint can be absent on a database
-            # upgraded by hand, and a fork found here is a different fact from a
-            # modified row — it means two writers, not an editor.
-            return {
-                "status": STATUS_BROKEN,
-                "anchored": True,
-                "verified": verified,
-                "first_break": _break(
-                    min(c.id for c in candidates),
-                    "chain fork: two rows claim the same predecessor, which means "
-                    "concurrent writers linked to one tip",
-                ),
-            }
-        row = candidates[0]
-        if compute_event_hash(row, prev) != row.event_hash:
+    for row in result.scalars():
+        if row.prev_hash != expected:
+            return {**_diagnose_break(session, row, previous), "verified": verified}
+        if compute_event_hash(row, expected) != row.event_hash:
             return {
                 "status": STATUS_BROKEN,
                 "anchored": True,
@@ -453,54 +428,85 @@ def _verify_from_genesis(
                     row.id, "event_hash mismatch: this row's content was modified"
                 ),
             }
-        if previous_id is not None and row.id <= previous_id:
-            # The chain is built in insertion order, so its order and the id
-            # order agree on every record this console has ever written. They
-            # disagree only if an id was changed after the fact — which the hash
-            # cannot detect on its own, because the id does not exist yet when
-            # the hash is computed.
-            #
-            # Worth detecting rather than shrugging at: `GET /api/audit` pages by
-            # descending id, so renumbering a record moves it in the listing an
-            # operator reads, and every hash still verifies while it does.
-            return {
-                "status": STATUS_BROKEN,
-                "anchored": True,
-                "verified": verified,
-                "tip": tip,
-                "first_break": _break(
-                    row.id,
-                    f"record {row.id} follows record {previous_id} in the chain but "
-                    "not in id order, so an id was changed after the record was "
-                    "written — which moves it in every listing that pages by id",
-                ),
-            }
-        seen.add(row.id)
-        previous_id = row.id
-        prev = row.event_hash
-        tip = row.event_hash
+        expected = row.event_hash
+        previous = row
         verified += 1
 
-    if verified != len(rows):
-        unreachable = sorted(r.id for r in rows if r.id not in seen)
+    # `verified == 0` is both the empty trail and a table holding nothing but
+    # pre-chain rows: nothing was walked, so there is no tip to report, and
+    # `partial` is what withholds the verdict rather than claiming a pass over
+    # rows this mechanism cannot speak for.
+    return {
+        "status": STATUS_PARTIAL if unchained else STATUS_INTACT,
+        "anchored": True,
+        "verified": verified,
+        "tip": previous.event_hash if previous is not None else None,
+        "first_break": None,
+    }
+
+
+def _diagnose_break(
+    session: OrmSession, row: AuditRecord, previous: AuditRecord | None
+) -> dict[str, Any]:
+    """Say what the first unlinked record means. One lookup, on this path only.
+
+    ``prev_hash`` is UNIQUE and indexed, so asking "does anything at all claim
+    the record we just walked as its predecessor?" is a single seek. It runs
+    after the walk has already stopped rather than once per row, which is what
+    keeps the diagnosis off the cost of verifying an untampered trail.
+
+    If something does claim it, the chain continues at a record that is not the
+    next one by id, and an id was changed after the fact. That is worth its own
+    sentence because every hash in such a trail still verifies and every record
+    still reaches GENESIS: the only thing that moved is where the record sits in
+    ``GET /api/audit``, which pages by descending id — the listing an operator
+    reads during an incident.
+
+    If nothing does, the link genuinely ends here: a record was deleted,
+    inserted or reordered. The fork is named separately when this row and the
+    one before it claim the *same* predecessor, which is what two writers
+    produce on a database whose UNIQUE index was not there to refuse the second
+    one.
+    """
+    expected = previous.event_hash if previous is not None else GENESIS
+    successor_id = session.execute(
+        select(AuditRecord.id)
+        .where(AuditRecord.prev_hash == expected)
+        .limit(1)
+    ).scalars().first()
+
+    if successor_id is not None:
         return {
             "status": STATUS_BROKEN,
             "anchored": True,
-            "verified": verified,
-            "tip": tip,
             "first_break": _break(
-                unreachable[0],
-                "chain broken: record(s) cannot be reached from the first link, "
-                "which means one was deleted, inserted, or reordered",
+                row.id,
+                f"record {successor_id}, not record {row.id}, is the next link in "
+                "the chain, so chain order and id order disagree — an id was "
+                "changed after the record was written, which moves it in every "
+                "listing that pages by id",
+            ),
+        }
+
+    if previous is not None and row.prev_hash == previous.prev_hash:
+        return {
+            "status": STATUS_BROKEN,
+            "anchored": True,
+            "first_break": _break(
+                previous.id,
+                "chain fork: two rows claim the same predecessor, which means "
+                "concurrent writers linked to one tip",
             ),
         }
 
     return {
-        "status": STATUS_PARTIAL if unchained_ids else STATUS_INTACT,
+        "status": STATUS_BROKEN,
         "anchored": True,
-        "verified": verified,
-        "tip": tip,
-        "first_break": None,
+        "first_break": _break(
+            row.id,
+            "chain broken: record(s) cannot be reached from the first link, "
+            "which means one was deleted, inserted, or reordered",
+        ),
     }
 
 
