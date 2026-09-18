@@ -243,11 +243,9 @@ test.describe('a cell never decides the table width', () => {
 
   test('the ConfigMaps table fits', async ({ page }) => {
     await mockApi(page);
-    // `/config` is the bare path the sidebar's section header points at: it
-    // redirects to the first section rather than serving it under a second
-    // URL, and the page is then headed by that section's own name, not the
-    // group's. Kept as the entry point so the redirect stays exercised.
     await page.goto('/config');
+    // The sections are sidebar links now, so /config redirects to the first
+    // one and the heading is that listing's own name.
     await expectPageRendered(page, 'ConfigMaps');
     await expect(page.getByRole('grid', { name: 'ConfigMaps' })).toBeVisible();
 
@@ -342,8 +340,6 @@ test.describe('a list page fits the narrowest desktop window', () => {
     ['/workloads', 'Workloads', 'Workloads'],
     ['/routes', 'Routes', 'Routes'],
     ['/nodes', 'Nodes', 'Nodes'],
-    // Same as `/config` above: the bare path redirects, and the heading is the
-    // first section's name rather than "Storage".
     ['/storage', 'PersistentVolumeClaims', 'PersistentVolumeClaims'],
   ];
 
