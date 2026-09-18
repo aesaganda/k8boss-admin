@@ -172,6 +172,40 @@ ADDITIVE_COLUMNS: tuple[AdditiveColumn, ...] = (
         ),
     ),
     AdditiveColumn(
+        table="auth_sessions",
+        column="ip_address",
+        ddl_type="VARCHAR(45)",
+        purpose=(
+            "§12.7: the peer address the session was opened from, so an "
+            "administrator reading the session list can tell one row from "
+            "another before revoking it. NULL means unknown, which includes "
+            "every session that predates the column"
+        ),
+    ),
+    AdditiveColumn(
+        table="auth_sessions",
+        column="user_agent",
+        ddl_type="VARCHAR(512)",
+        purpose=(
+            "§12.7: the browser the session was opened from, for the same "
+            "reason as the address — a revoke list of identical rows is one an "
+            "operator cannot safely act on"
+        ),
+    ),
+    AdditiveColumn(
+        table="auth_sessions",
+        column="last_used_at",
+        # TIMESTAMP, which is what SQLAlchemy's DateTime renders on PostgreSQL
+        # and what SQLite gives DATETIME affinity. Spelled in the intersection
+        # of the two grammars, like every other type in this tuple.
+        ddl_type="TIMESTAMP",
+        purpose=(
+            "§12.7: when the session was last seen, so a stale one can be told "
+            "from a live one before it is revoked. NULL means not seen since "
+            "the column existed — not never seen — and the listing says so"
+        ),
+    ),
+    AdditiveColumn(
         table="audit_records",
         column="impersonated_user",
         ddl_type="VARCHAR(255)",

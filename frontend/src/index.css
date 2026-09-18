@@ -1448,10 +1448,6 @@ body.admin-resizing * {
   font-size: var(--pf-t--global--font--size--body--sm, 0.875rem);
 }
 
-.admin-users__provider {
-  margin-block-end: var(--admin-gap);
-}
-
 /*
  * One option in a resource picker: a kind badge, the name, and an optional
  * note. §13's Target Service dropdown is the only user today.

@@ -309,6 +309,104 @@ export const FIXTURES = {
     unavailable: [],
   },
 
+  // §12.8. Read-only: how this deployment authenticates. The unconfigured
+  // methods are in the list too — `enabled` is what tells "we have not set this
+  // up" apart from "this console cannot do that", and the page renders the two
+  // differently.
+  signInMethods: {
+    items: [
+      {
+        name: 'local',
+        label: 'Local accounts',
+        enabled: true,
+        endpoint: null,
+        admin_group: null,
+        settings_prefix: 'AUTH_',
+      },
+      {
+        name: 'ldap',
+        label: 'LDAP / Active Directory',
+        enabled: true,
+        endpoint: 'ldaps://directory.internal.example:636',
+        admin_group: 'cn=platform-admins,ou=groups',
+        settings_prefix: 'LDAP_',
+      },
+      {
+        name: 'oidc',
+        label: 'Single sign-on',
+        enabled: false,
+        endpoint: null,
+        admin_group: null,
+        settings_prefix: 'OIDC_',
+      },
+      {
+        name: 'saml',
+        label: 'SAML single sign-on',
+        enabled: false,
+        endpoint: null,
+        admin_group: null,
+        settings_prefix: 'SAML_',
+      },
+    ],
+    continue: null,
+    remaining: null,
+    partial: false,
+    unavailable: [],
+  },
+
+  // §12.7. Three sessions: the caller's own, a second one belonging to the same
+  // person, and one whose address and browser were never recorded. The third is
+  // the important row — `null` there must render as unknown and never as a
+  // blank cell, because an administrator revoking by elimination is reading it
+  // as evidence.
+  consoleSessions: {
+    items: [
+      {
+        id: 'a'.repeat(64),
+        username: 'directory.admin',
+        display_name: 'Directory Admin',
+        auth_source: 'ldap',
+        role: 'admin',
+        ip_address: '10.4.1.22',
+        user_agent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+        created_at: '2026-08-18T08:00:00Z',
+        last_used_at: '2026-08-18T09:30:00Z',
+        expires_at: '2026-08-18T20:00:00Z',
+        current: true,
+      },
+      {
+        id: 'b'.repeat(64),
+        username: 'directory.admin',
+        display_name: 'Directory Admin',
+        auth_source: 'ldap',
+        role: 'admin',
+        ip_address: '10.4.1.90',
+        user_agent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36',
+        created_at: '2026-08-17T14:12:00Z',
+        last_used_at: '2026-08-18T07:02:00Z',
+        expires_at: '2026-08-18T18:12:00Z',
+        current: false,
+      },
+      {
+        id: 'c'.repeat(64),
+        username: 'operator',
+        display_name: null,
+        auth_source: 'local',
+        role: 'user',
+        ip_address: null,
+        user_agent: null,
+        created_at: '2026-08-18T06:00:00Z',
+        last_used_at: null,
+        expires_at: '2026-08-18T18:00:00Z',
+        current: false,
+      },
+    ],
+    continue: null,
+    remaining: null,
+    partial: false,
+    unavailable: [],
+  },
+
   // §10. Two record kinds in one table on purpose: a cluster write and a refused
   // sign-in. The console record carries `cluster_id: null`, which is what makes
   // the scope filter's third position necessary — without it these rows are
@@ -4907,6 +5005,10 @@ export async function mockApi(
     boundsWrite = null,
     autoscalerOptions = undefined,
     scaleGovernedBy = null,
+    // §12.7. Every digest the page asked to revoke, in order. The listing then
+    // answers without those rows, so "the page re-read the backend instead of
+    // removing the row locally" is visible from outside the component.
+    sessionRevokes = [],
   } = {},
 ) {
   // Counted so a spec can hand back a different manifest on the second read —
@@ -4972,6 +5074,19 @@ export async function mockApi(
       return route.fulfill({ status: 204, body: '' });
     }
     if (path === '/auth/users') return json(FIXTURES.users);
+    if (path === '/auth/providers') return json(FIXTURES.signInMethods);
+    if (path === '/auth/sessions') {
+      return json({
+        ...FIXTURES.consoleSessions,
+        items: FIXTURES.consoleSessions.items.filter(
+          (row) => !sessionRevokes.includes(row.id),
+        ),
+      });
+    }
+    if (path.startsWith('/auth/sessions/') && route.request().method() === 'DELETE') {
+      sessionRevokes.push(path.split('/')[3]);
+      return route.fulfill({ status: 204, body: '' });
+    }
     if (path === '/audit/verify') return json(chain ?? FIXTURES.auditVerify);
     if (path === '/audit') return json(audit ?? FIXTURES.audit);
     if (path === '/health') return json(health);

@@ -445,6 +445,26 @@ export const users = {
   deactivate: (id) => request(`/auth/users/${id}`, { method: 'DELETE', expect: 'none' }),
 };
 
+/**
+ * §12.7 active sessions, and §12.8 the sign-in methods this deployment has.
+ *
+ * Both administrator-only. `id` on a session row is the stored SHA-256 digest
+ * the table is keyed by, not a bearer token — holding it authenticates nobody,
+ * which is why it is safe to put in a URL here.
+ *
+ * `providers` is read-only on purpose and there is no writer to pair with it:
+ * every provider is configured from the backend's environment (§12.4), so a
+ * save here would be a save of a copy. See `app/identity/inventory.py`.
+ */
+export const sessions = {
+  list: () => api.get('/auth/sessions'),
+  revoke: (id) => request(`/auth/sessions/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+    expect: 'none',
+  }),
+  providers: () => api.get('/auth/providers'),
+};
+
 /* ── §3 Clusters ────────────────────────────────────────────────────────── */
 
 export const clusters = {

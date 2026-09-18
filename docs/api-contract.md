@@ -1975,6 +1975,102 @@ gated by role: both `admin` and
 `user` identities retain the console's normal cluster capabilities, still
 constrained by preflight and the deployment-wide mutation gate.
 
+### 12.7 `/api/auth/sessions`
+
+Administrator-only. `GET` returns the standard list envelope of every session
+that can currently act on this console; `DELETE /{token_hash}` revokes one.
+
+```json
+{ "id": "3f7c…64 hex chars", "username": "erens", "display_name": "Eren S.",
+  "auth_source": "ldap", "role": "admin", "ip_address": "10.4.1.22",
+  "user_agent": "Mozilla/5.0 (Macintosh; …)", "created_at": "2026-08-18T08:00:00Z",
+  "last_used_at": "2026-08-18T09:30:00Z", "expires_at": "2026-08-18T20:00:00Z",
+  "current": true }
+```
+
+**`id` is the stored SHA-256 digest of the bearer token, and is not a
+credential.** It is what `auth_sessions` is keyed by; the middleware hashes the
+cookie it is given and looks the row up by the result, so possessing the digest
+authenticates nobody. The raw token is stored nowhere and appears in no response.
+
+**Why this surface exists at all, given §12.6.** An account that is active and a
+session that is live are different facts. Deactivating an account revokes its
+sessions, but the case this page is for is the opposite one — a live session
+belonging to an account nobody wants deactivated, which is what a lost laptop
+produces — and that session was reachable from no endpoint.
+
+**Expired sessions are excluded, never listed and never deleted here.** They are
+pruned lazily, when `load_session` next sees one, so a browser that was merely
+closed leaves its row behind indefinitely. Counting those would answer "how many
+people can act on this console right now" with a number that includes people who
+cannot. Deleting them would make a `GET` a write.
+
+**`ip_address` is the peer address and never an `X-Forwarded-For` claim.** It is
+the same value §10 records. Believing that header requires a configured list of
+trusted proxies, and without one it is a string the caller chose — an address an
+attacker can set is worse than no address, because an administrator reads it as
+evidence. `null` means unknown, which includes every session created before the
+column existed, and the UI renders it as unknown rather than as a blank cell
+(rule 11.2).
+
+**`last_used_at` is coarse: at most one write per session per minute.** The
+value is refreshed while resolving the session cookie, which happens on every
+authenticated request, so writing it each time would put a database write in
+front of every read the console serves. A UI must not imply second-level
+precision from it. `null` means the session has not been seen since the column
+existed — which is not "never used", and is a third state the listing keeps
+distinct.
+
+`current` marks the caller's own session: the one row whose revocation signs
+them out. Revoking it is permitted and needs no special handling — the row is
+gone, so the cookie the browser still holds resolves to nothing on the next
+request, exactly as an expired session does, and the SPA's existing
+`authentication_required` branch offers sign-in.
+
+`DELETE` **records both terminal states** (§10, `console` category, verb
+`delete`, resource `sessions`): `applied` naming whose session it was, and
+`denied` when there was no such session. "I revoked that session" and "there was
+no such session" are different answers, and a trail that renders the second as
+the first tells an incident review that access was cut when it was not. A
+`token_hash` that is not 64 hex characters is `422 invalid` rather than `404`:
+a 404 would claim the shape was right and the row was missing.
+
+### 12.8 `GET /api/auth/providers`
+
+Administrator-only, and **read-only**. One entry per sign-in method this build
+supports, configured or not:
+
+```json
+{ "name": "ldap", "label": "LDAP / Active Directory", "enabled": true,
+  "endpoint": "ldaps://directory.internal.example:636",
+  "admin_group": "cn=platform-admins,ou=groups", "settings_prefix": "LDAP_" }
+```
+
+This is the private counterpart of §12.1. Everything here — an issuer, a
+directory URL, an API server address, a group DN — is precisely what the public
+discovery endpoint withholds, because that one is unauthenticated and returning
+these values there would let anyone who can reach the console enumerate its
+identity infrastructure. It answers the question the Users table raises and
+cannot: an `ldap` account with the `admin` role says nothing about *which*
+directory it came from or which group promoted it, and until this endpoint the
+only place those lived was the container's environment.
+
+**Unconfigured methods are included, with `enabled: false`.** A list of only
+what is switched on cannot distinguish "we have not set our SAML provider up"
+from "this console cannot do SAML", and those call for different actions.
+`enabled` follows exactly the rule §12.1 follows: a provider is enabled only
+when every value its flow needs is present, so this panel and the login page's
+buttons cannot disagree.
+
+**There is no writer, and that is a decision rather than a gap.** Providers are
+environment configuration, one of each kind per deployment (§12.4), and several
+of the same kind is a design change — a table, a CRUD surface, per-row encrypted
+secrets and a subject-collision story across issuers. A form here would edit a
+copy of the process environment and report a save that changed nothing, which is
+the confidently-wrong answer this contract is written against. Each entry names
+the variable prefix that does change it; `endpoint` and `admin_group` are `null`
+when nothing is configured, never `""`.
+
 ---
 
 ## 13. Routes — exposing a Service to the outside world
