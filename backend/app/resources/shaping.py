@@ -47,6 +47,10 @@ from cryptography.exceptions import UnsupportedAlgorithm
 from cryptography.hazmat.primitives.asymmetric import dsa, ec, ed448, ed25519, rsa
 from cryptography.x509.oid import NameOID
 
+# The one Kubernetes quantity grammar. Pure — a regex and `Decimal` — so reading
+# it from here does not give a shaper anything it could fail at.
+from app.k8s import quantities
+
 logger = logging.getLogger(__name__)
 
 #: kubectl's serialised copy of the object, stored inside the object's own
@@ -196,50 +200,37 @@ def seconds_until(value: Any) -> int | None:
         return None
     return int((parsed - datetime.now(timezone.utc)).total_seconds())
 
-_QUANTITY_RE = re.compile(r"^(?P<number>[+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)(?P<suffix>[a-zA-Z]*)$")
-
-# Binary suffixes are checked as whole tokens; decimal ones are single
-# characters. "Mi" and "M" differ by 4.8%, which on a 1 TiB volume is 50 GB —
-# large enough that guessing wrong shows up as a capacity report nobody trusts.
-_BINARY_SUFFIXES = {
-    "Ki": 1024, "Mi": 1024**2, "Gi": 1024**3,
-    "Ti": 1024**4, "Pi": 1024**5, "Ei": 1024**6,
-}
-_DECIMAL_SUFFIXES = {
-    "n": 1e-9, "u": 1e-6, "m": 1e-3, "": 1.0,
-    "k": 1e3, "M": 1e6, "G": 1e9, "T": 1e12, "P": 1e15, "E": 1e18,
-}
-
 
 def parse_quantity(value: Any) -> float | None:
     """Parse a Kubernetes resource quantity (``5Gi``, ``100m``, ``1e3``, ``500M``).
+
+    One grammar for the whole process, and it is :mod:`app.k8s.quantities`'. This
+    module carried a second one over the same strings, which meant a number shown
+    on a row could disagree with the number used in the calculation beside it —
+    "Mi" and "M" differ by 4.8%, and two readings of the same value differing at
+    all is a capacity report nobody can reconcile — while a correction to either
+    grammar left the other one wrong.
+
+    The two disagreed on seven inputs, and the surviving reading is the right one
+    on every one of them. It accepts ``1K``, ``.5Gi`` and ``5.``, which
+    apimachinery's own grammar accepts and this module used to call unparseable;
+    it refuses ``1e3Gi``, which is not a quantity at all — the grammar allows an
+    exponent *or* a suffix after the number, never both — and which this module
+    used to read as a terabyte, a magnitude invented for a string the API server
+    would have rejected.
+
+    ``float`` rather than the ``Decimal`` that comes back: every caller here is
+    filling a row field that gets serialised, and the exact integer arithmetic
+    the ``Decimal`` exists for belongs to :mod:`app.services.nodes`, which calls
+    that module directly. Converting is not I/O and keeps this module pure.
 
     Returns ``None`` for anything unrecognised rather than raising or guessing a
     magnitude. A capacity the console cannot parse is a capacity it does not
     know, and the row will show an em dash — which is honest, where a zero would
     describe a 2 TiB volume as empty.
     """
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        return float(value)
-    text = str(value).strip()
-    if not text:
-        return None
-    match = _QUANTITY_RE.match(text)
-    if match is None:
-        logger.debug("Unparseable Kubernetes quantity %r", value)
-        return None
-    number = float(match.group("number"))
-    suffix = match.group("suffix")
-    if suffix in _BINARY_SUFFIXES:
-        return number * _BINARY_SUFFIXES[suffix]
-    if suffix in _DECIMAL_SUFFIXES:
-        return number * _DECIMAL_SUFFIXES[suffix]
-    logger.debug("Unknown quantity suffix %r in %r", suffix, value)
-    return None
+    parsed = quantities.parse_quantity(value)
+    return None if parsed is None else float(parsed)
 
 
 def parse_bytes(value: Any) -> int | None:

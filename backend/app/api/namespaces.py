@@ -33,7 +33,7 @@ from kubernetes.client.rest import ApiException
 
 from app.errors import from_api_exception
 from app.k8s.client import get_core_v1
-from app.resources import shaping
+from app.resources import catalog, reader, shaping
 from app.resources.envelope import collect, envelope
 from app.resources.shaping import namespace_row
 
@@ -70,8 +70,22 @@ def _pod_counts() -> dict[str, int]:
     the question ``kubectl get pods -n x`` answers, and it includes the four
     thousand ``Completed`` pods a CronJob left behind — that pile is usually the
     reason someone opened this page.
+
+    Read over the raw path rather than through the typed client, because the
+    typed client's cost here is not the network: it builds a ``V1Pod`` — and
+    every container, volume and status inside it — for each of the ten thousand
+    pods, which is seconds of CPU spent to produce a handful of integers, all of
+    it inside the API read deadline this page shares with the namespace listing.
+    Two keys of each object are looked at, so the dicts the API server already
+    sent are enough. The failure path survives the swap: ``raw_get`` raises the
+    API server's own ``ApiException`` exactly as the typed call does, and its one
+    extra failure — a body that is not a Kubernetes object, which is what a proxy
+    answering in the API server's place looks like — is an ``AdminError``. The
+    caller collects both, so either way ``counts`` stays ``None`` and no
+    namespace is reported as holding zero pods on the strength of a read that
+    did not happen.
     """
-    listing = get_core_v1().list_pod_for_all_namespaces()
+    listing = catalog.raw_get(reader.resource_path("", "v1", "pods"))
     counts: dict[str, int] = {}
     for pod in shaping.get_field(listing, "items", default=[]) or []:
         namespace = shaping.get_field(pod, "metadata", "namespace")

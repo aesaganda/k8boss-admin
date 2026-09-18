@@ -37,6 +37,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from app.k8s.quantities import parse_quantity as k8s_parse_quantity
 from app.resources.shaping import (
     LAST_APPLIED_ANNOTATION,
     age_seconds,
@@ -156,6 +157,49 @@ def test_an_unparseable_quantity_is_none_rather_than_a_guessed_magnitude():
     assert parse_quantity("banana") is None
     assert parse_quantity("5Zi") is None
     assert parse_bytes(None) is None
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["5Gi", "100m", "500M", "1e3", "1.5e2", "16", "1K", "500K", ".5Gi", "5.", "1.",
+     "1e3Gi", "1.5e2Gi", "banana", "5Zi", "1KI", "12 Mi", "", "  64Gi  "],
+)
+def test_the_row_and_the_calculation_read_a_quantity_the_same_way(text):
+    """One grammar, or a number on a row disagrees with the number beside it.
+
+    This module used to carry a second reading of the same strings. Nothing told
+    anyone the two had drifted — the row rendered, the calculation ran, and the
+    only symptom was a capacity report that did not add up against the node page
+    built from the other grammar. Asserted as an identity against
+    `app.k8s.quantities` rather than against a table of expected numbers,
+    because a table is a third reading and would drift the same way.
+    """
+    expected = k8s_parse_quantity(text)
+    assert parse_quantity(text) == (None if expected is None else float(expected))
+
+
+def test_a_quantity_the_api_server_accepts_is_not_reported_as_unparseable():
+    """`1K` and `.5Gi` are apimachinery's grammar; the old local one rejected them.
+
+    An em dash is honest about a value we cannot read, and dishonest about one we
+    can: it sends an operator to go and fix a manifest the cluster was perfectly
+    happy with.
+    """
+    assert parse_quantity("1K") == 1000.0
+    assert parse_bytes(".5Gi") == 536870912
+    assert parse_quantity("5.") == 5.0
+
+
+def test_an_exponent_and_a_suffix_together_are_not_a_quantity():
+    """`1e3Gi` is not a value any API server would have accepted.
+
+    The grammar allows an exponent *or* a suffix after the number, never both.
+    The old local reading multiplied them into a terabyte — a magnitude invented
+    for a string that cannot exist, which is the one thing this function promises
+    not to do.
+    """
+    assert parse_quantity("1e3Gi") is None
+    assert parse_bytes("1.5e2Gi") is None
 
 
 # --------------------------------------------------------------------------- #

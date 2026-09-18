@@ -17,11 +17,14 @@ HAProxy's own in-cluster controller. The console's model of the router is
 
 **The console never adopts an object it did not create.** Every object in the
 bundle carries ``app.kubernetes.io/managed-by: k8boss-admin``. An install that
-finds an object of the same name *without* that label refuses, names it, and
-stops — before writing anything, on a dry run as much as on a real one. A
-console that overwrote a ClusterRole or a Namespace somebody else was using,
-because the name happened to match, would be the worst kind of confident wrong
-answer: the operator asked for an install and got a silent takeover.
+finds an object of the same name *without* that label refuses and stops — before
+writing anything, on a dry run as much as on a real one. It reads all eight
+first and names **every** object in that state, not the first one, because
+refusing one at a time costs the operator a round trip per conflict and none of
+those refusals says how many are left. A console that overwrote a ClusterRole or
+a Namespace somebody else was using, because the name happened to match, would be
+the worst kind of confident wrong answer: the operator asked for an install and
+got a silent takeover.
 
 **A partial install is reported as a partial install.** Eight objects, eight
 writes, and the sixth can fail. There is no rollback: deleting the five that
@@ -167,6 +170,17 @@ def _managed_by_us(obj: Any) -> bool:
     return labels.get(MANAGED_BY_LABEL) == MANAGED_BY
 
 
+def _where(item: BundleObject) -> str:
+    """``namespace/name``, or just the name for a cluster-scoped object.
+
+    Six of the bundle's eight objects are called ``k8boss-admin-router``, so a
+    refusal that named only the name would print the same string six times and
+    send the operator looking for one object instead of six. The kind in front of
+    it and the namespace in it are what tell them apart.
+    """
+    return f"{item.namespace}/{item.name}" if item.namespace else item.name
+
+
 def _read_live(item: BundleObject) -> dict[str, Any] | None:
     """The object as it exists now, or ``None`` if it does not.
 
@@ -184,9 +198,28 @@ def _read_live(item: BundleObject) -> dict[str, Any] | None:
 
 
 def _refuse_takeover(
-    item: BundleObject, live: dict[str, Any], *, dry_run: bool,
+    conflicts: list[tuple[BundleObject, dict[str, Any]]], *, dry_run: bool,
 ) -> Conflict:
-    """409 naming the object the console will not adopt, and an audit row saying so.
+    """409 naming **every** object the console will not adopt, and an audit row each.
+
+    All of them in one refusal, not the first one. The read loop has already
+    looked at all eight objects by the time it can refuse, so the other conflicts
+    are known and withholding them is a choice — one that costs the operator a
+    round trip per conflicting object: delete the ClusterRole, install again, get
+    refused on the Service, delete that, install again. Each refusal reads as a
+    fresh failure rather than as the second of three, and nothing tells them how
+    many are left. §33's OLM install refuses the same way for the same reason.
+
+    Audited per object rather than once for the batch: the question the trail
+    answers is "did anyone try to install a router over *my* ClusterRole", and it
+    is asked about one object by someone who has just found it. A single row
+    carrying a count cannot be found by the target it was about. §33 does not do
+    this — :func:`app.admin.olm._refuse_takeover` writes one row for the whole
+    batch, targeted at the first OLM Deployment, with the count in ``detail``.
+    Said here rather than left to be discovered, because "the same way" above
+    is about the refusal and stops there, and a reader who carries it one
+    paragraph further concludes the trail holds a row per conflicting OLM
+    object.
 
     Audited for the same reason the mutations gate audits its own refusal:
     somebody attempting to install a router over an object they do not own is
@@ -196,44 +229,66 @@ def _refuse_takeover(
     attempt happened either way, and a trail that held only the confirmed ones
     could not answer "did anyone try".
     """
-    owner = (get_field(live, "metadata", "labels", default={}) or {}).get(
-        MANAGED_BY_LABEL
-    )
-    where = f"{item.namespace}/{item.name}" if item.namespace else item.name
+    described: list[str] = []
+    for item, live in conflicts:
+        owner = (get_field(live, "metadata", "labels", default={}) or {}).get(
+            MANAGED_BY_LABEL
+        )
+        described.append(
+            f"{item.kind} {_where(item)}" + (f" (it says {owner!r})" if owner else "")
+        )
+
+    if len(conflicts) == 1:
+        item = conflicts[0][0]
+        message = (
+            f"A {item.kind} called {_where(item)} already exists and this "
+            "console did not create it."
+        )
+    else:
+        message = (
+            f"{len(conflicts)} of this bundle's objects already exist and this "
+            "console did not create them."
+        )
     error = Conflict(
-        f"A {item.kind} called {where} already exists and this console did not create it.",
+        message,
         detail=(
-            "It does not carry the label "
-            f"{MANAGED_BY_LABEL}={MANAGED_BY}"
-            + (f" (it says {owner!r})." if owner else ".")
-            + " Overwriting it would take over an object something else is using."
+            f"Not carrying the label {MANAGED_BY_LABEL}={MANAGED_BY}: "
+            + "; ".join(described)
+            + ". Overwriting them would take over objects something else is using."
         ),
         hint=(
-            "Install into a different namespace, or delete that object yourself "
-            "if it is left over from an earlier install."
+            "Install into a different namespace, or delete those objects yourself "
+            "if they are left over from an earlier install."
         ),
         context={
-            "group": item.group, "version": item.version, "resource": item.plural,
-            "namespace": item.namespace, "name": item.name, "kind": item.kind,
+            "conflicts": [
+                {
+                    "group": item.group, "version": item.version,
+                    "resource": item.plural, "namespace": item.namespace,
+                    "name": item.name, "kind": item.kind,
+                }
+                for item, _ in conflicts
+            ],
         },
     )
     # Never raises — see `app.audit`. A failed INSERT must not turn a refusal
     # into a 500, which would tell the operator the console is broken rather
     # than that it declined to take over their object.
-    recorder.record(
-        verb="create",
-        target={
-            "group": item.group, "version": item.version, "resource": item.plural,
-            "namespace": item.namespace, "name": item.name,
-        },
-        dry_run=dry_run,
-        outcome="conflict",
-        detail=(
-            f"router install refused: {item.kind} {where} is not managed by "
-            "this console"
-        ),
-        error=f"{error.code}: {error.message}",
-    )
+    for item, _ in conflicts:
+        recorder.record(
+            verb="create",
+            target={
+                "group": item.group, "version": item.version, "resource": item.plural,
+                "namespace": item.namespace, "name": item.name,
+            },
+            dry_run=dry_run,
+            outcome="conflict",
+            detail=(
+                f"router install refused: {item.kind} {_where(item)} is not "
+                "managed by this console"
+            ),
+            error=f"{error.code}: {error.message}",
+        )
     return error
 
 
@@ -246,12 +301,18 @@ def _check_ownership(
     apply loop would create the first five objects and *then* discover that the
     sixth belongs to somebody else, leaving a half-install behind for a refusal
     that was knowable up front.
+
+    The loop finishes before it refuses, so the refusal can name every conflict
+    rather than the first — see :func:`_refuse_takeover`. Reading on past a
+    conflict costs the remaining reads, which were going to happen anyway on the
+    install the operator is about to retry.
     """
     existing: list[dict[str, Any]] = []
+    conflicts: list[tuple[BundleObject, dict[str, Any]]] = []
     for item in objects:
         live = _read_live(item)
         if live is not None and not _managed_by_us(live):
-            raise _refuse_takeover(item, live, dry_run=dry_run)
+            conflicts.append((item, live))
         existing.append(
             {
                 "kind": item.kind,
@@ -269,6 +330,8 @@ def _check_ownership(
                 ),
             }
         )
+    if conflicts:
+        raise _refuse_takeover(conflicts, dry_run=dry_run)
     return existing
 
 

@@ -277,6 +277,14 @@ def namespace_isolation(namespace: str | None = None) -> dict[str, Any]:
     any_undecided = False
     pod_rows: list[dict[str, Any]] = []
 
+    # ponytail: the full pod x policy cross product, the same shape §28's budget
+    # correlation keeps and for the same reason. Grouping the policies by
+    # namespace first is the upgrade — a dict of namespace -> (policy, row)
+    # pairs built once above this loop — and it measured the same order of
+    # improvement there. It is not built yet because the pod listing and its
+    # deserialization dominate this page by several times, so the index would
+    # take out a term that is not the bottleneck while adding a second structure
+    # that has to stay in step with `policy_rows`. Measure the read first.
     for pod in pods:
         selecting: list[dict[str, Any]] = []
         undecided = False

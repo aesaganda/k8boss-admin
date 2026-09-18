@@ -612,6 +612,15 @@ class PodIndex:
         """
         if selector is None or selector_is_empty(selector):
             return None
+        # ponytail: every workload row rescans every pod, so the whole page is
+        # workloads x pods. Measured at 0.6s to 2.8s across realistic clusters.
+        # The obvious upgrade — grouping `self.facts` by namespace in __init__ —
+        # takes about 12% off the dense case, because the clusters where this
+        # costs anything are the ones whose pods are concentrated in a few
+        # namespaces, and the namespace filter is already the cheap comparison
+        # here: the cost is `label_selector_matches`, which an index does not
+        # avoid. A real fix is a selector-shaped index, which is a different
+        # piece of work and needs the profile to justify it.
         total = 0
         for fact in self.facts:
             if namespace is not None and fact.namespace != namespace:
