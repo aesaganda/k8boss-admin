@@ -106,8 +106,20 @@ export default function AppNav() {
         </NavSection>
 
         <NavSection id="workloads" title="Workloads" routes={['/workloads', '/pods']}>
-          <RouterNavItem to="/workloads">Workloads</RouterNavItem>
+          {/* `end`: the kind filter is a path below this one, so without it
+              this entry and the kind's own entry both light up at once. */}
+          <RouterNavItem to="/workloads" end>
+            Workloads
+          </RouterNavItem>
           <RouterNavItem to="/pods">Pods</RouterNavItem>
+          {/* The batch pair, `/workloads/cronjobs` and `/workloads/jobs`: the
+              same six-kind table with its kind filter in the URL, not two more
+              pages. An operator chasing a failed run asks for these two by
+              name, and a filter chip on a page of six kinds is not something
+              you can send a link to. CronJob first — it is the thing that
+              made the Job. */}
+          <RouterNavItem to="/workloads/cronjobs">CronJobs</RouterNavItem>
+          <RouterNavItem to="/workloads/jobs">Jobs</RouterNavItem>
         </NavSection>
 
         {/* Storage, Network, Configuration and Access control are each one

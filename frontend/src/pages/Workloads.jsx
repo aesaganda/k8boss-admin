@@ -19,7 +19,7 @@
  * gate is asked second, and only for actions the kind actually has.
  */
 import { Suspense, lazy, useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Navigate, useNavigate, useParams } from 'react-router-dom';
 import { Button, Dropdown, DropdownItem, DropdownList, MenuToggle } from '@patternfly/react-core';
 import SyncAltIcon from '@patternfly/react-icons/dist/esm/icons/sync-alt-icon';
 import {
@@ -175,7 +175,12 @@ export default function Workloads() {
   const { density, setDensity } = useDensity();
   const navigate = useNavigate();
 
-  const [kind, setKind] = useState(null);
+  // The kind filter is the URL, not component state: `/workloads/jobs` is what
+  // the sidebar's Jobs entry points at, and a filter nobody can send a link to
+  // is the same selector the four tabbed pages took out of a tab strip.
+  const { plural } = useParams();
+  const kind = plural && Object.hasOwn(WORKLOAD_KINDS, plural) ? plural : null;
+  const setKind = (next) => navigate(next ? `/workloads/${next}` : '/workloads');
   const [search, setSearch] = useState('');
   const [scaleTarget, setScaleTarget] = useState(null);
   const [restartTarget, setRestartTarget] = useState(null);
@@ -276,10 +281,20 @@ export default function Workloads() {
     [],
   );
 
+  // A kind nobody serves is sent to the whole list rather than filtered by a
+  // name the cluster has never heard of, which would render an empty table
+  // under a heading claiming it is that kind's complete listing.
+  if (plural && kind == null) return <Navigate to="/workloads" replace />;
+
+  // The kind's own name when one is filtered, for the same reason the tabbed
+  // pages title themselves after their section: "Workloads" over a table of
+  // Jobs only says which sidebar entry you are not on.
+  const heading = kind ? `${WORKLOAD_KINDS[kind].kind}s` : 'Workloads';
+
   if (activeClusterId == null) {
     return (
       <>
-        <PageHeader title="Workloads" />
+        <PageHeader title={heading} />
         <NoClusterState what="The workload list" />
       </>
     );
@@ -308,7 +323,7 @@ export default function Workloads() {
   return (
     <>
       <PageHeader
-        title="Workloads"
+        title={heading}
         subtitle={
           loading
             ? 'Reading the cluster…'

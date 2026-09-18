@@ -111,6 +111,10 @@ function ConsoleRoutes() {
               <Route path="namespaces/:name" element={<NamespaceDetail />} />
 
               <Route path="workloads" element={<Workloads />} />
+              {/* The same page with its kind filter in the path, so the
+                  sidebar's Jobs entry — and any filtered list somebody sends
+                  round during an incident — is a URL rather than a click. */}
+              <Route path="workloads/:plural" element={<Workloads />} />
               <Route
                 path="workloads/:plural/:namespace/:name"
                 element={<WorkloadDetail />}

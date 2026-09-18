@@ -41,6 +41,32 @@ test.describe('shell', () => {
     await expect(nav.getByRole('link', { name: 'Routes', exact: true })).toHaveAttribute('aria-current', 'page');
   });
 
+  test('the Jobs entry is the workloads list with its kind in the URL', async ({ page }) => {
+    await page.goto('/');
+    const nav = page.getByRole('navigation', { name: 'Console navigation' });
+    await nav.getByRole('button', { name: 'Workloads' }).click();
+    await nav.getByRole('link', { name: 'Jobs', exact: true }).click();
+
+    await expect(page).toHaveURL(/\/workloads\/jobs$/);
+    // Titled after the kind, and only that entry is current: `/workloads` is a
+    // prefix of this path, so the all-kinds entry must match exactly.
+    await expect(page.getByRole('heading', { level: 1, name: 'Jobs', exact: true })).toBeVisible();
+    await expect(nav.getByRole('link', { name: 'Jobs', exact: true })).toHaveAttribute(
+      'aria-current',
+      'page',
+    );
+    await expect(nav.getByRole('link', { name: 'Workloads', exact: true })).not.toHaveAttribute(
+      'aria-current',
+      'page',
+    );
+
+    // A kind nobody serves is the whole list rather than an empty table under a
+    // heading claiming to be that kind's listing.
+    await page.goto('/workloads/nonsense');
+    await expect(page).toHaveURL(/\/workloads$/);
+    await expect(page.getByRole('heading', { level: 1, name: 'Workloads', exact: true })).toBeVisible();
+  });
+
   test('keeps the sidebar mounted while a page chunk loads', async ({ page }) => {
     await page.goto('/');
     const nav = page.getByRole('navigation', { name: 'Console navigation' });
