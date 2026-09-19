@@ -2,9 +2,17 @@
 Per-cluster Kubernetes client construction and caching.
 
 Clients are built from a registered cluster's stored API server endpoint and
-encrypted bearer token — never from a kubeconfig on the server. A kubeconfig
+encrypted credential — never from a kubeconfig on the server. A kubeconfig
 fallback exists for local development only, and only when no cluster is
 registered at all.
+
+§34 did not weaken that sentence, and it is worth being precise about why.
+Discovery reads a kubeconfig *once*, at the moment an operator (or the startup
+adoption) confirms an import, and copies the credential into the registry. Every
+client built here still comes from a `Cluster` row and from nothing else, so a
+kubeconfig that is edited, rotated or deleted after an import changes nothing
+about the transport — which is the property that makes a registration something
+this console can reason about at all.
 
 There is no global singleton API client. :class:`ClusterClientManager` keeps a
 small per-cluster cache keyed by the cluster row's ``updated_at``, so editing a
@@ -29,7 +37,7 @@ from urllib3.exceptions import MaxRetryError, ReadTimeoutError
 
 from app.config import settings
 from app.errors import ClusterUnreachable, NoClusterSelected, NotFound
-from app.k8s.auth import AuthError, get_auth_provider
+from app.k8s.auth import AuthError, ClientCertificateAuth, get_auth_provider
 from app.k8s.context import get_current_cluster_id, get_current_principal
 from app.k8s.impersonation import decide, headers_for_current_request, set_current
 
@@ -139,7 +147,23 @@ def _cluster_api_client(
             else:
                 args = (*args[:3], headers_for_current_request(args[3]), *args[4:])
         # setdefault semantics: a caller that already passed a deadline wins.
-        if "_request_timeout" not in kwargs:
+        #
+        # Tested for a `None` *value*, not for an absent key, and that
+        # distinction was the whole bug. `RESTClientObject.GET` — and POST, PUT,
+        # PATCH, DELETE — declares `_request_timeout=None` as a parameter and
+        # forwards it as a keyword on every call, so the key was always present
+        # and this default never once fired. Every typed cluster call ran with
+        # no deadline: the exact failure the docstring above says this function
+        # exists to prevent, arriving through the one door the condition could
+        # not close. Measured at 135 seconds on a single connect to an
+        # unroutable address, against a configured 5 — the kernel's SYN retry
+        # budget, which is what "no deadline" means in practice.
+        #
+        # Nothing failed while it was wrong. The settings were read, the tuple
+        # was built, and the only symptom was how long a broken cluster took to
+        # give up. `tests/test_transport_deadlines.py` asserts the value that
+        # reaches the transport, which is the only place the difference shows.
+        if kwargs.get("_request_timeout") is None:
             read = (
                 settings.k8s_watch_read_timeout_seconds
                 if _is_streaming(args, kwargs)
@@ -204,7 +228,12 @@ class ClusterClients:
     storage_v1: client.StorageV1Api
     authorization_v1: client.AuthorizationV1Api
     version_api: client.VersionApi
-    _ca_temp_path: str | None = field(default=None, repr=False)
+    #: Every temp file this bundle's transport reads from — the CA, and for a
+    #: §34 client-certificate cluster the certificate and key as well. A tuple
+    #: rather than one path because the kubernetes client reads all three from
+    #: disk, and the version of this that tracked only the CA would have leaked
+    #: a private key into the container's writable layer on every rebuild.
+    _temp_paths: tuple[str, ...] = field(default=(), repr=False)
     _dynamic: DynamicClient | None = field(default=None, repr=False)
 
     @property
@@ -260,17 +289,35 @@ class ClusterClients:
         return client.CoreV1Api(client.ApiClient(configuration=self.api_client.configuration))
 
     def close(self) -> None:
-        """Release the transport and the CA temp file. Safe to call twice."""
+        """Release the transport and every temp file it read. Safe to call twice."""
         try:
             self.api_client.close()
         except Exception:  # noqa: BLE001 - closing must never mask the real error
             logger.debug("Ignoring error while closing ApiClient for cluster %s",
                          self.cluster_id, exc_info=True)
-        if self._ca_temp_path and os.path.exists(self._ca_temp_path):
+        for path in self._temp_paths:
+            if not os.path.exists(path):
+                continue
             try:
-                os.unlink(self._ca_temp_path)
+                os.unlink(path)
             except OSError:
-                logger.debug("Could not remove CA temp file %s", self._ca_temp_path)
+                logger.debug("Could not remove credential temp file %s", path)
+
+
+def _write_temp(content: str, *, suffix: str, private: bool) -> str:
+    """Spill one PEM to a file, because the kubernetes client reads paths.
+
+    ``private`` narrows the mode to 0600 before anything is written. ``mkstemp``
+    already creates at 0600, so this is belt and braces — but the belt is the
+    thing holding a cluster's private key in a container's writable layer, and
+    an ``umask`` change elsewhere in the process is not a reason to widen it.
+    """
+    fd, path = tempfile.mkstemp(suffix=suffix, prefix="k8boss-admin-")
+    with os.fdopen(fd, "w") as handle:
+        handle.write(content)
+    if private:
+        os.chmod(path, 0o600)
+    return path
 
 
 def build_configuration(
@@ -280,35 +327,61 @@ def build_configuration(
     token: str | None,
     ca_certificate: str | None,
     skip_tls_verify: bool,
-) -> tuple[client.Configuration, str | None]:
+    client_certificate: str | None = None,
+    client_key: str | None = None,
+) -> tuple[client.Configuration, tuple[str, ...]]:
     """Build a ``Configuration`` from stored cluster parameters.
 
-    Returns the configuration and the path of the temporary CA file, if one was
-    written, so the caller can delete it when the client is discarded. The
-    kubernetes client reads the CA from a *path*, not from memory, which is the
-    only reason a temp file exists here.
+    Returns the configuration and every temporary file written for it, so the
+    caller can delete them when the client is discarded. The kubernetes client
+    reads the CA — and §34's client certificate and key — from *paths*, not from
+    memory, which is the only reason temp files exist here.
+
+    The paths come back as one tuple rather than as separate returns because
+    they have exactly one lifetime between them: they are the transport's, they
+    die with it, and a second return value is a second thing a caller can
+    forget. The version of this function that returned only the CA path is what
+    would have left a decrypted private key on disk after every cache rebuild.
     """
     configuration = client.Configuration()
     configuration.host = api_server.rstrip("/")
 
-    auth = get_auth_provider(authentication_type, token=token)
+    auth = get_auth_provider(
+        authentication_type,
+        token=token,
+        client_certificate=client_certificate,
+        client_key=client_key,
+    )
+    temp_paths: list[str] = []
     try:
         auth.apply(configuration)
+        if isinstance(auth, ClientCertificateAuth):
+            # Written here rather than in the provider because this function
+            # owns the cleanup contract: everything it spills comes back in the
+            # tuple, and a provider writing its own file would be a second place
+            # temp files are created and a first place they are forgotten.
+            configuration.cert_file = _write_temp(
+                auth.certificate, suffix=".crt", private=False,
+            )
+            configuration.key_file = _write_temp(
+                auth.key, suffix=".key", private=True,
+            )
+            temp_paths.extend([configuration.cert_file, configuration.key_file])
     finally:
-        # Wipe the provider's copy as soon as it has been applied. The token now
-        # lives only in the Configuration this function returns.
+        # Wipe the provider's copy as soon as it has been applied. The credential
+        # now lives only in the Configuration this function returns, and — for a
+        # client certificate — in two files the bundle deletes when it closes.
         auth.clear()
 
-    ca_temp_path: str | None = None
     if skip_tls_verify:
         # Explicitly requested by the operator at registration and surfaced in
         # every ClusterPublic response, so it can never be silently in effect.
         configuration.verify_ssl = False
     elif ca_certificate:
-        fd, ca_temp_path = tempfile.mkstemp(suffix=".crt", prefix="k8boss-admin-ca-")
-        with os.fdopen(fd, "w") as handle:
-            handle.write(ca_certificate)
-        configuration.ssl_ca_cert = ca_temp_path
+        configuration.ssl_ca_cert = _write_temp(
+            ca_certificate, suffix=".crt", private=False,
+        )
+        temp_paths.append(configuration.ssl_ca_cert)
         configuration.verify_ssl = True
     else:
         # No CA supplied: verify against the system trust store. Falling back to
@@ -316,7 +389,7 @@ def build_configuration(
         # equivalent to "I chose to skip verification".
         configuration.verify_ssl = True
 
-    return configuration, ca_temp_path
+    return configuration, tuple(temp_paths)
 
 
 class ClusterClientManager:
@@ -410,22 +483,28 @@ class ClusterClientManager:
         from app.crypto import decrypt
 
         token = ""
+        client_key = ""
         try:
             if cluster.token_encrypted:
                 token = decrypt(cluster.token_encrypted)
-            configuration, ca_temp_path = build_configuration(
+            if cluster.client_key_encrypted:
+                client_key = decrypt(cluster.client_key_encrypted)
+            configuration, temp_paths = build_configuration(
                 api_server=cluster.api_server,
                 authentication_type=cluster.authentication_type,
                 token=token,
                 ca_certificate=cluster.ca_certificate,
                 skip_tls_verify=bool(cluster.skip_tls_verify),
+                client_certificate=cluster.client_certificate,
+                client_key=client_key,
             )
         finally:
             # Drop the plaintext from this frame whichever way we leave it,
             # including on the AuthError path, so a traceback rendered by a
-            # debugger or an error reporter never carries a live token in a
-            # local variable.
+            # debugger or an error reporter never carries a live credential in a
+            # local variable. Both halves, for the same reason.
             token = ""
+            client_key = ""
 
         api_client = _cluster_api_client(configuration, impersonatable=impersonatable)
         bundle = _bundle(
@@ -433,7 +512,7 @@ class ClusterClientManager:
             cluster_id=cluster.id,
             platform=cluster.platform or "kubernetes",
             cache_key=self._cache_key(cluster),
-            ca_temp_path=ca_temp_path,
+            temp_paths=temp_paths,
         )
         logger.info("Built Kubernetes clients for cluster id=%s", cluster.id)
         return bundle
@@ -447,6 +526,8 @@ class ClusterClientManager:
         ca_certificate: str | None,
         skip_tls_verify: bool,
         platform: str = "kubernetes",
+        client_certificate: str | None = None,
+        client_key: str | None = None,
     ) -> ClusterClients:
         """Build an uncached bundle from plaintext parameters.
 
@@ -455,12 +536,14 @@ class ClusterClientManager:
         would make a subsequent real request use credentials that exist nowhere
         but in one operator's browser form.
         """
-        configuration, ca_temp_path = build_configuration(
+        configuration, temp_paths = build_configuration(
             api_server=api_server,
             authentication_type=authentication_type,
             token=token,
             ca_certificate=ca_certificate,
             skip_tls_verify=skip_tls_verify,
+            client_certificate=client_certificate,
+            client_key=client_key,
         )
         return _bundle(
             # Never impersonatable: these credentials are an unsaved form's, and
@@ -471,7 +554,7 @@ class ClusterClientManager:
             cluster_id=None,
             platform=platform,
             cache_key="transient",
-            ca_temp_path=ca_temp_path,
+            temp_paths=temp_paths,
         )
 
     def get_clients(self, cluster_id: int | None = None) -> ClusterClients:
@@ -547,6 +630,16 @@ class ClusterClientManager:
         mask a misconfigured registration by quietly answering from a developer's
         kubeconfig instead.
 
+        **§34's startup adoption is what this should usually lose to**, and
+        that is the point of keeping both. An adopted cluster is a row: it has a
+        name, a status, a connection test, a permission matrix and a line in the
+        cluster switcher. This path has none of those — it answers requests
+        while ``GET /api/clusters`` returns an empty list, which is accurate and
+        unhelpful. It remains for the two cases adoption declines: in-cluster
+        mode, where the credential is the pod's own ServiceAccount and there is
+        no kubeconfig to import, and a kubeconfig whose only context is remote,
+        which adoption will not register on nobody's behalf.
+
         **Never impersonated (ADR-0007), and named as an exemption.** There is
         no `Cluster` row here, so there is nothing carrying the per-cluster
         opt-in and nothing that could have been opted in — impersonation is a
@@ -579,7 +672,7 @@ class ClusterClientManager:
 
         self._local = _bundle(
             api_client, cluster_id=None, platform="kubernetes", cache_key="local",
-            ca_temp_path=None,
+            temp_paths=(),
         )
         return self._local
 
@@ -611,7 +704,7 @@ def _bundle(
     cluster_id: int | None,
     platform: str,
     cache_key: str,
-    ca_temp_path: str | None,
+    temp_paths: tuple[str, ...],
 ) -> ClusterClients:
     """Assemble every typed client over one ApiClient.
 
@@ -633,7 +726,7 @@ def _bundle(
         storage_v1=client.StorageV1Api(api_client),
         authorization_v1=client.AuthorizationV1Api(api_client),
         version_api=client.VersionApi(api_client),
-        _ca_temp_path=ca_temp_path,
+        _temp_paths=temp_paths,
     )
 
 

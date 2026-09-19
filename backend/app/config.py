@@ -860,6 +860,29 @@ class Settings(BaseSettings):
         ),
     )
 
+    # -- §34 onboarding ---------------------------------------------------
+    auto_discover_local_cluster: bool = Field(
+        default=True,
+        validation_alias=AliasChoices(
+            "ADMIN_AUTO_DISCOVER_LOCAL", "auto_discover_local_cluster",
+        ),
+        description=(
+            "Register the kubeconfig's local cluster at startup when nothing is "
+            "registered yet. On by default because the alternative for somebody "
+            "with a kind or k3d cluster is a ServiceAccount, a token and four "
+            "commands before the console shows anything at all — and because "
+            "what it can adopt is narrow: only when the registry is EMPTY, only "
+            "a context a local tool wrote (kind, k3d, minikube, Docker Desktop "
+            "and the rest of app.k8s.kubeconfig.LOCAL_DISTRIBUTIONS), only when "
+            "its API server is a loopback or private address, and only when "
+            "exactly one such context qualifies. A remote context is never "
+            "adopted, at any count: a console that boots and quietly registers "
+            "the production cluster a developer happens to have a context for is "
+            "a worse failure than one that asks. Set false to require every "
+            "registration to be an explicit act."
+        ),
+    )
+
     # -- HTTP -------------------------------------------------------------
     cors_origins: str = Field(
         default="",

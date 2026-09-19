@@ -6203,3 +6203,216 @@ preserved.
 **Not a reconcile loop.** The one wait between the phases is bounded, lives
 inside a single request, holds no state and corrects no drift — what `kubectl
 wait` does. There is no watch and no drift correction anywhere in this section.
+
+---
+
+## 34. Onboarding — the cluster that is already on this machine
+
+§3 registers a cluster from an API server address and a bearer token. That is
+the right shape for a remote cluster and the wrong amount of work for a local
+one: somebody with `kind` running on the same laptop has to create a
+ServiceAccount, bind it, mint a token, read the API address out of their
+kubeconfig and paste both into a form — for a cluster whose credentials are
+already on disk, three lines from where the console is running.
+
+§34 reads that file. **It does not change where a client comes from.** Discovery
+lists what is there, an import *copies* the credential into §3's registry, and
+every transport this console builds still comes from a `Cluster` row and from
+nothing else. A kubeconfig edited, rotated or deleted after an import changes
+nothing about the cluster registered from it — re-importing is how you pick up a
+new credential. `docs/adr-0012-kubeconfig-onboarding.md` argues that boundary and
+what it costs.
+
+### 34.1 What it does, and what it does not
+
+| It does | It does not |
+|---|---|
+| List every context in the kubeconfig, with what each one holds | Hide the ones it cannot import |
+| Copy a token, or an X.509 pair, into the encrypted registry | Read the kubeconfig again afterwards, ever |
+| Register the one local cluster at startup when nothing is registered | Add to a registry that is not empty, or adopt anything remote |
+| Say a loopback address is unreachable from inside a container | Rewrite it to something it guesses would work |
+| Report a kubeconfig it may not read, naming the uid | Report that as a Kubernetes permission |
+| Say a candidate *could* be registered | Say it answers — §3's `/test` is still what establishes that |
+| Run an `exec` credential plugin | — it refuses, and says why |
+
+### 34.2 `GET /api/clusters/discovery`
+
+Administrator-only (§12.6), like §3's three writes: it reports on a file on the
+console's own filesystem — its path, the contexts in it, the addresses they point
+at. Reads no cluster and opens no connection.
+
+```jsonc
+{
+  "items": [
+    {
+      "context": "kind-dev",
+      "cluster": "kind-dev",
+      "api_server": "https://127.0.0.1:6443",
+      "namespace": null,
+      "distribution": "kind",        // null when no local tool wrote it
+      "is_local": true,              // distribution AND a loopback/private address
+      "is_current": true,            // the file's own current-context
+      "credential": "client_certificate",
+      "authentication_type": "client_certificate",  // null when not importable
+      "importable": true,
+      "reason": null,                // the sentence, when importable is false
+      "concern": null,               // see 34.4
+      "has_ca_certificate": true,
+      "skip_tls_verify": false
+    }
+  ],
+  "continue": null, "remaining": null, "partial": false, "unavailable": [],
+  "source": {
+    "path": "/home/operator/.kube/config",
+    "current_context": "kind-dev",
+    "in_container": false
+  },
+  "auto_discovery": { "enabled": true, "candidates": ["kind-dev"] }
+}
+```
+
+**No field of this object ever contains credential material** — not the token,
+not the client key, not the CA. Only *what kind* of credential the context holds.
+The bytes are read again, from the file, by the import that is being confirmed.
+Enforced by a test that scans the whole body.
+
+`credential` is one of `client_certificate`, `token`, `exec`, `auth_provider`,
+`basic`, `none`. The last four are never importable, and each carries a `reason`
+saying what to do instead:
+
+* **`exec`** — the context runs a credential plugin (`aws`, `gke-gcloud-auth-plugin`).
+  This console will not execute a binary named by a file on its disk, and a
+  plugin's output expires, so there is nothing to store. The kubeconfig is parsed,
+  never loaded by `kubernetes.config`, precisely so that *listing* what is
+  available cannot run anything.
+* **`auth_provider`** — a legacy refreshing plugin. Same absence of a copyable credential.
+* **`basic`** — a username and password. This console presents a bearer token or
+  a client certificate; current API servers serve neither basic auth.
+* **`none`** — no credential at all. Importing it would register an anonymous
+  connection, which half-works against a permissive cluster and becomes an
+  intermittent permissions mystery weeks later.
+
+**A refused context is listed, not dropped.** §0.1 applied to a file: an operator
+whose only context is an EKS one must be able to tell "this console will not run
+your credential plugin" from "you have no kubeconfig", and an omission says
+neither.
+
+`unavailable[]` carries `resource: "kubeconfig"` with `reason` of `not_found`
+(no such file — the ordinary state of a console whose clusters are registered by
+hand), `forbidden` (**a file permission on this machine, not a Kubernetes one** —
+a mode-600 kubeconfig against a container running as another uid, which is the
+most common way this feature silently does nothing) or `unsupported` (not a
+kubeconfig). Never a 500, and never an empty list standing in for any of them.
+
+### 34.3 `POST /api/clusters/import`
+
+Administrator-only. Body: `{ "context": "kind-dev", "name": null, "app_domain": null }`
+→ `201` `ClusterPublic`, with `origin: "kubeconfig"` and `status: "unknown"`.
+
+`name` defaults to the context name. The body names a *context*, never a
+credential — a body carrying the key would mean discovery had to return one.
+
+The credential is re-read and re-checked here rather than trusted from the
+listing: they are separate requests, and a kubeconfig edited between the two
+would otherwise be imported on the strength of what it used to say.
+
+Errors, and why each is the code it is:
+
+| Case | Code | Why not the other one |
+|---|---|---|
+| No such context, or no such file | `404 not_found` | — |
+| An `exec`/`auth-provider`/basic/anonymous context | `422 invalid` | **Not `unsupported`.** That means the *cluster* does not serve something and renders grey as an ordinary fact. This is this console refusing to copy a credential, and it has a sentence to read |
+| The file is unreadable by this process | `422 invalid` | **Not `rbac_denied`.** No cluster is involved; sending someone to edit a ClusterRole over a `chmod` is a confidently wrong answer pointed at the wrong system |
+| A cluster of that name exists | `409 conflict` | Importing never overwrites — the stored credential may be the one somebody is relying on right now |
+
+`status` is `unknown`, which is not `disconnected`: nothing has been connected
+to. Running §3's `/test` is the next step and the UI says so.
+
+### 34.4 The one reachability problem visible without connecting
+
+`kind` and `k3d` write `https://127.0.0.1:<port>` into the kubeconfig. Read from
+inside the backend container, that address is *the container*, so a registration
+built from it is created, looks correct and reaches nothing — §14's failure with
+a URL instead of a controller.
+
+So a loopback address discovered from inside a container carries a `concern`.
+It is:
+
+* **not a `reason`** — the two are separate fields because "this cannot be
+  imported" and "this can be imported and probably will not connect from here"
+  send an operator to two different places;
+* **not a refusal** — a container sharing the host's network namespace reaches it
+  fine, and this console cannot tell which it is in;
+* **not rewritten** — substituting `host.docker.internal` produces a URL whose
+  hostname the cluster's certificate does not cover, so it fails verification
+  instead of connecting, and the only way to make it work is to turn verification
+  off on the operator's behalf.
+
+It is what startup adoption declines on, and `/test` is what settles it.
+
+### 34.5 Startup adoption
+
+With nothing registered, the console registers the one local cluster in the
+kubeconfig. `ADMIN_AUTO_DISCOVER_LOCAL` (default **true**) switches it off.
+
+Every condition is a refusal as much as a condition, and all five must hold:
+
+1. the switch is on;
+2. **the registry is empty** — a curated fleet is never added to;
+3. the context was written by a local cluster tool **and** its API server is a
+   loopback or private address (both, never either: a context called `kind-prod`
+   pointing at a public endpoint is remote);
+4. it carries no §34.4 concern;
+5. **exactly one** context qualifies — two is a choice, and making it at boot
+   makes it where nobody can see it happen.
+
+Anything else logs the reason and registers nothing. It never raises: a
+convenience that could fail a boot is not one.
+
+The row is written with `origin: "autodiscovered"` and `status: "unknown"`, and
+the startup log says what was adopted and how to turn it off. `origin` exists
+because this is the only row in the `clusters` table nobody asked for, and the
+first question about a cluster somebody does not remember registering is whether
+they registered it.
+
+### 34.6 `ClusterPublic` gains two fields
+
+`has_client_certificate` (boolean, like `has_ca_certificate`) and `origin`
+(`manual` | `kubeconfig` | `autodiscovered`). `manual` covers a POSTed
+registration and a row that predates the column — every one of those was typed,
+so there is no third state.
+
+### 34.7 Client-certificate registration
+
+`authentication_type: "client_certificate"` is what §34 needed and §3 now
+accepts on its own: `kind`, `k3d`, minikube and Docker Desktop mint no token at
+all, so the clusters this console most wants to adopt with no setup were the
+ones it could not represent.
+
+`POST`/`PUT` take `client_certificate` and `client_key` as PEM, write-only in
+exactly the way `token` is. The certificate is stored in the clear — it is
+presented on every handshake and is not the secret half — and the key is
+encrypted, listed in `_CLUSTER_SECRET_COLUMNS`, and refused by
+`to_public_dict`. Half a pair is `422`: it stores, it lists, and it dies in the
+TLS handshake with an error naming neither field.
+
+`token` is therefore optional on `POST`. It did not become optional in the sense
+of anonymous: a body carrying neither credential is `422 invalid` naming the
+field it lacks.
+
+### 34.8 What §34 is not
+
+**Not a live credential source.** The kubeconfig is read at import and never
+again. There is no watch, no refresh and no fallback to it at request time —
+`app/k8s/client.py`'s development fallback is a separate, older thing that only
+runs when *nothing* is registered.
+
+**Not a cloud onboarding.** An `exec` context is refused, not worked around.
+Making EKS, GKE or AKS one-click means executing a credential plugin or embedding
+three cloud SDKs, and both are larger decisions than this section.
+
+**Not a way to copy a kubeconfig into the console.** One context at a time, by
+name, as an administrator act. There is no bulk import and no "adopt everything".
+
+**Not a connection.** Discovery opens no socket and an import opens no socket.
+Everything either of them says is a fact about a file.

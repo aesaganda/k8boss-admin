@@ -215,10 +215,25 @@ services:
       - K8S_READ_TIMEOUT_SECONDS=${K8S_READ_TIMEOUT_SECONDS:-30}
       - K8S_WATCH_READ_TIMEOUT_SECONDS=${K8S_WATCH_READ_TIMEOUT_SECONDS:-600}
 
-      # Local-development fallback, used ONLY when no cluster is registered.
-      # Register clusters through the UI for anything else.
+      # Local-development fallback, used ONLY when no cluster is registered and
+      # nothing was adopted. Register clusters through the UI for anything else.
       - KUBECONFIG_PATH=/home/k8boss/.kube/config
       - IN_CLUSTER_MODE=${IN_CLUSTER_MODE:-false}
+
+      # §34 onboarding. With nothing registered, the console adopts the one
+      # local cluster in the mounted kubeconfig (kind, k3d, minikube, Docker
+      # Desktop) so a first start shows a cluster instead of an empty form. It
+      # adopts nothing once anything is registered, nothing remote at any count,
+      # and nothing when two local clusters qualify — see app/k8s/adoption.py.
+      #
+      # NOTE for kind and k3d under Compose: those tools write
+      # `https://127.0.0.1:<port>` into the kubeconfig, and from inside this
+      # container that address is the container. Adoption SKIPS such a context
+      # rather than registering one that cannot connect, and the Clusters page
+      # says so beside the candidate. Run the console on the host (`make dev`)
+      # to adopt it, or register the cluster with an address reachable from in
+      # here.
+      - ADMIN_AUTO_DISCOVER_LOCAL=${ADMIN_AUTO_DISCOVER_LOCAL:-true}
 
       # ── HTTP ─────────────────────────────────────────────────────────────
       # The browser talks to nginx on 8021 and nginx proxies same-origin, so this
@@ -230,6 +245,13 @@ services:
       # Read-only, and only used when the cluster registry is empty. `:ro` is not
       # decoration: this file is a set of live cluster credentials.
       - ${KUBECONFIG:-~/.kube/config}:/home/k8boss/.kube/config:ro
+    # So a registration that names the host by that name resolves from in here.
+    # It does NOT make a kind or k3d control plane reachable on its own: those
+    # present a certificate for 127.0.0.1 and localhost, not for this name, so a
+    # rewritten URL fails verification instead of connecting. It is here for the
+    # deployments that put something in front of the API server on the host.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
     # Overrides the image's HEALTHCHECK; keep the two in step. The timings are
     # sized for a loaded host: this probe starts a cold interpreter and imports

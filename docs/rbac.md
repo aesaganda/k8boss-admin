@@ -88,6 +88,16 @@ A `create` verb inside a read-only role looks wrong and is correct: a
 `SelfSubjectAccessReview` creates nothing. It asks the API server "may this
 identity do X" and returns an answer.
 
+**§34's onboarding needs no cluster permission at all**, and it is listed here
+so nobody goes looking for the grant it does not have. Discovery reads a file on
+the console's own machine and an import writes a row in the console's own
+database; neither opens a socket to a cluster. What a cluster *does* decide is
+what the imported credential may do there, which `POST /api/clusters/{id}/test`
+reports as the baseline matrix — and for an adopted `kind` or `k3d` cluster that
+credential is the kubeconfig's `cluster-admin` client certificate, so the matrix
+comes back entirely green and this document has nothing to say about it. The
+remote path in README is the one these tables are about.
+
 ---
 
 ## Read: cluster overview and nodes

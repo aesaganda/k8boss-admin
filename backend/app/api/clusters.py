@@ -6,8 +6,14 @@ the way in (``app.crypto``) and never comes back out: every response is built by
 :meth:`app.models.Cluster.to_public_dict`, which is an allowlist that raises
 rather than serialize a credential column.
 
-Two endpoints here do more than CRUD, and both exist to answer a question early
-instead of late:
+Three endpoints here do more than CRUD, and each exists to answer a question
+early instead of late:
+
+* ``GET /{...}/discovery`` and ``POST /clusters/import`` (§34) are onboarding.
+  A console whose first screen asks for an API server URL and a bearer token is
+  asking for four commands' worth of work from somebody who has a kind cluster
+  running on the same laptop, so discovery reads the kubeconfig and offers what
+  is there — and refuses, with the reason written out, what it cannot take.
 
 * ``POST /{id}/test`` connects *and* runs the baseline preflight set, so a
   half-permissioned ServiceAccount is visible at registration rather than at the
@@ -35,7 +41,9 @@ from app.config import settings
 from app.crypto import encrypt
 from app.database import get_db
 from app.errors import AdminError, Conflict, Invalid, NotFound, UpstreamError, from_api_exception
-from app.k8s.auth import TOKEN_AUTH_TYPES
+from app.k8s import adoption
+from app.k8s import kubeconfig as kubeconfig_reader
+from app.k8s.auth import AUTH_CLIENT_CERTIFICATE, SUPPORTED_AUTH_TYPES
 from app.k8s.client import manager
 from app.k8s.context import reset_current_cluster_id, set_current_cluster_id
 from app.k8s.quantities import add_quantities, parse_quantity
@@ -98,7 +106,16 @@ class ClusterCreate(BaseModel):
     platform: str = Field("kubernetes", max_length=50)
     api_server: str = Field(..., min_length=1, max_length=1024)
     authentication_type: str = Field("service_account_token", max_length=50)
-    token: str = Field(..., min_length=1)
+    #: Optional since §34, and the model validator below is what keeps that
+    #: from meaning "anonymous". A token cluster still needs one; a
+    #: client-certificate cluster needs the pair instead, and a body with
+    #: neither is refused at the form rather than stored as a registration that
+    #: authenticates as nobody.
+    token: str | None = Field(None, min_length=1)
+    #: §34. The X.509 pair, PEM. Write-only in exactly the way ``token`` is:
+    #: ``has_client_certificate`` is what comes back, never these.
+    client_certificate: str | None = None
+    client_key: str | None = None
     ca_certificate: str | None = None
     skip_tls_verify: bool = False
     #: ADR-0007. When true, this console's calls to this cluster carry
@@ -133,6 +150,8 @@ class ClusterUpdate(BaseModel):
     api_server: str | None = Field(None, min_length=1, max_length=1024)
     authentication_type: str | None = Field(None, max_length=50)
     token: str | None = None
+    client_certificate: str | None = None
+    client_key: str | None = None
     ca_certificate: str | None = None
     skip_tls_verify: bool | None = None
     impersonation_enabled: bool | None = None
@@ -220,11 +239,54 @@ def _validate(*, api_server: str | None, authentication_type: str | None) -> Non
                 "local test cluster).",
                 context={"field": "api_server"},
             )
-    if authentication_type is not None and authentication_type not in TOKEN_AUTH_TYPES:
+    if authentication_type is not None and authentication_type not in SUPPORTED_AUTH_TYPES:
         raise Invalid(
             f"Unsupported authentication type {authentication_type!r}.",
-            hint="Supported types: " + ", ".join(sorted(TOKEN_AUTH_TYPES)) + ".",
+            hint="Supported types: " + ", ".join(sorted(SUPPORTED_AUTH_TYPES)) + ".",
             context={"field": "authentication_type"},
+        )
+
+
+def _validate_credential(
+    *,
+    authentication_type: str,
+    token: str | None,
+    client_certificate: str | None,
+    client_key: str | None,
+) -> None:
+    """Refuse a registration that names a credential it does not carry.
+
+    ``get_auth_provider`` would refuse it too — at the first request, as a
+    cluster that cannot connect, which is a sentence about somebody's network
+    for a mistake made in a form. The same refusal here names the field.
+
+    The certificate and the key are checked as a pair rather than individually
+    because half of the pair is the failure that looks like success: it stores,
+    it lists, and it dies in the TLS handshake with an error that mentions
+    neither field.
+    """
+    if authentication_type == AUTH_CLIENT_CERTIFICATE:
+        if not (client_certificate and client_key):
+            raise Invalid(
+                "Client-certificate authentication needs both the certificate "
+                "and its private key.",
+                hint=(
+                    "Send client_certificate and client_key as PEM, or import "
+                    "the context from your kubeconfig with POST "
+                    "/api/clusters/import, which reads both for you."
+                ),
+                context={"field": "client_key" if client_certificate else "client_certificate"},
+            )
+        return
+    if not token:
+        raise Invalid(
+            "A bearer token is required for token authentication.",
+            hint=(
+                "Mint one with `kubectl -n k8boss-admin create token "
+                "k8boss-admin`, or register the cluster with "
+                "authentication_type=client_certificate and a PEM pair."
+            ),
+            context={"field": "token"},
         )
 
 
@@ -306,8 +368,14 @@ def create_cluster(
     _admin=Depends(require_console_admin),
     db: Session = Depends(get_db),
 ) -> dict:
-    """Register a cluster. The token is encrypted before it reaches the database."""
+    """Register a cluster. The credential is encrypted before it reaches the database."""
     _validate(api_server=payload.api_server, authentication_type=payload.authentication_type)
+    _validate_credential(
+        authentication_type=payload.authentication_type,
+        token=payload.token,
+        client_certificate=payload.client_certificate,
+        client_key=payload.client_key,
+    )
     _validate_impersonation(payload.impersonation_enabled)
 
     cluster = Cluster(
@@ -315,11 +383,18 @@ def create_cluster(
         platform=payload.platform,
         api_server=payload.api_server.strip(),
         authentication_type=payload.authentication_type,
-        token_encrypted=encrypt(payload.token),
+        token_encrypted=encrypt(payload.token) if payload.token else None,
+        client_certificate=payload.client_certificate,
+        client_key_encrypted=(
+            encrypt(payload.client_key) if payload.client_key else None
+        ),
         ca_certificate=payload.ca_certificate,
         skip_tls_verify=payload.skip_tls_verify,
         impersonation_enabled=payload.impersonation_enabled,
         app_domain=route_domain.normalize_domain(payload.app_domain),
+        # §34. Somebody sent this body; only the startup adoption writes a row
+        # nobody asked for, and it says so with a different value.
+        origin="manual",
         # Never tested yet, and that is a distinct state from "failed". See
         # Cluster.status.
         status="unknown",
@@ -367,6 +442,21 @@ def update_cluster(
             )
         cluster.token_encrypted = encrypt(token)
 
+    # §34, and the same rule as the token above: an omitted key keeps the stored
+    # one, an empty one is refused rather than treated as "clear it". Clearing a
+    # credential in place would leave a registration that lists, looks healthy
+    # and authenticates as nobody — de-registering the cluster is how you remove
+    # a credential, and it is the operation that says so.
+    if "client_key" in fields:
+        client_key = fields.pop("client_key")
+        if not client_key:
+            raise Invalid(
+                "A cluster cannot be saved with an empty client key.",
+                hint="Omit the field entirely to keep the key already stored.",
+                context={"field": "client_key"},
+            )
+        cluster.client_key_encrypted = encrypt(client_key)
+
     if "app_domain" in fields:
         # Normalised here rather than in the loop: it is the one field where a
         # blank is an instruction ("stop generating hostnames") rather than an
@@ -377,6 +467,18 @@ def update_cluster(
     for key, value in fields.items():
         if value is not None:
             setattr(cluster, key, value.strip() if isinstance(value, str) else value)
+
+    # §34. Checked against the row as it will be saved, not against the body:
+    # a PUT that only flips `authentication_type` to client_certificate on a
+    # cluster registered with a token sends no credential fields at all, so a
+    # body-shaped check would wave it through and the next request would fail in
+    # the TLS handshake.
+    _validate_credential(
+        authentication_type=cluster.authentication_type,
+        token="stored" if cluster.token_encrypted else None,
+        client_certificate=cluster.client_certificate,
+        client_key="stored" if cluster.client_key_encrypted else None,
+    )
 
     # ``updated_at`` is the client cache key (see ClusterClientManager._cache_key),
     # so bumping it here is what makes an edited endpoint or token take effect on
@@ -419,6 +521,132 @@ def delete_cluster(
         manager.set_active(None)
     logger.info("De-registered cluster id=%s", cluster_id)
     return Response(status_code=204)
+
+
+# --------------------------------------------------------------------------- #
+# §34 — onboarding: what is on this machine, and adopting it
+# --------------------------------------------------------------------------- #
+
+class ClusterImport(BaseModel):
+    """§34 POST body. One kubeconfig context, by name.
+
+    Deliberately *not* the credential. The browser names a context and the
+    backend re-reads the file; a body carrying the certificate and key would
+    mean discovery had to return them, and then the onboarding panel would be
+    the one page in this console that renders a private key.
+    """
+
+    context: str = Field(..., min_length=1, max_length=253)
+    #: Defaults to the context name, which is what kind and k3d already call the
+    #: cluster. A second field to fill in is a second chance to abandon the form.
+    name: str | None = Field(None, min_length=1, max_length=255)
+    app_domain: str | None = None
+
+
+def _as_admin_error(e: kubeconfig_reader.KubeconfigError) -> AdminError:
+    """Turn a kubeconfig failure into the §1.3 code the frontend branches on.
+
+    The mapping is the whole point, so it is spelled out rather than defaulted:
+
+    * ``not_found`` → 404. There is no such file, or no such context in it.
+    * ``forbidden`` → **422, not 403**. The file is unreadable *by this process*
+      — a mode-600 kubeconfig against a container running as uid 10001, which is
+      the single most common way this feature silently does nothing. `rbac_denied`
+      would send the operator to edit a ClusterRole, and there is no cluster
+      involved in this failure at all.
+    * ``unsupported`` → **422, not 501**. `unsupported` means *the cluster* does
+      not serve something and the UI renders it as an ordinary fact in grey.
+      This is a refusal by this console about a credential it will not copy, and
+      it has a sentence the operator needs to read.
+    """
+    if e.reason == "not_found":
+        return NotFound(str(e), context={"resource": "kubeconfig"})
+    return Invalid(str(e), context={"resource": "kubeconfig"})
+
+
+@router.get("/clusters/discovery")
+def discover_clusters(_admin=Depends(require_console_admin)) -> dict:
+    """Every context in this machine's kubeconfig, with what could be done with it.
+
+    Administrator-only, like §3's three writes, and for a narrower reason than
+    theirs: this reports on a file on the console's own filesystem — its path,
+    the contexts in it, the addresses they point at. None of that is credential
+    material and all of it is somebody's infrastructure.
+
+    **Reads nothing from any cluster.** No connection is attempted, so a
+    candidate listed here is a candidate that *could* be registered, never one
+    that is known to answer — ``POST /clusters/{id}/test`` is still what settles
+    that, and the panel says so.
+
+    An absent, unreadable or malformed kubeconfig is an ``unavailable`` entry
+    and a 200, not an error. "This machine has no kubeconfig" is an ordinary
+    state for a console whose clusters are registered by hand, and the
+    difference between that and "there is one and I may not read it" is the
+    whole diagnosis — which is why it is reported rather than flattened into an
+    empty list.
+    """
+    from app.resources.envelope import envelope
+
+    found = kubeconfig_reader.discover()
+    body = envelope(
+        [candidate.to_public_dict() for candidate in found.candidates],
+        unavailable=list(found.unavailable),
+    )
+    body["source"] = {
+        "path": found.path,
+        "current_context": found.current_context,
+        "in_container": kubeconfig_reader.running_in_container(),
+    }
+    # What startup adoption would have done, so the panel can explain a cluster
+    # that is already there — or the absence of one. `adopted` is not a claim
+    # that this process did it: the row may predate this boot. It is the name of
+    # the context adoption *would* pick today, which is what makes "nothing was
+    # adopted and here is why" answerable at all.
+    adoptable = kubeconfig_reader.adoptable(found)
+    body["auto_discovery"] = {
+        "enabled": settings.auto_discover_local_cluster,
+        "candidates": [candidate.context for candidate in adoptable],
+    }
+    return body
+
+
+@router.post("/clusters/import", status_code=201)
+def import_cluster(
+    payload: ClusterImport,
+    _admin=Depends(require_console_admin),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Register one discovered context, copying its credential into the registry.
+
+    Administrator-only for §3's reason, unchanged: this decides which API server
+    this console's transport talks to. That the credential came off the disk
+    rather than out of a form does not make it a smaller decision — if anything
+    it makes it an easier one to make carelessly, which is why it is a POST
+    somebody sends rather than something the discovery listing does on render.
+
+    The import is a *copy*. After it returns, the kubeconfig has no further part
+    in this cluster's life: rotating it, moving it or deleting it changes
+    nothing here, and re-importing is how you pick up a new credential. See
+    `docs/adr-0012-kubeconfig-onboarding.md`.
+    """
+    try:
+        credentials = kubeconfig_reader.credentials_for(payload.context)
+    except kubeconfig_reader.KubeconfigError as e:
+        raise _as_admin_error(e) from e
+
+    cluster = adoption.register_context(
+        db,
+        credentials,
+        name=(payload.name or credentials.context).strip(),
+        origin=adoption.ORIGIN_IMPORTED,
+        app_domain=route_domain.normalize_domain(payload.app_domain),
+    )
+    logger.info(
+        "Imported cluster id=%s name=%s from kubeconfig context %s (%s)",
+        cluster.id, cluster.name, credentials.context,
+        credentials.distribution or "no recognised distribution",
+    )
+    return cluster.to_public_dict()
 
 
 # --------------------------------------------------------------------------- #

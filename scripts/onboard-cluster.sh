@@ -48,6 +48,16 @@
 #      half-permissioned ServiceAccount should show up now, not at the first
 #      click on a page that turns out not to work.
 #
+# NOT FOR A LOCAL CLUSTER. §34 onboards kind, k3d, minikube, Docker Desktop
+# and the rest with nothing typed at all: the console finds them in your
+# kubeconfig and registers them on first start, or offers them under
+# Clusters -> Discovered on this machine. Running this script against one
+# applies a ClusterRoleBinding to a throwaway cluster to mint a token for a
+# credential path that cluster already has. Use it for the clusters it was
+# written for — the remote ones, where a scoped, rotatable ServiceAccount
+# token is exactly what you want and a kubeconfig's `exec` plugin is not
+# something this console will run. See README's "Connecting a cluster".
+#
 # USAGE
 #
 #   scripts/onboard-cluster.sh --context <kubectl-context> [options]

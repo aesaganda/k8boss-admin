@@ -76,16 +76,21 @@ Open **http://localhost:8021**. The console starts **read-only**: it can read
 every cluster you register and write to none of them. That is deliberate — see
 [Turning on writes](#turning-on-writes).
 
-If you have a kubeconfig at `~/.kube/config`, compose mounts it read-only and the
-console falls back to your current context. That fallback is for development
-only, and is used **only while no cluster is registered** — register a cluster
-and it is ignored entirely.
+Then connect a cluster. There are exactly two ways, and which one you want
+depends on where the cluster is — see
+[**Connecting a cluster**](#connecting-a-cluster) below:
 
-> The backend runs as uid 10001, and a kubeconfig is usually mode `600` owned by
-> you, so the container often cannot read it. `chmod 644 ~/.kube/config` fixes it
-> on a development machine and is a bad idea anywhere else; registering a cluster
-> properly is the better answer. The symptom is the console starting fine and
-> reporting no clusters — which is accurate, not a failure to look.
+| Your cluster | What you do | What the console stores |
+|---|---|---|
+| **Local** — `kind`, `k3d`, minikube, Docker Desktop, Rancher Desktop, Colima, OrbStack, MicroK8s | **Nothing.** It is found in your kubeconfig and registered on first start | The context's own credential, copied and encrypted |
+| **Remote** — anything else | Its API server address and a ServiceAccount token | The token, encrypted |
+
+> **If you are running the Compose stack against a local cluster, read
+> [the caveat](#if-the-console-runs-in-a-container-and-your-cluster-is-on-localhost)** —
+> `kind` and `k3d` publish their API server on `127.0.0.1`, which from inside the
+> backend container is the container. The console detects that, declines to
+> register something that cannot connect, and tells you on the Clusters page.
+> Running the console on the host (`make dev`) is the friction-free path there.
 
 ### Enable sign-in and user administration
 
@@ -332,10 +337,115 @@ a vocabulary no API server consumes. If you need impersonation behind a SAML IdP
 put an OIDC broker (Dex, Keycloak) in front of it and configure that as the
 issuer for both the console and the API server's `--oidc-issuer-url`.
 
-### Register a cluster
+## Connecting a cluster
 
-Registration is an API server endpoint plus a bearer token. Create a
-ServiceAccount in the target cluster and bind it to the console's RBAC:
+Two paths, and the console does not blur them. A **local** cluster already has a
+credential on your disk, so there is nothing to create and nothing to type. A
+**remote** cluster gets a ServiceAccount token you provision for this console
+and can rotate or revoke without touching anybody's laptop.
+
+Full contract: [`docs/api-contract.md` §34](docs/api-contract.md) and
+[§3](docs/api-contract.md). Why the console is allowed to read a kubeconfig at
+all, and the line that keeps it from becoming a credential store:
+[`docs/adr-0012-kubeconfig-onboarding.md`](docs/adr-0012-kubeconfig-onboarding.md).
+
+### A local cluster — nothing to type
+
+Have a cluster from `kind`, `k3d`, minikube, Docker Desktop, Rancher Desktop,
+Colima, OrbStack or MicroK8s? Start the console:
+
+```bash
+make dev          # backend on :8020, SPA on :5174
+```
+
+On first start, with **nothing registered**, the console reads your kubeconfig,
+finds the one local cluster in it, and registers it — with its own credential,
+copied and encrypted. Open **Clusters** and it is there, named after its context,
+with **Test connection and permissions** waiting to be clicked. That button is
+still the thing that establishes the cluster answers; adoption connects to
+nothing.
+
+Whether or not anything was adopted, **Clusters → Discovered on this machine**
+lists every context in your kubeconfig with an **Import** button beside the ones
+this console can take, and a sentence beside the ones it cannot. Or from the API:
+
+```bash
+curl -s localhost:8020/api/clusters/discovery | jq '.items[] | {context, distribution, importable, reason}'
+curl -s -X POST localhost:8020/api/clusters/import \
+  -H 'Content-Type: application/json' -d '{"context":"kind-dev"}'
+```
+
+**The five conditions for automatic adoption.** All of them, every time:
+
+1. `ADMIN_AUTO_DISCOVER_LOCAL` is `true` (the default);
+2. **nothing is registered yet** — it never adds to a cluster list you curated;
+3. the context was written by one of the local tools above **and** its API server
+   is a loopback or private address. Both, never either: a context you called
+   `kind-prod` pointing at a public endpoint is remote and is never adopted;
+4. it has no reachability problem the console can already see (below);
+5. **exactly one** context qualifies. Two local clusters adopts neither — picking
+   between them is your choice, not something to decide at boot.
+
+Anything else registers nothing and says why in the startup log. Set
+`ADMIN_AUTO_DISCOVER_LOCAL=false` to require every registration to be an explicit
+act; discovery and **Import** still work.
+
+An adopted cluster is marked **Adopted automatically at startup** in its detail
+panel, so the first question about a cluster you do not remember registering has
+an answer.
+
+**What it will not import, and why.** Every context in your kubeconfig is listed,
+including the ones it refuses — an empty panel would mean the same thing as a
+missing kubeconfig, and those are very different problems:
+
+| The context uses | What happens | Why |
+|---|---|---|
+| A client certificate (kind, k3d, minikube, Docker Desktop) | Imported | Stored as `client_certificate`; the key is encrypted at rest |
+| A `token` | Imported | Stored encrypted, like any other bearer token |
+| An `exec` credential plugin (EKS, GKE, AKS) | **Refused**, with the reason | The console will not run a binary named by a file on its disk, and a plugin's output expires — there is nothing to store. Use the remote path below |
+| A legacy `auth-provider` | **Refused** | Same: no copyable credential |
+| A username and password | **Refused** | The console presents a token or a certificate; current API servers serve neither basic auth |
+| Nothing at all | **Refused** | Importing it would register an anonymous connection, which half-works against a permissive cluster and becomes a permissions mystery weeks later |
+
+#### If the console runs in a container and your cluster is on `localhost`
+
+`kind` and `k3d` write `https://127.0.0.1:<port>` into your kubeconfig. Inside
+the backend container that address is **the container**, so a registration built
+from it would be created, look correct, and reach nothing.
+
+The console detects this, **declines to adopt**, and shows the candidate with the
+reason beside it on the Clusters page. Your options, in the order they are worth
+trying:
+
+1. **Run the console on the host** — `make dev`. `127.0.0.1` is then the right
+   address and the cluster's certificate covers it. This is the path with no
+   caveats.
+2. **Give the cluster an address that is reachable from the container** and
+   register it as a remote cluster. `kind get kubeconfig --internal` prints the
+   Docker-network address if the backend is on the same network.
+3. Rewriting the URL to `host.docker.internal` does *not* work on its own:
+   `kind`'s API server presents a certificate for `127.0.0.1` and `localhost`,
+   not for that name, so it fails verification instead of connecting. The console
+   will not make it work by turning verification off for you.
+
+#### If the console cannot read your kubeconfig
+
+Under Compose the file is mounted read-only into a container running as uid
+10001, and a kubeconfig is usually mode `600` owned by you. The Clusters page now
+says so explicitly — *"exists but this process cannot read it (running as uid
+10001)"* — rather than reporting no clusters, which used to look exactly like a
+machine with no kubeconfig on it.
+
+`chmod 644 ~/.kube/config` fixes it on a development machine and is a bad idea
+anywhere else. Running the console on the host, or registering the cluster with a
+ServiceAccount token, are the better answers.
+
+### A remote cluster — API address and a ServiceAccount token
+
+This is the path for anything you did not create on this machine, and the only
+path for a cloud cluster whose kubeconfig uses an `exec` plugin. The credential
+is provisioned for this console, scoped by `deploy/rbac.yaml`, and rotatable
+without touching anybody's laptop.
 
 ```bash
 scripts/onboard-cluster.sh --context <kubectl-context> --name <cluster-name>
@@ -373,6 +483,14 @@ curl -X POST localhost:8020/api/clusters \
 
 The token is encrypted at rest and is never returned by any endpoint.
 
+A cluster that authenticates with an **X.509 client certificate** rather than a
+token is registered the same way, with `authentication_type: "client_certificate"`
+and a `client_certificate` / `client_key` PEM pair instead of `token`. The
+certificate is stored in the clear — it is presented on every handshake and is
+not the secret half — and the key is encrypted like a token. Sending one without
+the other is refused at the form: half a pair stores fine, lists fine, and dies
+in the TLS handshake with an error naming neither field.
+
 **If `AUTH_ENABLED=true`** (the default), both calls above need a console
 session: sign in first and carry the cookie and CSRF token, the same handshake
 the SPA does —
@@ -386,8 +504,14 @@ curl -sS -b cookies.txt -H "X-CSRF-Token: <csrfToken from above>" ...
 ```
 
 `scripts/onboard-cluster.sh` does this automatically; it is the reason to prefer
-it over the raw `curl` calls below for anything but understanding the shape of
+it over the raw `curl` calls above for anything but understanding the shape of
 the API.
+
+**Registering, importing and de-registering are administrator-only** when the
+console authenticates operators (`AUTH_ENABLED=true`). They decide which API
+server this console's transport talks to; discovery is administrator-only too,
+because it reports the contexts and addresses in a file on the console's own
+machine.
 
 ### Check what it can actually do there
 
@@ -400,7 +524,19 @@ half-permissioned ServiceAccount shows up now rather than at 03:00 on the one
 action you needed. A cluster that can list everything and cannot patch a
 Deployment is a valid read-only registration; the point is that it says so.
 
-### Turning on writes
+### What the console never does with your kubeconfig
+
+* It is read **twice**: when you ask for the discovery listing, and when an
+  import is confirmed. Never on a request that serves a page.
+* An import is a **copy**. Afterwards, editing, rotating, moving or deleting the
+  kubeconfig changes nothing about the cluster registered from it — re-import to
+  pick up a new credential.
+* It is **parsed, never loaded**. `exec` plugins are listed as a fact about a
+  context and are never executed.
+* It **overwrites nothing**. Importing a context whose name is already registered
+  is a `409`; the stored credential may be the one somebody is relying on.
+
+## Turning on writes
 
 Two independent gates, and both must be opened by someone who read this:
 
@@ -823,8 +959,18 @@ version being that there is no undo for a deleted StatefulSet.
 
 **Operational**
 
-* Multiple clusters, tokens encrypted at rest, per-cluster connection testing
-  with a permission report.
+* Multiple clusters, credentials encrypted at rest, per-cluster connection
+  testing with a permission report.
+* **Nothing to type for a local cluster (§34).** `kind`, `k3d`, minikube,
+  Docker Desktop and the rest are found in the kubeconfig and registered on
+  first start, with their own credential copied and encrypted — including the
+  X.509 client certificates those tools write, which no amount of "paste a
+  bearer token" could have accepted. **Clusters → Discovered on this machine**
+  lists every context with an Import button beside the ones it can take and the
+  reason beside the ones it cannot: a credential plugin is a fact about a
+  context, never something this console runs. The kubeconfig is read twice — to
+  list, and to copy — and never again, so nothing here is a live credential
+  source. [`docs/adr-0012-kubeconfig-onboarding.md`](docs/adr-0012-kubeconfig-onboarding.md).
 * An append-only, hash-chained audit trail with a queryable API, an integrity
   check (`GET /api/audit/verify`) and an export (`GET /api/audit/export`, NDJSON
   or CSV). It records console sign-ins and sign-outs alongside cluster writes,
@@ -1178,8 +1324,9 @@ means read-only.
 | `K8S_CONNECT_TIMEOUT_SECONDS` | `5` | TCP connect deadline for Kubernetes calls |
 | `K8S_READ_TIMEOUT_SECONDS` | `30` | Read deadline for non-streaming Kubernetes calls. Without deadlines, a black-holed connection pins a threadpool worker forever while the liveness probe keeps answering healthy |
 | `K8S_WATCH_READ_TIMEOUT_SECONDS` | `600` | Read deadline for watches and log/exec streams, which are legitimately idle between events. A pod that logs nothing for five minutes is normal |
-| `KUBECONFIG_PATH` | `~/.kube/config` | Kubeconfig used **only when no cluster is registered**. Ignored in-cluster |
-| `KUBE_CONTEXT` | *(unset)* | Context name within that kubeconfig. Unset uses its current-context |
+| `ADMIN_AUTO_DISCOVER_LOCAL` | `true` | §34's zero-setup onboarding. With **nothing registered**, the console registers the one local cluster in the kubeconfig — `kind`, `k3d`, minikube, Docker Desktop and the rest — so a first start shows a cluster instead of an empty form. It adopts nothing once anything is registered, nothing remote at any count, nothing carrying a reachability problem it can already see, and nothing at all when two local clusters qualify. `false` requires every registration to be an explicit act; the Clusters page's **Discovered on this machine** panel and `POST /api/clusters/import` still work |
+| `KUBECONFIG_PATH` | `~/.kube/config` | The kubeconfig §34 discovers from, and the one used as a fallback when no cluster is registered. `KUBECONFIG` in the environment wins over it, as it does for `kubectl`, and only its first path entry is read |
+| `KUBE_CONTEXT` | *(unset)* | Context used by the no-cluster-registered fallback. Unset uses the file's current-context. It does **not** narrow §34 discovery, which lists every context so a refusal can be shown with its reason |
 | `IN_CLUSTER_MODE` | `false` | Authenticate with the pod's own ServiceAccount when no cluster is registered. Set to `true` by `deploy/deployment.yaml` |
 | `CORS_ORIGINS` | *(empty)* | Comma-separated allowed origins for split-origin deployments. Empty — the default — means no cross-origin access at all, which is what nginx proxying `/api` same-origin needs, and what `npm run dev` needs too: Vite proxies `/api`, so the browser never makes a cross-origin request. Every origin listed here is trusted **with the operator's session**, because the middleware runs with `allow_credentials=True`; a page on a listed origin can call this API as whoever is signed in. The previous default listed `:5173`, `:3000` and `:8080` — none of which is this console (`:5174` is), and `:5173` is K8Boss, a different application routinely running on the same machine |
 | `LOG_LEVEL` | `INFO` | `DEBUG` \| `INFO` \| `WARNING` \| `ERROR`. Request bodies are never logged and query-string **values** are dropped at every level |
@@ -1304,6 +1451,7 @@ Before enabling the optional Ingress, either enable local/LDAP auth with the
 | [`docs/adr-0002-lineage.md`](docs/adr-0002-lineage.md) | What came from K8Boss, what did not, why they stay separate |
 | [`docs/adr-0006-projects.md`](docs/adr-0006-projects.md) | Why a project is five ordinary writes and not a template engine, and where that line is |
 | [`docs/adr-0007-impersonation.md`](docs/adr-0007-impersonation.md) | **Proposed.** Why the console acts as one ServiceAccount per cluster, what impersonating the operator would fix and cost, and the conditions it would have to meet |
+| [`docs/adr-0012-kubeconfig-onboarding.md`](docs/adr-0012-kubeconfig-onboarding.md) | Why the console may read the kubeconfig on its own machine to onboard a cluster, why an import is a copy rather than a live credential source, and what a local cluster's certificate costs compared with a scoped token |
 | [`CLAUDE.md`](CLAUDE.md) | Working agreements for anyone (or anything) changing this repository |
 
 ## Contributing
