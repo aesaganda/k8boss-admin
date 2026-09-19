@@ -159,6 +159,45 @@ cluster and would not be for anything else, and is the sharpest reason adoption
 is restricted to local clusters. It is stated here rather than implied by the
 restriction.
 
+**RKE2 is on the path list, and it is not a laptop.** The paragraph above says
+an adopted cluster-admin certificate is *appropriate for a throwaway cluster and
+would not be for anything else*. `/etc/rancher/rke2/rke2.yaml` is the one entry
+where that sentence is under real strain: RKE2 is Rancher's hardened
+enterprise and government distribution, its users are the population least
+likely to accept a registration nobody asked for, and adoption takes the same
+cluster-admin certificate from it as from a kind cluster. It is included anyway, for three
+reasons worth having on the record rather than rediscovering in an argument.
+
+*The distinction it would draw is not real.* k3s is not a development tool that
+RKE2 is the production version of — k3s runs in production constantly, at the
+edge and on single-node installs, which is most of why it was worth recognising.
+Dropping RKE2 while keeping k3s removes a label and leaves the risk class
+exactly where it was, which is the kind of change that reads as a control and is
+not one.
+
+*The configuration it needs is narrow and deliberate.* Both files are mode
+`0600` and owned by root, so the console has to be running **as root on the
+server node** to read either. `deploy/deployment.yaml` ships
+`ADMIN_AUTO_DISCOVER_LOCAL=false`, so an in-cluster install adopts nothing;
+`docker-compose.yml` mounts `~/.kube/config` as uid 10001 and never sees
+`/etc/rancher` at all. What is left is somebody running the backend as a bare
+root process on the control-plane node with an empty registry — a single-machine
+appliance setup, where registering that node's own cluster is plausibly the
+point.
+
+*The controls are the five conditions, not the list.* An empty registry, a
+loopback or private address, no reachability concern, exactly one candidate, and
+`ADMIN_AUTO_DISCOVER_LOCAL` for anyone who wants none of it. Those are what this
+decision rests on; the path table only decides what gets *offered* to them.
+
+**If that trade is ever reopened, the coherent change is not deleting one row.**
+It is to split adoption from classification: recognise the path-identified
+server distributions — k3s and RKE2 together — so they are labelled and offered
+under Clusters, and auto-adopt only the name-identified developer tools, which
+say what they are. That costs k3s its zero-setup start, which is the thing
+recognising it bought. Stated here so the option is on the record with its
+price, rather than arrived at by deleting a line and calling it safer.
+
 **One more thing that can be wrong about somebody's laptop.** Distribution
 detection is a list of name prefixes and a list of two fixed paths in one file,
 container detection is `/.dockerenv` plus a cgroup scan, and both can be wrong. Being wrong about "is this local"
