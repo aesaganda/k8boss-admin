@@ -653,7 +653,14 @@ def import_cluster(
     cluster = adoption.register_context(
         db,
         credentials,
-        name=(payload.name or credentials.context).strip(),
+        # An explicit name always wins; otherwise the context's, unless the
+        # context is called something that identifies nothing (k3s's `default`).
+        name=(
+            payload.name
+            or kubeconfig_reader.suggested_name(
+                credentials.context, credentials.distribution,
+            )
+        ).strip(),
         origin=adoption.ORIGIN_IMPORTED,
         app_domain=route_domain.normalize_domain(payload.app_domain),
     )

@@ -160,6 +160,38 @@ def classify(context_name: str, cluster_name: str, path: str | None = None) -> s
     return None
 
 
+#: Context names that identify nothing in a cluster switcher.
+#:
+#: Only k3s's `default` is here, and only because §34 adopts k3s now: kind and
+#: k3d name a context after the cluster, so what they write is already the right
+#: label. This is not a list of names to avoid — it is the list of names that
+#: carry no information, which is a much shorter one.
+_GENERIC_CONTEXT_NAMES = frozenset({"default"})
+
+
+def suggested_name(context: str, distribution: str | None) -> str:
+    """What to call a cluster adopted or imported from this context.
+
+    The context name, except where the context name says nothing. k3s calls its
+    context ``default``, so recognising k3s made ``default`` a cluster name for
+    the first time — uninformative on its own, and actively misleading the
+    moment a second cluster is registered beside it, because "default" reads as
+    *the default one* rather than as the name of a particular cluster. That is
+    the cluster switcher, the audit trail's ``cluster_name``, and the sentence
+    the startup log prints.
+
+    Falls back to the distribution and never to something invented. A context
+    this console could not classify keeps whatever the kubeconfig called it,
+    however generic: renaming somebody's context on a guess is worse than a dull
+    label, and ``POST /api/clusters/import`` takes an explicit ``name`` that
+    always wins.
+    """
+    context = (context or "").strip()
+    if distribution and context.lower() in _GENERIC_CONTEXT_NAMES:
+        return distribution
+    return context
+
+
 def _host_is_local(api_server: str) -> bool:
     """Does this URL point at the machine the console is running on, or its LAN?
 
@@ -783,6 +815,7 @@ __all__ = [
     "adoptable",
     "classify",
     "credentials_for",
+    "suggested_name",
     "default_path",
     "discover",
     "running_in_container",
