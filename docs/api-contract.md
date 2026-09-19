@@ -6249,7 +6249,7 @@ at. Reads no cluster and opens no connection.
       "cluster": "kind-dev",
       "api_server": "https://127.0.0.1:6443",
       "namespace": null,
-      "distribution": "kind",        // null when no local tool wrote it
+      "distribution": "kind",        // null when no local tool wrote it; see 34.9
       "is_local": true,              // distribution AND a loopback/private address
       "is_current": true,            // the file's own current-context
       "credential": "client_certificate",
@@ -6330,10 +6330,10 @@ to. Running §3's `/test` is the next step and the UI says so.
 
 ### 34.4 The one reachability problem visible without connecting
 
-`kind` and `k3d` write `https://127.0.0.1:<port>` into the kubeconfig. Read from
-inside the backend container, that address is *the container*, so a registration
-built from it is created, looks correct and reaches nothing — §14's failure with
-a URL instead of a controller.
+`kind`, `k3d` and k3s write `https://127.0.0.1:<port>` into the kubeconfig. Read
+from inside the backend container, that address is *the container*, so a
+registration built from it is created, looks correct and reaches nothing — §14's
+failure with a URL instead of a controller.
 
 So a loopback address discovered from inside a container carries a `concern`.
 It is:
@@ -6359,9 +6359,10 @@ Every condition is a refusal as much as a condition, and all five must hold:
 
 1. the switch is on;
 2. **the registry is empty** — a curated fleet is never added to;
-3. the context was written by a local cluster tool **and** its API server is a
-   loopback or private address (both, never either: a context called `kind-prod`
-   pointing at a public endpoint is remote);
+3. the console recognises the local cluster tool that wrote the context **and**
+   its API server is a loopback or private address (both, never either: a
+   context called `kind-prod` pointing at a public endpoint is remote). See
+   §34.9 for what "recognises" reads;
 4. it carries no §34.4 concern;
 5. **exactly one** context qualifies — two is a choice, and making it at boot
    makes it where nobody can see it happen.
@@ -6416,3 +6417,39 @@ name, as an administrator act. There is no bulk import and no "adopt everything"
 
 **Not a connection.** Discovery opens no socket and an import opens no socket.
 Everything either of them says is a fact about a file.
+
+### 34.9 What "a local cluster tool wrote this" is read from
+
+Two signals, and the difference between them is the whole of this section.
+
+**A name in the file.** `kind create cluster --name dev` writes the context
+`kind-dev`; `k3d cluster create dev` writes `k3d-dev`; minikube, Docker Desktop,
+Rancher Desktop, Colima, OrbStack and MicroK8s each name themselves exactly.
+Both the context name and the cluster name are checked, because
+`kubectl config rename-context` leaves only one of the two intact.
+
+**The path the kubeconfig was read from.** k3s names *every* entry in
+`/etc/rancher/k3s/k3s.yaml` — context, cluster and user — `default`, and RKE2 does
+the same in `/etc/rancher/rke2/rke2.yaml`. Nothing inside either file identifies
+the tool, so the path is what identifies it: a file read from there was written
+by k3s, by construction. Symlinks are resolved; the path is matched as a file,
+not as a string.
+
+**`default` is not, and must never become, a recognised name.** A remote
+cluster's context is routinely called `default`, and adopting one on the strength
+of that name is exactly the failure the two-part `is_local` test exists to
+prevent — it would be a regression in safety wearing a feature's clothes. The
+path is a different kind of evidence: no cluster elsewhere can arrange to be read
+from `/etc/rancher/k3s/k3s.yaml`.
+
+**The limit, which is the honest part.** The path evidence does not survive the
+file being moved. A k3s kubeconfig copied to `~/.kube/config`, or merged into one
+with `KUBECONFIG=~/.kube/config:/etc/rancher/k3s/k3s.yaml kubectl config view
+--flatten`, has no path left to read and a context called `default`. It is
+classified remote, listed as remote, and imported by hand — there is nothing safe
+left to go on, and a weaker heuristic on the name is the thing the paragraph
+above refuses. The path is read the other way round, though: it identifies the
+*file*, so a k3s context somebody renamed is still recognised.
+
+Being wrong either way costs an adoption that does not happen and a row that says
+`remote`. It never produces a registration that lies, which is the bar.

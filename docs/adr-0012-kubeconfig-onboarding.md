@@ -103,6 +103,31 @@ public endpoint is remote, whatever it is named. And two qualifying clusters
 adopts neither: picking between them is a choice, and boot is where nobody sees a
 choice being made.
 
+**Recognising a distribution by a generic name.** k3s — one of the commonest ways
+to get a local cluster, and the one this feature shipped without — names *every*
+entry in `/etc/rancher/k3s/k3s.yaml` `default`, so the name table recognised none
+of it and a `127.0.0.1` cluster on the console's own machine was classified
+remote. Adding `default` to that table was rejected: it is a name a remote
+cluster's context routinely carries, so it would auto-adopt precisely what the
+paragraph above refuses, and it would do it under the heading of a fix.
+
+What was accepted instead is the **path**. `/etc/rancher/k3s/k3s.yaml` and
+`/etc/rancher/rke2/rke2.yaml` are fixed, and a kubeconfig read from one of them
+was written by that tool by construction — no cluster elsewhere can arrange to be
+read from there. So `classify()` takes the path it was read from, symlinks
+resolved, and recognises the file rather than any name inside it. `is_local` is
+unchanged: the address test still has to pass, so a `default` context pointing at
+a public endpoint is remote from that path as from any other.
+
+The cost is stated rather than patched over: **the evidence does not survive the
+file being moved.** A k3s kubeconfig copied to `~/.kube/config`, or merged into
+one with `kubectl config view --flatten`, has no path left to read and a context
+called `default`, and it is classified remote and imported by hand. There is
+nothing safe left to go on at that point, and the weaker heuristic that would
+cover it is the one rejected two paragraphs up. The path is read the other way
+round, though — it identifies the file, so a k3s context somebody renamed is
+still recognised.
+
 **Making the discovery endpoint public, or unauthenticated.** It reports the path
 of a file on the console's machine, the contexts in it and the addresses they
 point at. No credential material, and still somebody's infrastructure. It carries
@@ -135,8 +160,8 @@ is restricted to local clusters. It is stated here rather than implied by the
 restriction.
 
 **One more thing that can be wrong about somebody's laptop.** Distribution
-detection is a list of prefixes in one file, container detection is `/.dockerenv`
-plus a cgroup scan, and both can be wrong. Being wrong about "is this local"
+detection is a list of name prefixes and a list of two fixed paths in one file,
+container detection is `/.dockerenv` plus a cgroup scan, and both can be wrong. Being wrong about "is this local"
 costs an adoption that does not happen and a panel that says `remote`; being
 wrong about "am I in a container" costs a concern shown or withheld. Neither
 produces a registration that lies, which is the bar.
