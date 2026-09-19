@@ -458,6 +458,44 @@ machine with no kubeconfig on it.
 anywhere else. Running the console on the host, or registering the cluster with a
 ServiceAccount token, are the better answers.
 
+#### If the kubeconfig points at credential files, and the console is in a container
+
+Mounting `~/.kube/config` into the backend container is not always enough,
+because a kubeconfig does not have to *contain* its credentials. `kind` and
+`k3d` embed them as base64; **minikube writes absolute paths** instead:
+
+```yaml
+users:
+  - name: minikube
+    user:
+      client-certificate: /home/you/.minikube/profiles/minikube/client.crt
+      client-key: /home/you/.minikube/profiles/minikube/client.key
+```
+
+Inside the container those paths do not exist, so the context is **listed as
+importable and then fails at the import** — discovery reads the kubeconfig, and
+only the import opens what it points at:
+
+```
+This context's client certificate lives at
+/home/you/.minikube/profiles/minikube/client.crt, which this process could not
+read (FileNotFoundError).
+```
+
+That is accurate and it names the file, but you only meet it after clicking
+Import. Three ways out, best first:
+
+1. **Run the console on the host** — `make dev`. The paths resolve, and this is
+   the same answer as the loopback caveat above, for the same reason.
+2. **Mount the credential directory too**, at the same path it has on the host,
+   so what the kubeconfig says stays true inside the container — for minikube
+   that is `~/.minikube`, read-only.
+3. **Register the cluster with a ServiceAccount token**, which is self-contained
+   and needs nothing else on disk.
+
+Only paths are affected. A kubeconfig whose credentials are embedded — kind,
+k3d, k3s — needs nothing beyond the file itself.
+
 ### A remote cluster — API address and a ServiceAccount token
 
 This is the path for anything you did not create on this machine, and the only
