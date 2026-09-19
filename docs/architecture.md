@@ -166,8 +166,10 @@ reason.
 | `database.py`, `models.py` | Engine and session; `Cluster` and the append-only `AuditRecord` |
 | `middleware/logging.py` | One JSON line per request with a correlation id. Bodies never logged, query **values** dropped |
 | `k8s/context.py` | The contextvars and `ClusterContextMiddleware` |
-| `k8s/auth.py` | `AuthProvider` strategy — adding OIDC or client certs means adding a class here, not editing the client |
-| `k8s/client.py` | `ClusterClientManager`: per-cluster client bundles, deadlines, typed transport failures, CA temp-file lifecycle |
+| `k8s/auth.py` | `AuthProvider` strategy — adding OIDC or a cloud IAM exchange means adding a class here, not editing the client. §34's `ClientCertificateAuth` is what that sentence looked like when it was cashed in |
+| `k8s/client.py` | `ClusterClientManager`: per-cluster client bundles, deadlines, typed transport failures, credential temp-file lifecycle (the CA, and §34's client certificate and key) |
+| `k8s/kubeconfig.py` | §34. Reads the kubeconfig on this machine and classifies every context: which local tool wrote it, what credential it holds, whether this console can copy that credential, and the one reachability problem visible without connecting. **Parses, never loads** — `kubernetes.config` would execute an `exec` credential plugin, and running a binary named by a file on disk as a side effect of *listing* what is available is not something a console does. Holds no credential in the type a browser sees; `credentials_for()` is the separate call that reads the key |
+| `k8s/adoption.py` | §34's writer. `register_context()` encrypts one discovered credential into the registry — shared by `POST /api/clusters/import` and by the startup adoption beside it, so neither can be the one that forgets — and `adopt_local_cluster()` applies ADR-0012's five conditions and logs the reason whenever it registers nothing, which is most boots |
 | `resources/catalog.py` | Discovery. A broken API group becomes an `unavailable` entry, never a smaller catalog |
 | `resources/reader.py` | Generic list/get/YAML, plus trimming (`managedFields` always, `last-applied-configuration` from lists), and `read_object` — one object by known group/version/plural, skipping the discovery round trip the generic path needs |
 | `resources/transport.py` | The one authenticated round trip that keeps its response headers, which is where the API server's `Warning:` values live. Used by both directions: the funnel's writes and `read_object`'s GET |

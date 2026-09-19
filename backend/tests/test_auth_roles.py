@@ -149,6 +149,30 @@ def test_a_signed_in_non_admin_cannot_de_register_a_cluster(
     assert _row(registered_cluster.id) is not None
 
 
+def test_a_signed_in_non_admin_cannot_discover_or_import_a_cluster(
+    client, db_session, auth_enabled
+):
+    """§34's two endpoints are gated with §3's three, and for the same reason.
+
+    Discovery reports on a file on the console's own filesystem — its path, the
+    contexts in it, the addresses they point at — and importing decides which
+    API server this console's transport talks to. That the credential came off
+    the disk rather than out of a form does not make it a smaller decision.
+    """
+    headers = _sign_in(client, db_session, role="user")
+
+    listed = client.get("/api/clusters/discovery", headers=headers)
+    assert listed.status_code == 403
+    assert listed.json()["error"] == "permission_denied"
+
+    imported = client.post(
+        "/api/clusters/import", json={"context": "kind-dev"}, headers=headers,
+    )
+    assert imported.status_code == 403
+    assert imported.json()["error"] == "permission_denied"
+    assert client.get("/api/clusters").json()["items"] == []
+
+
 def test_an_administrator_can_register_repoint_and_de_register(
     client, db_session, auth_enabled
 ):

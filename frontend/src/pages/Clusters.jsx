@@ -82,10 +82,34 @@ import { useCluster } from '../contexts/ClusterContext';
 import { useNotify } from '../contexts/NotificationContext';
 import { formatTimestamp } from '../utils/format';
 
+/**
+ * Every value here is one `app/k8s/auth.py` builds a provider for, and that is
+ * not a coincidence to be maintained by hand — `bearer_token` sat in this list
+ * for as long as the backend's supported set did not contain it, so the one
+ * option a reader would assume was the safe generic choice answered `422
+ * Unsupported authentication type`. Nothing failed: the form was self-
+ * consistent, the backend was right about its own list, and the two had never
+ * been compared. A backend test now asserts the spelling.
+ */
 const AUTH_TYPES = [
   { value: 'service_account_token', label: 'ServiceAccount token' },
   { value: 'bearer_token', label: 'Bearer token' },
+  { value: 'client_certificate', label: 'Client certificate (§34)' },
 ];
+
+/**
+ * §34's `origin`, in words. `manual` covers both a POSTed registration and a
+ * row that predates the column — every one of those was typed, so there is no
+ * third state to render and nothing is lost by saying so plainly.
+ */
+const ORIGIN_LABELS = {
+  manual: 'Registered here',
+  kubeconfig: 'Imported from a kubeconfig context',
+  autodiscovered: 'Adopted automatically at startup',
+};
+
+/** The auth types whose credential is an X.509 pair rather than a token. */
+const isCertificateAuth = (type) => type === 'client_certificate';
 
 const EMPTY_FORM = {
   name: '',
@@ -93,6 +117,8 @@ const EMPTY_FORM = {
   api_server: '',
   authentication_type: 'service_account_token',
   token: '',
+  client_certificate: '',
+  client_key: '',
   ca_certificate: '',
   skip_tls_verify: false,
   impersonation_enabled: false,
@@ -159,6 +185,11 @@ function ClusterFormModal({ isOpen, editing, onClose, onSaved }) {
             // how a working cluster registration gets its token replaced with
             // "********".
             token: '',
+            // §34's pair, blank for the token's reason. `has_client_certificate`
+            // is a boolean; the certificate itself is not returned either, so
+            // there is nothing to prefill and an empty pair means "keep stored".
+            client_certificate: '',
+            client_key: '',
             // Blank for the same reason as the token: `has_ca_certificate` is a
             // boolean, not the certificate, so there is nothing to prefill.
             ca_certificate: '',
@@ -200,12 +231,22 @@ function ClusterFormModal({ isOpen, editing, onClose, onSaved }) {
           app_domain: form.app_domain.trim(),
         };
         if (form.token.trim()) body.token = form.token;
+        if (form.client_certificate.trim()) body.client_certificate = form.client_certificate;
+        if (form.client_key.trim()) body.client_key = form.client_key;
         if (form.ca_certificate.trim()) body.ca_certificate = form.ca_certificate;
         await clustersApi.update(editing.id, body);
         notify(`Updated ${form.name}`, 'success');
       } else {
+        // The credential fields the chosen type does not use are sent as null
+        // rather than as "". The backend refuses a registration that names a
+        // credential it does not carry, and `""` is a value it would have to
+        // decide the meaning of — null is the absence the body already models.
+        const certificate = isCertificateAuth(form.authentication_type);
         await clustersApi.create({
           ...form,
+          token: certificate ? null : form.token,
+          client_certificate: certificate ? form.client_certificate : null,
+          client_key: certificate ? form.client_key : null,
           ca_certificate: form.ca_certificate.trim() || null,
         });
         notify(`Registered ${form.name}`, 'success');
@@ -221,8 +262,16 @@ function ClusterFormModal({ isOpen, editing, onClose, onSaved }) {
 
   if (!isOpen) return null;
 
-  const missingToken = !editing && !form.token.trim();
-  const canSubmit = form.name.trim() && form.api_server.trim() && !missingToken;
+  const certificateAuth = isCertificateAuth(form.authentication_type);
+  // Half a pair is the failure that looks like success right up to the TLS
+  // handshake, so the button refuses it here rather than letting the backend
+  // say so after a round trip.
+  const missingCredential = !editing && (
+    certificateAuth
+      ? !(form.client_certificate.trim() && form.client_key.trim())
+      : !form.token.trim()
+  );
+  const canSubmit = form.name.trim() && form.api_server.trim() && !missingCredential;
 
   return (
     <Modal isOpen variant="medium" onClose={onClose} aria-label="Cluster registration">
@@ -269,23 +318,71 @@ function ClusterFormModal({ isOpen, editing, onClose, onSaved }) {
             </FormSelect>
           </FormGroup>
 
-          <FormGroup label="Token" fieldId="cluster-token" isRequired={!editing}>
-            <TextArea
-              id="cluster-token"
-              value={form.token}
-              onChange={(_e, v) => set('token')(v)}
-              rows={3}
-              aria-label="Bearer token"
-              autoComplete="off"
-              spellCheck={false}
-              data-testid="cluster-token"
-            />
-            <p style={{ color: 'var(--admin-muted, #6a6e73)', fontSize: '0.875rem', marginBlockStart: '0.25rem' }}>
-              {editing
-                ? 'Stored encrypted and never returned by the API, so this box starts empty. Leave it empty to keep the token already stored; type a new one to replace it.'
-                : 'Stored encrypted. It is never included in any response from this console.'}
-            </p>
-          </FormGroup>
+          {certificateAuth ? (
+            /* §34. What kind, k3d, minikube and Docker Desktop hand you — none
+               of them mints a ServiceAccount token. Usually arrived at by
+               importing a context rather than by pasting PEM, but the fields
+               exist because a credential the console can store and cannot be
+               told about by hand is a credential nobody can rotate. */
+            <>
+              <FormGroup
+                label="Client certificate (PEM)"
+                fieldId="cluster-client-cert"
+                isRequired={!editing}
+              >
+                <TextArea
+                  id="cluster-client-cert"
+                  value={form.client_certificate}
+                  onChange={(_e, v) => set('client_certificate')(v)}
+                  rows={4}
+                  aria-label="Client certificate"
+                  spellCheck={false}
+                  placeholder="-----BEGIN CERTIFICATE-----"
+                  data-testid="cluster-client-cert"
+                />
+              </FormGroup>
+              <FormGroup
+                label="Client key (PEM)"
+                fieldId="cluster-client-key"
+                isRequired={!editing}
+              >
+                <TextArea
+                  id="cluster-client-key"
+                  value={form.client_key}
+                  onChange={(_e, v) => set('client_key')(v)}
+                  rows={4}
+                  aria-label="Client key"
+                  autoComplete="off"
+                  spellCheck={false}
+                  placeholder="-----BEGIN PRIVATE KEY-----"
+                  data-testid="cluster-client-key"
+                />
+                <p style={{ color: 'var(--admin-muted, #6a6e73)', fontSize: '0.875rem', marginBlockStart: '0.25rem' }}>
+                  {editing
+                    ? 'Stored encrypted and never returned, so both boxes start empty. Leave them empty to keep the pair already stored; a replacement needs both.'
+                    : 'The key is stored encrypted, like a token. The certificate is not — it is presented on every handshake and is not the secret half.'}
+                </p>
+              </FormGroup>
+            </>
+          ) : (
+            <FormGroup label="Token" fieldId="cluster-token" isRequired={!editing}>
+              <TextArea
+                id="cluster-token"
+                value={form.token}
+                onChange={(_e, v) => set('token')(v)}
+                rows={3}
+                aria-label="Bearer token"
+                autoComplete="off"
+                spellCheck={false}
+                data-testid="cluster-token"
+              />
+              <p style={{ color: 'var(--admin-muted, #6a6e73)', fontSize: '0.875rem', marginBlockStart: '0.25rem' }}>
+                {editing
+                  ? 'Stored encrypted and never returned by the API, so this box starts empty. Leave it empty to keep the token already stored; type a new one to replace it.'
+                  : 'Stored encrypted. It is never included in any response from this console.'}
+              </p>
+            </FormGroup>
+          )}
 
           <FormGroup label="CA certificate (PEM)" fieldId="cluster-ca">
             <TextArea
@@ -396,6 +493,240 @@ function ClusterFormModal({ isOpen, editing, onClose, onSaved }) {
         </Button>
       </ModalFooter>
     </Modal>
+  );
+}
+
+/* ── §34 Discovered on this machine ─────────────────────────────────────── */
+
+/**
+ * The kubeconfig panel, and the three things it is careful about.
+ *
+ * **A context this console cannot adopt is a row with a sentence, not an
+ * omission.** §0.1 applied to a file instead of a cluster: an operator whose
+ * only context is an EKS `exec` context has to be able to tell "this console
+ * will not run your credential plugin" from "you have no kubeconfig", and a
+ * filtered list says neither.
+ *
+ * **"Importable" is not "reachable".** Nothing here connects to anything — the
+ * backend reads a file and returns what is in it. A candidate offered here is
+ * one that *can* be registered, and `POST /clusters/{id}/test` is still the
+ * only thing that establishes whether it answers. The button says Import, not
+ * Connect, for that reason, and the row's `concern` is where the one
+ * reachability problem visible without connecting gets said out loud.
+ *
+ * **It does not render its own `PartialBanner`.** That component's `forbidden`
+ * copy explains that the console's ServiceAccount lacks a list permission,
+ * which is exactly wrong here: the failure this panel reports is a file on the
+ * console's own disk that the console's own *process* may not read, and there
+ * is no cluster in it at all. Sending someone to edit a ClusterRole over a
+ * `chmod` is the kind of confidently wrong answer the banner exists to prevent,
+ * pointed at the wrong system.
+ */
+function DiscoveryPanel({ adminGate, onImported }) {
+  const { notify } = useNotify();
+  const [state, setState] = useState({ loading: true, data: null, error: null });
+  const [importing, setImporting] = useState(null);
+
+  const load = useCallback(async () => {
+    setState((s) => ({ ...s, loading: true }));
+    try {
+      setState({ loading: false, data: await clustersApi.discovery(), error: null });
+    } catch (err) {
+      setState({ loading: false, data: null, error: err });
+    }
+  }, []);
+
+  useEffect(() => {
+    if (adminGate.allowed) load();
+  }, [adminGate.allowed, load]);
+
+  const adopt = useCallback(
+    async (candidate) => {
+      setImporting(candidate.context);
+      try {
+        const created = await clustersApi.adopt({ context: candidate.context });
+        notify(
+          `Imported ${created.name}. It has not been connected to yet — run the connection test.`,
+          'success',
+        );
+        onImported();
+        load();
+      } catch (err) {
+        notify(`Could not import ${candidate.context}: ${err.message}`, 'danger', {
+          sticky: true,
+        });
+      } finally {
+        setImporting(null);
+      }
+    },
+    [notify, onImported, load],
+  );
+
+  // Administrator-only on the backend, so on a `user` session this panel is not
+  // a 403 to render — it is a panel that does not exist. Rule 11.4 is about
+  // controls an account could hold and does not; this one it cannot see at all.
+  if (!adminGate.allowed) return null;
+  if (state.loading) return null;
+
+  const blocked = state.data?.unavailable ?? [];
+  const candidates = state.data?.items ?? [];
+  // "There is no kubeconfig on this machine" is the ordinary state of a
+  // production console whose clusters are registered by hand. Rendering a
+  // warning for it would train people to ignore this panel, which is exactly
+  // what makes the *other* two reasons — unreadable, malformed — worth seeing.
+  const absent = blocked.length === 1 && blocked[0].reason === 'not_found';
+
+  if (state.error) {
+    // The endpoint itself failed, which is a different thing from the file
+    // being unreadable — and not worth a red card on a page whose main job is
+    // the registration list.
+    return null;
+  }
+  if (absent && candidates.length === 0) {
+    return (
+      <p
+        style={{ color: 'var(--admin-muted, #6a6e73)', marginBlockStart: 'var(--admin-gap, 1rem)' }}
+        data-testid="discovery-absent"
+      >
+        No kubeconfig at <code>{state.data.source.path}</code>, so there is nothing to
+        import. Register clusters with an API server address and a ServiceAccount token.
+      </p>
+    );
+  }
+
+  const columns = [
+    {
+      key: 'context',
+      title: 'Context',
+      cell: (row) => (
+        <span>
+          <strong>{row.context}</strong>
+          {row.is_current && (
+            <>
+              {' '}
+              <StatusBadge status="active" label="current" tooltip="The kubeconfig's current-context." />
+            </>
+          )}
+        </span>
+      ),
+    },
+    {
+      key: 'distribution',
+      title: 'Kind',
+      cell: (row) =>
+        row.distribution ? (
+          <StatusBadge
+            status={row.is_local ? 'true' : 'warning'}
+            label={row.distribution}
+            tooltip={
+              row.is_local
+                ? 'A local cluster: this console may adopt one of these at startup when nothing is registered.'
+                : 'Named like a local cluster but pointing at a public address, so it is treated as remote and never adopted automatically.'
+            }
+          />
+        ) : (
+          <span style={{ color: 'var(--admin-muted, #6a6e73)' }}>remote</span>
+        ),
+    },
+    { key: 'api_server', title: 'API server', modifier: 'breakWord' },
+    {
+      key: 'credential',
+      title: 'Credential',
+      cell: (row) => <code>{row.credential}</code>,
+    },
+    {
+      key: 'action',
+      title: '',
+      cell: (row) =>
+        row.importable ? (
+          <Button
+            variant="secondary"
+            isSmall
+            isDisabled={importing !== null}
+            isLoading={importing === row.context}
+            onClick={() => adopt(row)}
+            data-testid={`discovery-import-${row.context}`}
+          >
+            Import
+          </Button>
+        ) : (
+          <Tooltip content={row.reason}>
+            <span style={{ color: 'var(--admin-muted, #6a6e73)' }} data-testid={`discovery-refused-${row.context}`}>
+              cannot import
+            </span>
+          </Tooltip>
+        ),
+    },
+  ];
+
+  return (
+    <Card style={{ marginBlockStart: 'var(--admin-gap-lg, 1.5rem)' }} data-testid="discovery-panel">
+      <CardBody>
+        <SectionHeader
+          title="Discovered on this machine"
+          description={`Contexts in ${state.data.source.path}. Importing copies the credential into this console — the file is not read again afterwards, and rotating it does not update a cluster registered from it.`}
+          actions={
+            <Button variant="link" onClick={load} data-testid="discovery-refresh">
+              Re-read
+            </Button>
+          }
+        />
+
+        {blocked.map((entry) => (
+          <Alert
+            key={entry.reason}
+            isInline
+            variant={entry.reason === 'not_found' ? 'info' : 'warning'}
+            title="The kubeconfig could not be read"
+            style={{ marginBlockEnd: 'var(--admin-gap, 1rem)' }}
+            data-testid="discovery-unavailable"
+          >
+            <p>{entry.detail}</p>
+            {entry.reason === 'forbidden' && (
+              <p>
+                This is a file permission on the console&apos;s own machine, not a
+                Kubernetes one — no cluster is involved. A kubeconfig is usually mode
+                600 and owned by you, and this backend runs as another user.
+              </p>
+            )}
+          </Alert>
+        ))}
+
+        <DataTable
+          columns={columns}
+          rows={candidates}
+          rowKey="context"
+          ariaLabel="Discovered kubeconfig contexts"
+          emptyTitle="No contexts in this kubeconfig"
+          emptyDescription="The file was read and contains no contexts to offer."
+        />
+
+        {candidates
+          .filter((row) => row.concern)
+          .map((row) => (
+            <Alert
+              key={row.context}
+              isInline
+              variant="warning"
+              title={`${row.context} may not be reachable from here`}
+              style={{ marginBlockStart: 'var(--admin-gap, 1rem)' }}
+              data-testid={`discovery-concern-${row.context}`}
+            >
+              {row.concern}
+            </Alert>
+          ))}
+
+        {state.data.auto_discovery.enabled === false && (
+          <p
+            style={{ color: 'var(--admin-muted, #6a6e73)', marginBlockStart: 'var(--admin-gap, 1rem)' }}
+            data-testid="discovery-auto-off"
+          >
+            Automatic adoption is off (<code>ADMIN_AUTO_DISCOVER_LOCAL=false</code>), so
+            nothing here is registered until you import it.
+          </p>
+        )}
+      </CardBody>
+    </Card>
   );
 }
 
@@ -722,7 +1053,10 @@ export default function Clusters() {
         loading={loading}
         ariaLabel="Registered clusters"
         emptyTitle="No clusters registered"
-        emptyDescription="Register an API server endpoint and a ServiceAccount token to begin."
+        emptyDescription={
+          'Import a context from your kubeconfig below, or register a remote cluster with its ' +
+          'API server address and a ServiceAccount token.'
+        }
         onRowClick={(row) => setSelected(row.id)}
         actions={(row) => [
           {
@@ -741,6 +1075,12 @@ export default function Clusters() {
           menuAction('De-register', adminGate, () => setDeleting(row), { isDanger: true }),
         ]}
       />
+
+      {/* Below the registry, not above it: what is registered is this page's
+          subject, and onboarding is what you do when it is empty or when you
+          are adding to it. It renders nothing at all on a non-admin session —
+          §34's two endpoints are administrator-only. */}
+      <DiscoveryPanel adminGate={adminGate} onImported={() => refresh()} />
 
       {detail && (
         <Card style={{ marginBlockStart: 'var(--admin-gap-lg, 1.5rem)' }}>
@@ -767,6 +1107,12 @@ export default function Clusters() {
               items={[
                 { label: 'Platform', value: detail.platform },
                 { label: 'Authentication', value: detail.authentication_type },
+                {
+                  // §34. The first question about a cluster nobody remembers
+                  // registering is whether they registered it.
+                  label: 'Registered by',
+                  value: ORIGIN_LABELS[detail.origin] ?? detail.origin,
+                },
                 { label: 'Server version', value: detail.server_version },
                 { label: 'CA certificate', value: detail.has_ca_certificate ? 'Stored' : 'System trust store' },
                 {

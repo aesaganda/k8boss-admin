@@ -435,6 +435,20 @@ spec:
                   name: k8boss-admin-kubeconfig
                   key: context
                   optional: true
+
+            # §34. OFF here, and off for a reason that does not apply on a
+            # laptop: the kubeconfig mounted above is one an administrator put
+            # in a Secret for this deployment, and a console that registered a
+            # context out of it at boot would turn "the file the pod reads" into
+            # "a row in the registry" without anybody asking. On a development
+            # machine adoption saves four commands; here the four commands have
+            # already been run by whoever created the Secret.
+            #
+            # It would refuse in most cases anyway — adoption only takes a local
+            # cluster, and a kubeconfig mounted into a pod rarely names one — but
+            # "it would probably decline" is not a configuration decision.
+            - name: ADMIN_AUTO_DISCOVER_LOCAL
+              value: "false"
             # Deadlines. Without them a black-holed API server connection pins a
             # threadpool worker forever while the liveness probe below — which
             # touches no cluster — keeps answering healthy, so nothing restarts

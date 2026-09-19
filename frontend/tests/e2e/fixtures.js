@@ -167,6 +167,11 @@ export const FIXTURES = {
         api_server: 'https://api.prod-eu.example:6443',
         authentication_type: 'service_account_token',
         has_ca_certificate: true,
+        // §34. Both present, like the backend's own ClusterPublic. `origin`
+        // especially: a fixture that omitted it would let the detail panel
+        // render `undefined` under "Registered by" and pass.
+        has_client_certificate: false,
+        origin: 'manual',
         skip_tls_verify: false,
         // ADR-0007. Present and false, like the backend's own ClusterPublic:
         // the setting decides who the cluster thinks is asking, so a fixture
@@ -183,6 +188,79 @@ export const FIXTURES = {
     remaining: null,
     partial: false,
     unavailable: [],
+  },
+
+  /**
+   * §34 `GET /api/clusters/discovery`. Three contexts on purpose: one kind
+   * cluster the console can adopt, one k3d token context, and one EKS `exec`
+   * context it refuses — the refusal being the row a filtered implementation
+   * would drop, which is the §0.1 failure this endpoint exists not to have.
+   */
+  discovery: {
+    items: [
+      {
+        context: 'kind-dev',
+        cluster: 'kind-dev',
+        api_server: 'https://127.0.0.1:6443',
+        namespace: null,
+        distribution: 'kind',
+        is_local: true,
+        is_current: true,
+        credential: 'client_certificate',
+        authentication_type: 'client_certificate',
+        importable: true,
+        reason: null,
+        concern: null,
+        has_ca_certificate: true,
+        skip_tls_verify: false,
+      },
+      {
+        context: 'k3d-lab',
+        cluster: 'k3d-lab',
+        api_server: 'https://0.0.0.0:35001',
+        namespace: null,
+        distribution: 'k3d',
+        is_local: true,
+        is_current: false,
+        credential: 'token',
+        authentication_type: 'kubeconfig_token',
+        importable: true,
+        reason: null,
+        concern: null,
+        has_ca_certificate: false,
+        skip_tls_verify: true,
+      },
+      {
+        context: 'prod-eks',
+        cluster: 'prod-eks',
+        api_server: 'https://ABC.gr7.eu-west-1.eks.amazonaws.com',
+        namespace: null,
+        distribution: null,
+        is_local: false,
+        is_current: false,
+        credential: 'exec',
+        authentication_type: null,
+        importable: false,
+        reason:
+          'This context authenticates by running a credential plugin (an `exec` stanza). ' +
+          'This console will not run a binary named by a file on its disk, and a plugin\'s ' +
+          'output expires, so there is nothing here it could store. Register this cluster ' +
+          'with its API address and a ServiceAccount token instead.',
+        concern: null,
+        has_ca_certificate: false,
+        skip_tls_verify: false,
+      },
+    ],
+    continue: null,
+    remaining: null,
+    partial: false,
+    unavailable: [],
+    source: {
+      path: '/home/operator/.kube/config',
+      current_context: 'kind-dev',
+      in_container: false,
+    },
+    auto_discovery: { enabled: true, candidates: ['kind-dev', 'k3d-lab'] },
   },
 
   // The important fixture. `capacity` and `requested` are null — §3 says each
@@ -5081,6 +5159,11 @@ export async function mockApi(
     namespaceDeletes = [],
     clusters = null,
     clusterWrites = [],
+    // §34. `discovery` replaces the listing; `clusterImports` records every
+    // context the page asked to import, so a spec can assert on what was sent
+    // rather than on what was rendered afterwards.
+    discovery = null,
+    clusterImports = [],
     disruptionBudgets = null,
     quotaAdvice = null,
     quotaPreviews = [],
@@ -5250,6 +5333,26 @@ export async function mockApi(
     if (path === '/audit/verify') return json(chain ?? FIXTURES.auditVerify);
     if (path === '/audit') return json(audit ?? FIXTURES.audit);
     if (path === '/health') return json(health);
+    // §34, and ordered before `/clusters` so the literal path wins: both are
+    // exact matches, but a future change to a prefix test on the listing would
+    // otherwise swallow this one and the panel would render a cluster list.
+    if (path === '/clusters/discovery') return json(discovery ?? FIXTURES.discovery);
+    if (path === '/clusters/import' && route.request().method() === 'POST') {
+      const body = JSON.parse(route.request().postData() || '{}');
+      clusterImports.push(body);
+      return json(
+        {
+          ...FIXTURES.clusters.items[0],
+          id: 2,
+          name: body.name ?? body.context,
+          origin: 'kubeconfig',
+          status: 'unknown',
+          server_version: null,
+          last_connected: null,
+        },
+        201,
+      );
+    }
     if (path === '/clusters' && route.request().method() === 'POST') {
       const body = JSON.parse(route.request().postData() || '{}');
       clusterWrites.push(body);

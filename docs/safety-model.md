@@ -2400,3 +2400,112 @@ upgrade an OLM already running, and it refuses to write over one. And it makes n
 claim at all about what OLM subsequently grants an operator: that is §12.5's
 honest limit, unchanged, and §33 makes it reachable on more clusters rather than
 narrower on any.
+
+---
+
+## 25. Onboarding (§34) — the credential a laptop already has
+
+Every section above is about what happens after a cluster is registered. This
+one is about the registration, because §34 added a way to create one from a file
+instead of from a form, and a credential that arrives without anybody typing it
+is worth being explicit about.
+
+### 25.1 The read is not a client
+
+`app/k8s/client.py` opens with *clients are built from a registered cluster's
+stored API server endpoint and encrypted credential — never from a kubeconfig on
+the server*. §34 reads a kubeconfig. Both are true, and the distinction is the
+whole safety property:
+
+* Discovery **lists**. It opens no socket and returns no credential material —
+  only what *kind* of credential each context holds. A test scans whole response
+  bodies for the key, because the interesting leak is never a field called `key`.
+* An import **copies**, once, into the same encrypted registry every other
+  cluster lives in.
+* Nothing reads the file again. There is no refresh, no rotation-following and
+  no request-time fallback to it, so a cluster's identity cannot change under a
+  running console because somebody ran `kubectl config use-context`.
+
+Had it been wired the other way — resolve the context at call time — a
+registration would mean different things on different days and the audit trail
+would name a cluster whose identity had moved. That was rejected in
+[ADR-0012](adr-0012-kubeconfig-onboarding.md) and is the line a later change has
+to cross deliberately.
+
+### 25.2 The file is parsed, never loaded
+
+`kubernetes.config.load_kube_config` executes the `exec` credential plugin of
+whichever context it loads. Using it would mean that *listing* what is available
+on a machine runs whatever binary a file on that machine names — `aws`,
+`gke-gcloud-auth-plugin`, or anything a writable kubeconfig was edited to point
+at. So the document is read with `app.yaml_dialect` (ADR-0009) and an `exec`
+stanza is a fact about a context.
+
+The refusal is a listed row with a sentence on it, not an omission. §0.1 applied
+to a file: an operator whose only context is an EKS one has to be able to tell
+"this console will not run your credential plugin" from "you have no kubeconfig",
+and a filtered list says neither.
+
+### 25.3 A registration nobody asked for, and the five things that stop it
+
+Startup adoption writes a `Cluster` row without a request. That is a real thing
+to be uneasy about, so it is fenced in five ways, every one of which must hold:
+the switch (`ADMIN_AUTO_DISCOVER_LOCAL`, default on), **an empty registry**, a
+context a local tool wrote *whose API server is also a loopback or private
+address*, no visible reachability problem, and **exactly one** such context.
+
+Two of those are the ones that matter. The empty-registry test is what keeps a
+curated fleet from being added to. The double local test — a recognised
+distribution **and** a local address, joined with `and` — is what stops a context
+somebody named `kind-prod` pointing at a public endpoint from being adopted: a
+console that boots and quietly registers a production cluster is a far worse
+failure than one that asks.
+
+Anything else logs the reason and registers nothing, and the row it does write
+carries `origin: "autodiscovered"`, because the first question about a cluster
+somebody does not remember registering is whether they registered it.
+
+### 25.4 What a local cluster's credential actually is
+
+A ServiceAccount token minted by `deploy/rbac.yaml` holds exactly the permissions
+that file grants, and can be revoked without touching anything else. A `kind` or
+`k3d` kubeconfig's client certificate is `cluster-admin`, because that is what
+those tools write.
+
+So an adopted cluster is registered with far more authority than a deliberately
+onboarded one. That is appropriate for a throwaway cluster on a laptop and would
+not be for anything else, and it is the sharpest reason adoption never takes a
+remote context at any count. It is stated here rather than left implied by the
+restriction, because a restriction whose reason is not written down is a
+restriction somebody relaxes.
+
+### 25.5 The private key on disk
+
+The kubernetes client reads a certificate and key from *paths*, so building a
+client-certificate transport writes a decrypted key to a temp file. It is created
+mode 0600, tracked on the client bundle, and deleted when the bundle closes —
+which happens on every cache rebuild, and a cluster's bundle is rebuilt whenever
+its row is edited. The version of `build_configuration` that returned only the CA
+path is what would have left one copy behind per rebuild; it now returns every
+path it wrote, as one tuple, because a second return value is a second thing a
+caller can forget.
+
+### 25.6 What it does not claim
+
+**It does not claim a discovered cluster answers.** Discovery opens no socket and
+an import opens no socket. `status` on an imported or adopted row is `unknown`,
+which is not `disconnected` — nothing has been tried — and §3's connection test
+with its baseline permission matrix is unchanged as the thing that establishes
+both reachability and whether the credential can do the job.
+
+**It does not claim a loopback address is reachable, or fix it quietly.** A
+`127.0.0.1` API server read from inside a container is flagged, adoption declines
+it, and the URL is not rewritten: `host.docker.internal` fails certificate
+verification rather than connecting, and the only way to make that work is to
+turn verification off on somebody's behalf.
+
+**It does not claim to have looked when it could not.** A kubeconfig that is
+absent, unreadable or malformed is an `unavailable` entry naming which of the
+three — including the uid, for the mode-600-file-versus-container case that until
+§34 produced no signal at all and looked exactly like a machine with no
+kubeconfig on it.

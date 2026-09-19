@@ -494,6 +494,17 @@ export const clusters = {
   remove: (id) => request(`/clusters/${id}`, { method: 'DELETE', expect: 'none' }),
   test: (id) => api.post(`/clusters/${id}/test`),
   overview: (id) => api.get(`/clusters/${id}/overview`),
+
+  /**
+   * §34. Kubeconfig contexts on the console's machine, with what can be done
+   * with each. Administrator-only, and a 403 here is an ordinary state on a
+   * non-admin session rather than an error worth a banner — the Clusters page
+   * simply does not render the panel.
+   */
+  discovery: () => api.get('/clusters/discovery'),
+
+  /** §34. body: { context, name?, app_domain? } → 201 ClusterPublic. */
+  adopt: (body) => api.post('/clusters/import', body),
 };
 
 /* ── §4 Generic resource access ─────────────────────────────────────────── */

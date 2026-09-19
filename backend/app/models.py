@@ -67,15 +67,21 @@ def rfc3339(dt: datetime.datetime | None) -> str | None:
 # Columns on Cluster that hold, or can hold, credential material. Named here so
 # to_public_dict can assert against the list instead of trusting that whoever
 # adds the next one also remembers to exclude it.
-_CLUSTER_SECRET_COLUMNS = ("token_encrypted",)
+_CLUSTER_SECRET_COLUMNS = ("token_encrypted", "client_key_encrypted")
 
 
 class Cluster(Base):
     """A registered cluster the console administers.
 
-    The bearer token is stored encrypted (``app.crypto``) and never leaves this
-    process. Connections are built on demand from ``api_server`` plus the
-    decrypted token; there is no kubeconfig on the server.
+    The bearer token — or, for a §34 import, the client key — is stored
+    encrypted (``app.crypto``) and never leaves this process. Connections are
+    built on demand from ``api_server`` plus the decrypted credential.
+
+    **There is still no kubeconfig on the server**, and §34 did not change that.
+    A discovered context is *copied* into this row once, at import; nothing
+    afterwards re-reads the file, so a kubeconfig that is edited, moved or
+    deleted changes nothing about a cluster registered from it. See
+    `docs/adr-0012-kubeconfig-onboarding.md`.
     """
 
     __tablename__ = "clusters"
@@ -90,6 +96,34 @@ class Cluster(Base):
 
     # Encrypted at rest. Never returned by any endpoint; see to_public_dict.
     token_encrypted = Column(Text, nullable=True)
+
+    # §34. The X.509 pair a local cluster authenticates with — kind, k3d,
+    # minikube and Docker Desktop all write one into the kubeconfig and mint no
+    # token at all, so these two columns are what let the clusters this console
+    # most wants to adopt without setup be represented at all.
+    #
+    # Split the way the CA is: the certificate states who the client claims to
+    # be and is presented in the clear on every handshake, so it is stored in
+    # the clear; the key is the credential and is encrypted, listed in
+    # _CLUSTER_SECRET_COLUMNS, and asserted against by to_public_dict. Getting
+    # this backwards in either direction is a defect — an encrypted certificate
+    # buys nothing and costs a decrypt, and a plaintext key is the whole
+    # cluster in a database column.
+    client_certificate = Column(Text, nullable=True)
+    client_key_encrypted = Column(Text, nullable=True)
+
+    # §34. How this registration came to exist: "manual" for one a person
+    # typed or POSTed, "kubeconfig" for one imported from a discovered context,
+    # "autodiscovered" for one this console adopted at startup because nothing
+    # was registered and exactly one local cluster was available.
+    #
+    # It exists because the third case is the only row in this table that
+    # nobody asked for. A console that silently registers something and then
+    # cannot say which row that was is a console whose registry an operator has
+    # to take on trust — and the first question after "why is kind-dev in my
+    # cluster list" is "did I do that?". NULL means a row from before this
+    # column, which is "manual": every registration that predates §34 was typed.
+    origin = Column(String(32), nullable=True)
 
     # The CA is public material by definition — it is the certificate the API
     # server presents to anyone who connects — so it is stored in the clear. The
@@ -176,6 +210,9 @@ class Cluster(Base):
             "api_server": self.api_server,
             "authentication_type": self.authentication_type,
             "has_ca_certificate": bool(self.ca_certificate),
+            "has_client_certificate": bool(self.client_certificate),
+            # NULL is "manual" here rather than a third state: see the column.
+            "origin": self.origin or "manual",
             "skip_tls_verify": bool(self.skip_tls_verify),
             "impersonation_enabled": bool(self.impersonation_enabled),
             "app_domain": self.app_domain,

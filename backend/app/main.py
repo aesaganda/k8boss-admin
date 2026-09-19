@@ -116,6 +116,15 @@ async def lifespan(app: FastAPI):
 
     ensure_bootstrap_admin()
 
+    # §34. After the schema and the bootstrap admin, because it writes a row and
+    # an administrator has to exist before anyone can undo it. Returns None and
+    # logs the reason in every case but one — a registry that is empty, a
+    # kubeconfig that is readable, and exactly one local cluster in it. It never
+    # raises: a convenience that could fail a boot is not one.
+    from app.k8s.adoption import adopt_local_cluster
+
+    adopt_local_cluster()
+
     try:
         yield
     finally:

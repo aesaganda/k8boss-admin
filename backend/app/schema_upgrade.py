@@ -206,6 +206,40 @@ ADDITIVE_COLUMNS: tuple[AdditiveColumn, ...] = (
         ),
     ),
     AdditiveColumn(
+        table="clusters",
+        column="client_certificate",
+        ddl_type="TEXT",
+        purpose=(
+            "§34: the X.509 certificate a cluster imported from a kubeconfig "
+            "authenticates with. Stored in the clear like the CA, because it is "
+            "presented on every handshake and is not the secret half; NULL means "
+            "this cluster authenticates with a bearer token"
+        ),
+    ),
+    AdditiveColumn(
+        table="clusters",
+        column="client_key_encrypted",
+        ddl_type="TEXT",
+        purpose=(
+            "§34: the private key for the certificate above, encrypted at rest "
+            "like the bearer token and listed in _CLUSTER_SECRET_COLUMNS so "
+            "to_public_dict refuses rather than serialises it"
+        ),
+    ),
+    AdditiveColumn(
+        table="clusters",
+        column="origin",
+        ddl_type="VARCHAR(32)",
+        purpose=(
+            "§34: whether this registration was typed, imported from a "
+            "kubeconfig context, or adopted at startup because nothing was "
+            "registered and one local cluster was available. NULL means a row "
+            "that predates the column, which was necessarily typed — the "
+            "startup adoption is the only registration nobody asked for, and a "
+            "registry that cannot say which row that is has to be taken on trust"
+        ),
+    ),
+    AdditiveColumn(
         table="audit_records",
         column="impersonated_user",
         ddl_type="VARCHAR(255)",
