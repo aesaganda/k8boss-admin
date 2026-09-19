@@ -519,7 +519,7 @@ machine.
 curl -X POST localhost:8020/api/clusters/1/test
 ```
 
-This connects **and** preflights seventeen baseline permissions, so a
+This connects **and** preflights eighteen baseline permissions, so a
 half-permissioned ServiceAccount shows up now rather than at 03:00 on the one
 action you needed. A cluster that can list everything and cannot patch a
 Deployment is a valid read-only registration; the point is that it says so.

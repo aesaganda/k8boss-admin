@@ -139,7 +139,7 @@ operator has read a diff and decided, is strictly worse than finding out at the
 preview step.
 
 *Why it runs at cluster registration too.* `POST /api/clusters/{id}/test`
-preflights a baseline of seventeen checks (§9) so a half-permissioned
+preflights a baseline of eighteen checks (§9) so a half-permissioned
 ServiceAccount is visible while the operator is still looking at the form —
 rather than at 03:00, mid-incident, on the one action they needed.
 
