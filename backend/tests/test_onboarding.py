@@ -72,6 +72,29 @@ contexts:
 """
 
 
+# A bare `curl -sfL https://get.k3s.io | sh -` install, byte for byte in shape:
+# every entry in the file — context, cluster and user — is called `default`, and
+# nothing in it names k3s at all. The path it is read from is the only evidence
+# there is.
+K3S_CONTEXT = f"""
+clusters:
+  - name: default
+    cluster:
+      server: https://127.0.0.1:6443
+      certificate-authority-data: {_b64(FIXTURE_CA)}
+users:
+  - name: default
+    user:
+      client-certificate-data: {_b64(FIXTURE_CERT)}
+      client-key-data: {_b64(FIXTURE_KEY)}
+contexts:
+  - name: default
+    context:
+      cluster: default
+      user: default
+"""
+
+
 MIXED_CONTEXTS = f"""
 clusters:
   - name: kind-dev
@@ -141,6 +164,29 @@ def on_the_host(monkeypatch):
     monkeypatch.setattr(kubeconfig, "running_in_container", lambda: False)
 
 
+@pytest.fixture
+def at_the_k3s_path(monkeypatch):
+    """Make a kubeconfig in ``tmp_path`` count as the one k3s writes.
+
+    The suite cannot write `/etc/rancher/k3s/k3s.yaml`, so the *table* is
+    extended rather than the filesystem — and the display name is read out of the
+    shipped entry rather than spelled again here, so deleting that entry fails
+    these tests instead of leaving them passing against a mapping only the tests
+    contain. That the real path is in the table is asserted separately, against
+    `classify` directly, which never opens the path it is given.
+    """
+    def register(path: str) -> None:
+        # Through `realpath`, because that is what `classify` compares and
+        # `tmp_path` lives under a symlinked `/var` on macOS.
+        monkeypatch.setitem(
+            kubeconfig.LOCAL_DISTRIBUTION_PATHS,
+            os.path.realpath(path),
+            kubeconfig.LOCAL_DISTRIBUTION_PATHS["/etc/rancher/k3s/k3s.yaml"],
+        )
+
+    return register
+
+
 # --------------------------------------------------------------------------- #
 # Reading the file
 # --------------------------------------------------------------------------- #
@@ -197,6 +243,110 @@ users:
     assert candidate.distribution == "kind"
     assert candidate.is_local is False
     assert kubeconfig.adoptable(kubeconfig.discover()) == []
+
+
+def test_the_k3s_path_is_the_evidence_and_the_name_never_is():
+    """`classify` on its own, against the table this console actually ships.
+
+    Both directions in one place, because they are one decision. `default` is
+    the name k3s gives every entry in its file and it is also what a remote
+    cluster's context is routinely called, so the name can never be the signal —
+    adding it to `LOCAL_DISTRIBUTIONS` is the regression this test exists to
+    catch. The path can: `/etc/rancher/k3s/k3s.yaml` was written by k3s by
+    construction, and it applies to whatever the context inside was renamed to.
+
+    No file is written: `classify` never opens the path it is given, which is
+    why the real path can be asserted here and nowhere else in this suite.
+    """
+    assert kubeconfig.classify("default", "default", "/etc/rancher/k3s/k3s.yaml") == "k3s"
+    assert kubeconfig.classify("renamed", "default", "/etc/rancher/k3s/k3s.yaml") == "k3s"
+    assert kubeconfig.classify("default", "default", "/etc/rancher/rke2/rke2.yaml") == "RKE2"
+
+    # The name, from anywhere else — including the merged kubeconfig, where the
+    # path evidence is gone and `default` is all that is left.
+    assert kubeconfig.classify("default", "default") is None
+    assert kubeconfig.classify("default", "default", "/home/operator/.kube/config") is None
+
+
+def test_a_bare_k3s_install_is_a_local_cluster_and_is_adopted(
+    db_engine, kubeconfig_file, at_the_k3s_path, on_the_host
+):
+    """The install this feature missed: `curl -sfL https://get.k3s.io | sh -`.
+
+    Nothing in the file names k3s — every entry is `default` — so before the
+    path was read this was classified remote, shown under "remote", and never
+    adopted, though its API server is on `127.0.0.1` and importing it by hand
+    worked perfectly.
+    """
+    at_the_k3s_path(kubeconfig_file(_kubeconfig(contexts=K3S_CONTEXT, current="default")))
+
+    found = kubeconfig.discover()
+    candidate = found.candidates[0]
+    assert candidate.distribution == "k3s"
+    assert candidate.is_local is True
+    assert candidate.importable is True
+    assert [c.context for c in kubeconfig.adoptable(found)] == ["default"]
+
+    assert adoption.adopt_local_cluster() == "default"
+
+    session = database.SessionLocal()
+    try:
+        row = session.query(Cluster).one()
+        assert row.origin == "autodiscovered"
+        assert row.api_server == "https://127.0.0.1:6443"
+        assert row.authentication_type == "client_certificate"
+    finally:
+        session.close()
+
+
+def test_the_same_file_moved_off_that_path_is_remote_again(
+    db_engine, kubeconfig_file, on_the_host
+):
+    """The limit of the signal, stated as a test.
+
+    `KUBECONFIG=~/.kube/config:/etc/rancher/k3s/k3s.yaml kubectl config view
+    --flatten > ~/.kube/config` produces this: identical bytes, no path evidence,
+    and a context called `default`. It is remote, and it is imported by hand —
+    the alternative is reading the name, which is the thing that must not
+    happen.
+    """
+    kubeconfig_file(_kubeconfig(contexts=K3S_CONTEXT, current="default"))
+
+    candidate = kubeconfig.discover().candidates[0]
+    assert candidate.distribution is None
+    assert candidate.is_local is False
+    # Still listed, still importable by hand — §0.1. Only adoption declines.
+    assert candidate.importable is True
+    assert adoption.adopt_local_cluster() is None
+
+
+def test_a_default_context_pointing_somewhere_public_is_never_adopted(
+    db_engine, kubeconfig_file, at_the_k3s_path, on_the_host
+):
+    """The half of `is_local` the new signal must not be allowed to bypass.
+
+    Even from the k3s path, the address decides: a `default` context pointing at
+    a public endpoint is remote and is never registered by a console nobody
+    asked. The two tests are `and`, and the path changed only which distributions
+    the first one recognises.
+    """
+    at_the_k3s_path(kubeconfig_file(_kubeconfig(contexts=f"""
+clusters:
+  - name: default
+    cluster: {{server: https://api.prod.example.com:6443}}
+contexts:
+  - name: default
+    context: {{cluster: default, user: default}}
+users:
+  - name: default
+    user: {{token: a-real-token}}
+""", current="default")))
+
+    candidate = kubeconfig.discover().candidates[0]
+    assert candidate.distribution == "k3s"
+    assert candidate.is_local is False
+    assert kubeconfig.adoptable(kubeconfig.discover()) == []
+    assert adoption.adopt_local_cluster() is None
 
 
 def test_a_missing_kubeconfig_is_reported_not_an_empty_list(tmp_path, monkeypatch):

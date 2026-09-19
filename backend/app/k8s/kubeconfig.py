@@ -34,8 +34,9 @@ local candidate is ever registered without somebody asking (see
 ``app.main``'s startup adoption), because a console that boots and quietly
 registers the production context a developer happens to have in their kubeconfig
 is a far worse failure than one that asks. Both halves of the test are
-deliberately conservative: the distribution has to be one this file names *and*
-the API server has to be a loopback or private address.
+deliberately conservative: the distribution has to be one this file recognises —
+by a name a local tool wrote, or by the fixed path a local tool writes its
+kubeconfig to — *and* the API server has to be a loopback or private address.
 """
 
 from __future__ import annotations
@@ -91,8 +92,34 @@ LOCAL_DISTRIBUTIONS: tuple[tuple[str, str, bool], ...] = (
     ("microk8s", "MicroK8s", False),
 )
 
+#: Local-cluster tools identified by the **path** their kubeconfig is read from,
+#: because they write no name that identifies them. k3s names every entry in
+#: `/etc/rancher/k3s/k3s.yaml` — context, cluster and user — ``default``, which
+#: matches nothing above, so a bare `curl -sfL https://get.k3s.io | sh -` on the
+#: console's own machine was classified remote and never adopted.
+#:
+#: **`default` is not in `LOCAL_DISTRIBUTIONS` and must never be.** It is a name
+#: a remote cluster's context routinely carries, and adopting one on the strength
+#: of it is precisely the failure the two-part `is_local` test exists to prevent.
+#: The path is different in kind: a file at `/etc/rancher/k3s/k3s.yaml` was
+#: written by k3s, by construction, and no cluster somewhere else can arrange to
+#: be read from it.
+#:
+#: **The evidence does not survive the file being moved, and nothing weaker
+#: replaces it.** A kubeconfig copied to `~/.kube/config`, or merged into one
+#: with `KUBECONFIG=~/.kube/config:/etc/rancher/k3s/k3s.yaml kubectl config view
+#: --flatten`, has no path left to read and a context called `default` — so it is
+#: remote, is listed as remote, and is imported by hand from
+#: Clusters -> Discovered. That is the honest answer: there is nothing safe left
+#: to go on, and reaching for the name at that point would put back exactly the
+#: heuristic the paragraph above refuses.
+LOCAL_DISTRIBUTION_PATHS: dict[str, str] = {
+    "/etc/rancher/k3s/k3s.yaml": "k3s",
+    "/etc/rancher/rke2/rke2.yaml": "RKE2",
+}
 
-def classify(context_name: str, cluster_name: str) -> str | None:
+
+def classify(context_name: str, cluster_name: str, path: str | None = None) -> str | None:
     """The local tool that wrote this context, or ``None`` if none did.
 
     Both names are checked because the two tools this exists for spell it
@@ -102,6 +129,15 @@ def classify(context_name: str, cluster_name: str) -> str | None:
     keeps only one of the two intact, and dropping a cluster out of discovery
     because somebody renamed its context is the kind of silent omission §0.1 is
     about.
+
+    ``path`` is the kubeconfig the context was read from, and is the only
+    evidence for the tools that name nothing after themselves — see
+    :data:`LOCAL_DISTRIBUTION_PATHS`. It identifies the *file*, so it applies to
+    every context in it rather than only to one called ``default``: a k3s context
+    somebody renamed with ``kubectl config rename-context`` is still the file k3s
+    wrote, and dropping it would be the same silent omission as above. The
+    converse never holds — ``default`` read from any other path is no
+    distribution at all, whatever its address.
     """
     for name in (context_name or "", cluster_name or ""):
         lowered = name.strip().lower()
@@ -109,6 +145,17 @@ def classify(context_name: str, cluster_name: str) -> str | None:
             continue
         for token, display, is_prefix in LOCAL_DISTRIBUTIONS:
             if lowered.startswith(token) if is_prefix else lowered == token:
+                return display
+    if path:
+        # Both sides through `realpath`, so a symlink at `~/.kube/config`
+        # pointing into `/etc/rancher` still resolves to the file k3s wrote —
+        # and so does the table's own key on a machine where `/etc` is itself a
+        # symlink, which is every macOS one. A *copy* resolves to neither, and
+        # cannot: a copy is a different file that happens to hold the same
+        # bytes, which is the distinction this whole signal rests on.
+        resolved = os.path.realpath(path)
+        for known, display in LOCAL_DISTRIBUTION_PATHS.items():
+            if resolved == os.path.realpath(known):
                 return display
     return None
 
@@ -507,7 +554,7 @@ def discover(path: str | None = None) -> Discovery:
 
         api_server = str(cluster.get("server") or "").strip()
         credential = _credential_kind(user)
-        distribution = classify(name, cluster_name)
+        distribution = classify(name, cluster_name, resolved)
         importable = credential in (CREDENTIAL_TOKEN, CREDENTIAL_CLIENT_CERTIFICATE)
 
         reason: str | None = None
@@ -708,6 +755,10 @@ def credentials_for(context: str, path: str | None = None) -> Credentials:
         what="certificate authority",
     )
 
+    # Classified once, from the same path the document was read from, so an
+    # imported row records the same distribution the listing showed it under.
+    distribution = classify(context, cluster_name, resolved)
+
     return Credentials(
         context=context,
         api_server=api_server,
@@ -717,12 +768,14 @@ def credentials_for(context: str, path: str | None = None) -> Credentials:
         client_key=client_key,
         ca_certificate=ca_certificate,
         skip_tls_verify=bool(cluster.get("insecure-skip-tls-verify")),
-        distribution=classify(context, cluster_name),
-        is_local=bool(classify(context, cluster_name)) and _host_is_local(api_server),
+        distribution=distribution,
+        is_local=bool(distribution) and _host_is_local(api_server),
     )
 
 
 __all__ = [
+    "LOCAL_DISTRIBUTIONS",
+    "LOCAL_DISTRIBUTION_PATHS",
     "Candidate",
     "Credentials",
     "Discovery",

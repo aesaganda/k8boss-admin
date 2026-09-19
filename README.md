@@ -352,7 +352,7 @@ all, and the line that keeps it from becoming a credential store:
 ### A local cluster — nothing to type
 
 Have a cluster from `kind`, `k3d`, minikube, Docker Desktop, Rancher Desktop,
-Colima, OrbStack or MicroK8s? Start the console:
+Colima, OrbStack, MicroK8s, k3s or RKE2? Start the console:
 
 ```bash
 make dev          # backend on :8020, SPA on :5174
@@ -379,9 +379,10 @@ curl -s -X POST localhost:8020/api/clusters/import \
 
 1. `ADMIN_AUTO_DISCOVER_LOCAL` is `true` (the default);
 2. **nothing is registered yet** — it never adds to a cluster list you curated;
-3. the context was written by one of the local tools above **and** its API server
-   is a loopback or private address. Both, never either: a context you called
-   `kind-prod` pointing at a public endpoint is remote and is never adopted;
+3. the console recognises one of the local tools above as having written the
+   context **and** its API server is a loopback or private address. Both, never
+   either: a context you called `kind-prod` pointing at a public endpoint is
+   remote and is never adopted;
 4. it has no reachability problem the console can already see (below);
 5. **exactly one** context qualifies. Two local clusters adopts neither — picking
    between them is your choice, not something to decide at boot.
@@ -389,6 +390,23 @@ curl -s -X POST localhost:8020/api/clusters/import \
 Anything else registers nothing and says why in the startup log. Set
 `ADMIN_AUTO_DISCOVER_LOCAL=false` to require every registration to be an explicit
 act; discovery and **Import** still work.
+
+**How a local tool is recognised.** Usually by the name it writes: `kind` writes
+the context `kind-dev`, `k3d` writes `k3d-dev`, and the rest name themselves.
+k3s and RKE2 name nothing — every entry in `/etc/rancher/k3s/k3s.yaml` is called
+`default` — so those two are recognised by **the path** their kubeconfig is read
+from, which is fixed and which no other cluster can be read from. The name
+`default` on its own is never enough: plenty of remote clusters use it, and
+adopting one on the strength of its name is the failure condition 3 exists to
+prevent.
+
+That means the path has to still be there. A k3s kubeconfig **copied or merged
+into `~/.kube/config`** — `KUBECONFIG=~/.kube/config:/etc/rancher/k3s/k3s.yaml
+kubectl config view --flatten` — has no path left to read and a context called
+`default`, so it is listed as remote and imported with the **Import** button
+rather than adopted. Point `KUBECONFIG_PATH` at `/etc/rancher/k3s/k3s.yaml`, or
+symlink to it, to get adoption back. (A renamed context is fine: the path
+identifies the file, not the name in it.)
 
 An adopted cluster is marked **Adopted automatically at startup** in its detail
 panel, so the first question about a cluster you do not remember registering has
