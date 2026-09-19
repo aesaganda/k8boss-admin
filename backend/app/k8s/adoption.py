@@ -184,7 +184,14 @@ def adopt_local_cluster() -> str | None:
         chosen = candidates[0]
         credentials = kubeconfig_reader.credentials_for(chosen.context, found.path)
         cluster = register_context(
-            db, credentials, name=chosen.context, origin=ORIGIN_ADOPTED,
+            db,
+            credentials,
+            # Not `chosen.context`: k3s calls its context `default`, and a
+            # registration by that name is the one nobody can identify later.
+            name=kubeconfig_reader.suggested_name(
+                chosen.context, chosen.distribution,
+            ),
+            origin=ORIGIN_ADOPTED,
         )
         logger.warning(
             "Adopted %s from %s as cluster id=%s — no cluster was registered and "

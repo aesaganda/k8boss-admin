@@ -245,6 +245,63 @@ users:
     assert kubeconfig.adoptable(kubeconfig.discover()) == []
 
 
+def test_an_adopted_k3s_cluster_is_not_called_default(
+    at_the_k3s_path, kubeconfig_file, on_the_host, db_engine
+):
+    """Recognising k3s made `default` a cluster name for the first time.
+
+    It is uninformative on its own and actively misleading beside a second
+    registration, because "default" reads as *the default one* rather than as
+    the name of a particular cluster — in the switcher, in the audit trail's
+    denormalised `cluster_name`, and in the line the startup log prints about a
+    row nobody asked for.
+    """
+    path = kubeconfig_file(_kubeconfig(contexts=K3S_CONTEXT, current="default"))
+    at_the_k3s_path(path)
+
+    assert adoption.adopt_local_cluster() == "k3s"
+
+    session = database.SessionLocal()
+    try:
+        row = session.query(Cluster).one()
+        assert row.name == "k3s"
+        assert row.origin == "autodiscovered"
+    finally:
+        session.close()
+
+
+def test_importing_k3s_by_hand_gets_the_same_name(
+    client, at_the_k3s_path, kubeconfig_file, on_the_host
+):
+    """...and an explicit `name` still wins, because it always did."""
+    path = kubeconfig_file(_kubeconfig(contexts=K3S_CONTEXT, current="default"))
+    at_the_k3s_path(path)
+
+    imported = client.post("/api/clusters/import", json={"context": "default"})
+    assert imported.status_code == 201
+    assert imported.json()["name"] == "k3s"
+
+    named = client.post(
+        "/api/clusters/import", json={"context": "default", "name": "edge-box-3"},
+    )
+    assert named.status_code == 201
+    assert named.json()["name"] == "edge-box-3"
+
+
+def test_a_context_this_console_cannot_classify_keeps_its_own_name():
+    """No invented labels. A dull name beats a guessed one.
+
+    The fallback is the *distribution*, so it only fires where the console
+    already knows what wrote the file. An unclassified `default` — the merged
+    kubeconfig, where the path evidence is gone — stays `default`, because
+    renaming somebody's context on a guess is the worse failure.
+    """
+    assert kubeconfig.suggested_name("default", "k3s") == "k3s"
+    assert kubeconfig.suggested_name("default", None) == "default"
+    assert kubeconfig.suggested_name("kind-dev", "kind") == "kind-dev"
+    assert kubeconfig.suggested_name("  default  ", "k3s") == "k3s"
+
+
 def test_the_k3s_path_is_the_evidence_and_the_name_never_is():
     """`classify` on its own, against the table this console actually ships.
 
@@ -287,7 +344,11 @@ def test_a_bare_k3s_install_is_a_local_cluster_and_is_adopted(
     assert candidate.importable is True
     assert [c.context for c in kubeconfig.adoptable(found)] == ["default"]
 
-    assert adoption.adopt_local_cluster() == "default"
+    # `k3s`, not `default`: the context name identifies nothing, so the row is
+    # named after the distribution. That is its own decision and has its own
+    # test above — asserted here only so this one does not quietly encode the
+    # opposite.
+    assert adoption.adopt_local_cluster() == "k3s"
 
     session = database.SessionLocal()
     try:

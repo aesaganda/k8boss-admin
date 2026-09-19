@@ -6309,8 +6309,14 @@ kubeconfig). Never a 500, and never an empty list standing in for any of them.
 Administrator-only. Body: `{ "context": "kind-dev", "name": null, "app_domain": null }`
 → `201` `ClusterPublic`, with `origin: "kubeconfig"` and `status: "unknown"`.
 
-`name` defaults to the context name. The body names a *context*, never a
-credential — a body carrying the key would mean discovery had to return one.
+`name` defaults to the context name, except where that name identifies
+nothing: a context called `default` on a recognised distribution is named after
+the distribution instead (`k3s`). An explicit `name` always wins, and a context
+this console could not classify keeps whatever the kubeconfig called it —
+renaming somebody's context on a guess is worse than a dull label.
+
+The body names a *context*, never a credential — a body carrying the key would
+mean discovery had to return one.
 
 The credential is re-read and re-checked here rather than trusted from the
 listing: they are separate requests, and a kubeconfig edited between the two

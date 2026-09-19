@@ -9,6 +9,13 @@ before then; expect breaking changes between minor versions until it does.
 
 ### Added
 
+- A cluster adopted or imported from a context whose name identifies nothing is
+  named after its distribution instead. Recognising k3s made `default` a cluster
+  name for the first time, and "default" beside a second registration reads as
+  *the default one* rather than as a name — in the switcher, in the audit
+  trail's `cluster_name`, and in the startup log. An explicit `name` on import
+  always wins, and an unclassified context keeps its own name.
+
 - **`create pods` joins the registration baseline**, making it nineteen checks.
   It is one grant behind three features — §5.5's node debug pod, §15's CLI pod
   and §4's create-from-YAML — because RBAC cannot tell an nginx pod from one
