@@ -404,7 +404,7 @@ its port. Uncomment it knowing that.
 
 ## Baseline check at registration
 
-`POST /api/clusters/{id}/test` preflights these eighteen, so a
+`POST /api/clusters/{id}/test` preflights these nineteen, so a
 half-permissioned ServiceAccount shows up on the registration form rather than at
 03:00 during an incident:
 
@@ -418,6 +418,7 @@ list   core/pods            core/services      core/namespaces
 patch  apps/deployments
 create core/pods/exec
 patch  core/pods/ephemeralcontainers
+create core/pods
 delete core/pods
 get    core/secrets
 ```

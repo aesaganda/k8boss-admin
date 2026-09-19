@@ -90,6 +90,22 @@ BASELINE_PREFLIGHT_CHECKS: tuple[dict, ...] = (
     # rest of this file and because "we can exec" reads like "we can debug".
     {"verb": "patch", "group": "core", "resource": "pods",
      "subresource": "ephemeralcontainers"},
+    # §5.5's node debug pod, §15's CLI pod and §4's create-from-YAML are one
+    # grant — `deploy/rbac.yaml` says so at the rule itself, because RBAC cannot
+    # tell an nginx pod from one mounting the node's root filesystem. Checked
+    # here because all three are reached from pages that look like they work
+    # until the confirm: the two switches an operator sets to enable them
+    # (`ADMIN_NODE_DEBUG_ENABLED`, `ADMIN_CLI_ENABLED`) say nothing about
+    # whether the ServiceAccount may create a pod, and the console's own gate
+    # opening is the thing that makes the missing grant look like a bug in the
+    # console rather than a permission nobody granted.
+    #
+    # It sat in `docs/rbac.md`'s published list for a long time without being
+    # here, which is the direction that misleads: a reader was told their
+    # registration had been verified for a permission this endpoint never asked
+    # about. Adding the check is the honest way to close that, rather than
+    # quietly shortening the list.
+    {"verb": "create", "group": "core", "resource": "pods"},
     {"verb": "delete", "group": "core", "resource": "pods"},
     {"verb": "get", "group": "core", "resource": "secrets"},
 )
