@@ -9,6 +9,15 @@ before then; expect breaking changes between minor versions until it does.
 
 ### Added
 
+- **`create pods` joins the registration baseline**, making it nineteen checks.
+  It is one grant behind three features — §5.5's node debug pod, §15's CLI pod
+  and §4's create-from-YAML — because RBAC cannot tell an nginx pod from one
+  mounting the node's root filesystem. All three are reached from pages that
+  look like they work until the confirm, and the switches that enable them say
+  nothing about whether the ServiceAccount may create a pod, so a missing grant
+  read as a bug in the console. `docs/rbac.md` had published it in the baseline
+  list for a long time without the endpoint checking it; the list and the code
+  now agree, and a test holds them there.
 - **Zero-setup onboarding for a local cluster (§34).** With nothing registered,
   the console reads the kubeconfig on its own machine and registers the one
   local cluster in it — `kind`, `k3d`, minikube, Docker Desktop, Rancher

@@ -43,7 +43,7 @@
 #      running this twice for the same cluster is a no-op plus a token
 #      rotation, not a 409.
 #   5. Runs the connection test (POST /api/clusters/{id}/test) and prints
-#      exactly which of the seventeen baseline permissions are missing, if
+#      exactly which of the nineteen baseline permissions are missing, if
 #      any — the whole point of that endpoint per its own docstring: a
 #      half-permissioned ServiceAccount should show up now, not at the first
 #      click on a page that turns out not to work.
