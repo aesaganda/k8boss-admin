@@ -1140,6 +1140,13 @@ export function genericTab({
   namespaced,
   resolveVersion = false,
   emptyDescription = `The listing succeeded and returned no ${title} in this scope.`,
+  // Columns a generic tab cannot derive but the page it lives on can — they
+  // sit between Name/Namespace and Age, where a hand-written tab would put
+  // them. The Gateway page's "Address it answers on" is the first: a link an
+  // operator can actually click is the reason that page is worth opening, and
+  // reading it out of `spec.listeners` / `spec.hostnames` is knowledge about
+  // one API group, which does not belong in the helper every listing shares.
+  extraColumns = [],
 }) {
   return {
     key,
@@ -1160,6 +1167,7 @@ export function genericTab({
       ...(namespaced
         ? [{ key: 'namespace', title: 'Namespace', sortable: true, value: (row) => objectNamespace(row) }]
         : []),
+      ...extraColumns,
       {
         key: 'age_seconds',
         title: 'Age',
