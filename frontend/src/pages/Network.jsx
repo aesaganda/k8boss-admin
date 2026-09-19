@@ -616,6 +616,41 @@ function directionLabelFor(state) {
 
 /* ── The three listings this page opened with ───────────────────────────── */
 
+/**
+ * Whether this Service is waiting for an address that may never come.
+ *
+ * `externalIPs` merges `spec.externalIPs` with whatever a load balancer
+ * published, so empty on a LoadBalancer means neither exists.
+ */
+const isPendingAddress = (row) =>
+  row.type === 'LoadBalancer' && !(row.externalIPs ?? []).length;
+
+/**
+ * The External column, which has two empty states that are not the same fact.
+ *
+ * A ClusterIP Service with no external address is a Service working as designed;
+ * a LoadBalancer with none is one nothing has claimed, and on a cluster with no
+ * load-balancer provider — every kind, k3s or Docker Desktop cluster by default —
+ * it stays that way permanently. Rendering both as "none" is how an operator
+ * spends an afternoon on the Ingress in front of a Service that was never
+ * reachable, so the second one says which question is still open.
+ *
+ * It says "pending", never "no provider installed": this row is one object, and
+ * whether the cluster runs a provider is not derivable from it. A Service whose
+ * provider is simply slow, and one on a cluster with none, look identical here
+ * and are reported identically.
+ */
+function ExternalCell({ row, max }) {
+  if (isPendingAddress(row)) {
+    return (
+      <Muted title="No load balancer has published an address for this Service, and spec.externalIPs is empty. A cluster with no load-balancer provider (a cloud controller, MetalLB, kube-vip) never publishes one, and the Service stays unreachable from outside while reporting no error.">
+        pending
+      </Muted>
+    );
+  }
+  return <ChipList values={row.externalIPs} max={max} emptyText="none" />;
+}
+
 const SERVICES_TAB = {
   key: 'services',
   title: 'Services',
@@ -648,8 +683,12 @@ const SERVICES_TAB = {
     {
       key: 'externalIPs',
       title: 'External',
-      value: (row) => (row.externalIPs ?? []).join(' '),
-      cell: (row) => <ChipList values={row.externalIPs} max={2} emptyText="none" />,
+      // `pending` is in the filter text as well as the cell: "which Services are
+      // still waiting for an address" is the question this column exists to
+      // answer on a local cluster, and the search box cannot answer it from a
+      // list of the addresses that do exist.
+      value: (row) => (isPendingAddress(row) ? 'pending' : (row.externalIPs ?? []).join(' ')),
+      cell: (row) => <ExternalCell row={row} max={2} />,
     },
     {
       key: 'ports',
@@ -707,7 +746,7 @@ const SERVICES_TAB = {
           },
           {
             label: 'External addresses',
-            value: <ChipList values={row.externalIPs} max={5} emptyText="none" />,
+            value: <ExternalCell row={row} max={5} />,
           },
         ]}
       />
