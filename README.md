@@ -90,7 +90,8 @@ depends on where the cluster is — see
 > `kind` and `k3d` publish their API server on `127.0.0.1`, which from inside the
 > backend container is the container. The console detects that, declines to
 > register something that cannot connect, and tells you on the Clusters page.
-> Running the console on the host (`make dev`) is the friction-free path there.
+> Running the console on the host (`make dev-backend`) is the friction-free path
+> there.
 
 ### Enable sign-in and user administration
 
@@ -355,7 +356,8 @@ Have a cluster from `kind`, `k3d`, minikube, Docker Desktop, Rancher Desktop,
 Colima, OrbStack, MicroK8s, k3s or RKE2? Start the console:
 
 ```bash
-make dev          # backend on :8020, SPA on :5174
+make dev-backend    # the API on :8020
+make dev-frontend   # and, in a second terminal, the SPA on :5174
 ```
 
 On first start, with **nothing registered**, the console reads your kubeconfig,
@@ -435,9 +437,9 @@ The console detects this, **declines to adopt**, and shows the candidate with th
 reason beside it on the Clusters page. Your options, in the order they are worth
 trying:
 
-1. **Run the console on the host** — `make dev`. `127.0.0.1` is then the right
-   address and the cluster's certificate covers it. This is the path with no
-   caveats.
+1. **Run the console on the host** — `make dev-backend`. `127.0.0.1` is then
+   the right address and the cluster's certificate covers it. This is the path
+   with no caveats.
 2. **Give the cluster an address that is reachable from the container** and
    register it as a remote cluster. `kind get kubeconfig --internal` prints the
    Docker-network address if the backend is on the same network.
@@ -485,8 +487,8 @@ read (FileNotFoundError).
 That is accurate and it names the file, but you only meet it after clicking
 Import. Three ways out, best first:
 
-1. **Run the console on the host** — `make dev`. The paths resolve, and this is
-   the same answer as the loopback caveat above, for the same reason.
+1. **Run the console on the host** — `make dev-backend`. The paths resolve, and
+   this is the same answer as the loopback caveat above, for the same reason.
 2. **Mount the credential directory too**, at the same path it has on the host,
    so what the kubeconfig says stays true inside the container — for minikube
    that is `~/.minikube`, read-only.
