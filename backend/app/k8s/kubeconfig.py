@@ -538,7 +538,8 @@ def _reachability_concern(api_server: str) -> str | None:
         f"{api_server} is a loopback address and this console is running in a "
         "container, where that address is the container itself rather than the "
         "machine your cluster is on. Run the console directly on the host "
-        "(`make dev`) to adopt this cluster, or give it an address reachable "
+        "(`make dev-backend`) to adopt this cluster, or give it an address "
+        "reachable "
         "from inside the container. The connection test is what settles it."
     )
 
