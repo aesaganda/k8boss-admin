@@ -1834,6 +1834,149 @@ body.admin-resizing * {
   background: rgba(255, 255, 255, 0.08);
 }
 
+/* ── Topology (rule 11.13) ──────────────────────────────────────────────── */
+
+.admin-topology {
+  display: block;
+  max-width: 100%;
+  /* The height comes from the viewBox's own ratio: see the comment on the
+     element. A fixed height plus `meet` reserved space the drawing then
+     scaled out of. */
+  height: auto;
+  overflow: visible;
+}
+
+.admin-topology__truncated {
+  margin-bottom: var(--admin-gap-sm);
+}
+
+.admin-topology__group {
+  fill: var(--pf-t--global--background--color--secondary--default, #f2f2f2);
+  stroke: var(--admin-border);
+  stroke-dasharray: 4 3;
+}
+
+.admin-topology__group-title {
+  fill: var(--admin-muted);
+  font-size: 0.8125rem;
+}
+
+/* The node ring carries the workload's status and nothing else, and the default
+   below is grey — the same judgement `StatusBadge` makes. A green default would
+   paint `Unknown` as healthy at the last possible moment, which is the whole
+   reason §6 emits `Unknown` in the first place. */
+.admin-topology__disc {
+  fill: var(--pf-t--global--background--color--primary--default, #fff);
+  stroke: var(--pf-t--global--icon--color--subtle, #a3a3a3);
+  stroke-width: 3;
+}
+
+.admin-topology__node--healthy .admin-topology__disc {
+  stroke: var(--pf-t--global--color--status--success--default, #3e8635);
+}
+.admin-topology__node--progressing .admin-topology__disc {
+  stroke: var(--pf-t--global--color--status--info--default, #2b9af3);
+}
+.admin-topology__node--degraded .admin-topology__disc {
+  stroke: var(--pf-t--global--color--status--danger--default, #c9190b);
+}
+.admin-topology__node--suspended .admin-topology__disc {
+  stroke: var(--pf-t--global--color--status--custom--default, #5752d1);
+}
+
+.admin-topology__node {
+  cursor: pointer;
+}
+
+.admin-topology__node:focus-visible {
+  outline: none;
+}
+
+/* Selection and focus are different states and must look different: tabbing on
+   to the node that is already selected has to change something, or there is no
+   focus indicator at all on the one node most likely to be focused. Selection
+   thickens the ring; focus dashes it and draws the keyboard ring around the
+   whole cell. */
+.admin-topology__node--selected .admin-topology__disc {
+  fill: var(--pf-t--global--background--color--secondary--default, #f2f2f2);
+  stroke-width: 5;
+}
+
+.admin-topology__node:focus-visible .admin-topology__disc {
+  stroke-dasharray: 5 3;
+}
+
+.admin-topology__node:focus-visible .admin-topology__focus {
+  stroke: var(--pf-t--global--border--color--clicked, #0066cc);
+  stroke-width: 2;
+}
+
+.admin-topology__focus {
+  fill: none;
+  stroke: none;
+}
+
+.admin-topology__kind {
+  fill: var(--pf-t--global--text--color--regular, #151515);
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.admin-topology__count {
+  fill: var(--admin-muted);
+  font-size: 0.75rem;
+}
+
+.admin-topology__name {
+  fill: var(--pf-t--global--text--color--regular, #151515);
+  font-size: 0.8125rem;
+}
+
+.admin-topology__badge {
+  fill: var(--pf-t--global--background--color--primary--default, #fff);
+  stroke: var(--admin-border);
+}
+
+/* The contrast-tuned warning swatch, not the raw one: the raw
+   `color--status--warning--default` is #ffcc17 on a white badge fill, which is
+   1.5:1 — a pale halo, on the one marker whose whole job is to be noticed. */
+.admin-topology__badge--unknown {
+  stroke: var(--pf-t--global--icon--color--status--warning--default, #f0ab00);
+  stroke-width: 2;
+}
+
+.admin-topology__badge-text {
+  fill: var(--pf-t--global--text--color--regular, #151515);
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.admin-topology__glyph {
+  fill: none;
+  stroke: var(--pf-t--global--icon--color--regular, #151515);
+  stroke-width: 1.2;
+}
+
+.admin-topology__menu {
+  max-width: 26rem;
+}
+
+.admin-topology__panel-actions {
+  display: flex;
+  gap: var(--admin-gap-sm);
+  margin-bottom: var(--admin-gap);
+}
+
+.admin-topology__list {
+  list-style: none;
+  margin: 0 0 var(--admin-gap) 0;
+  padding: 0;
+}
+
+.admin-topology__list li {
+  padding: 0.15rem 0;
+}
+
 /* ── Motion ─────────────────────────────────────────────────────────────── */
 
 @media (prefers-reduced-motion: reduce) {

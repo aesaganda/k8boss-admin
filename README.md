@@ -683,6 +683,16 @@ version being that there is no undo for a deleted StatefulSet.
 * **Workloads** — Deployments, StatefulSets, DaemonSets, Jobs, CronJobs and
   ReplicaSets in one table, with a real `Unknown` status for controllers that
   have not reported on the current generation.
+* **Topology** — the same six kinds drawn rather than listed, grouped by the
+  application labels they carry, with the workloads something outside the
+  cluster can reach marked with their address. It joins three listings the
+  console already serves and adds no endpoint. A node is marked *unknown*
+  rather than drawn bare whenever the Services or Routes listing could not be
+  read, or the workload's row cannot be matched against a Service at all: a
+  bare node is the claim that nothing reaches it. Selecting one opens the
+  workload's own read beside it, with the same Scale / Restart / Suspend /
+  Roll back / Edit / Delete dialogs the workload page offers — and the
+  selection is in the URL, so the panel is a link.
 * **Pods** — with `phase_detail` for the cases where the phase lies: a `Running`
   pod whose container is in `CrashLoopBackOff` is not reported as Running.
 * **A page per pod**, at `/pods/{namespace}/{name}`, with eight tabs and the

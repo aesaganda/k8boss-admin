@@ -366,6 +366,64 @@ export const FIXTURES = {
     unavailable: [],
   },
 
+  /**
+   * §6 `GET /api/workloads/{plural}/{ns}/{name}`, for `prod/checkout`.
+   *
+   * Not an envelope: the detail is a flat payload with its own `partial` and
+   * `unavailable[]`. `services` is the authoritative answer to "what selects
+   * these pods" — the backend reads the pod template for it, which is why the
+   * topology drawer asks this endpoint instead of trusting the row's
+   * matchLabels.
+   */
+  workloadDetail: {
+    workload: {
+      kind: 'Deployment',
+      name: 'checkout',
+      namespace: 'prod',
+      replicas: { desired: 5, ready: 4, updated: 5, available: 4 },
+      images: ['ghcr.io/acme/checkout:1.9.2'],
+      selector: { app: 'checkout' },
+      labels: {},
+      age_seconds: 1209600,
+      status: 'Progressing',
+      status_reason: '1 of 5 replicas not available',
+      restarts_24h: null,
+      suspended: null,
+      schedule: null,
+      last_schedule: null,
+    },
+    spec: {
+      containers: [
+        {
+          name: 'checkout',
+          image: 'ghcr.io/acme/checkout:1.9.2',
+          type: 'container',
+          ports: [{ name: 'http', containerPort: 8080, protocol: 'TCP' }],
+          resources: { requests: { cpu: '250m' }, limits: {} },
+          env_count: 3,
+          probes: { readiness: true, liveness: true, startup: false },
+        },
+      ],
+      serviceAccount: 'checkout',
+      nodeSelector: {},
+      tolerations: [],
+      volumes: [],
+    },
+    pods: [],
+    conditions: [],
+    services: [
+      {
+        name: 'checkout',
+        type: 'ClusterIP',
+        clusterIP: '10.96.0.11',
+        ports: [{ name: 'http', port: 8080, targetPort: 'http', protocol: 'TCP', nodePort: null }],
+      },
+    ],
+    rollout: null,
+    partial: false,
+    unavailable: [],
+  },
+
   users: {
     items: [
       {
@@ -5087,6 +5145,10 @@ export async function mockApi(
     chain = null,
     yaml = null,
     workloads = null,
+    // §6's detail, which rule 11.13's topology drawer reads for the selected
+    // node: the row's matchLabels can only prove a Service match, and the
+    // detail's `services` is the answer read off the pod template.
+    workloadDetail = null,
     pods = null,
     networkPolicies = null,
     // §4's generic create, which nothing mocked before §11.9's form view needed
@@ -5748,6 +5810,11 @@ export async function mockApi(
             'here — usually within seconds — unless it is not scaling at all.',
         },
       });
+    }
+    // Four segments exactly, so `/scale` above — and any subresource branch
+    // added beside it later — keeps its path.
+    if (/^\/workloads\/[^/]+\/[^/]+\/[^/]+$/.test(path)) {
+      return json(workloadDetail ?? FIXTURES.workloadDetail);
     }
     if (path === '/workloads') return json(workloads ?? FIXTURES.workloads);
     // §23. A POST that reads: the API server answers a question about somebody

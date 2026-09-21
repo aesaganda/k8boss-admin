@@ -617,6 +617,69 @@ export function capabilityGate(kind, action, spec, permission) {
   return permission;
 }
 
+/**
+ * One §9 check per (kind, verb) pair, asked once for the whole page.
+ *
+ * `patch` is the verb for all four workload writes — `admin/scale.py` and
+ * `admin/rollout.py` both patch — and scaling additionally names the `scale`
+ * subresource, which RBAC treats as a separate resource. Asking per row instead
+ * would be one SelfSubjectAccessReview per workload, which the API server
+ * rate-limits and which would make a large namespace slower to render the more
+ * of it the operator can see.
+ *
+ * Shared between the Workloads table and rule 11.13's topology rather than copied
+ * into each: the id strings are what `gate(...)` is looked up by, and two lists
+ * free to drift would disable a control on one screen and offer it on the
+ * other, for the same operator on the same cluster.
+ *
+ * `plurals` narrows the batch to the kinds actually on screen. `verbs` narrows
+ * it to the actions actually offered — a check nobody reads is a review the API
+ * server ran for nothing.
+ */
+export function workloadChecks(
+  namespace,
+  { verbs = ['create', 'patch', 'scale'], plurals = null } = {},
+) {
+  const wanted = new Set(verbs);
+  const checks = [];
+  for (const [plural, spec] of Object.entries(WORKLOAD_KINDS)) {
+    if (plurals && !plurals.includes(plural)) continue;
+    for (const verb of ['create', 'patch', 'update', 'delete']) {
+      if (wanted.has(verb)) {
+        checks.push({ id: `${verb}:${plural}`, verb, group: spec.group, resource: plural, namespace });
+      }
+    }
+    if (wanted.has('scale') && spec.scalable) {
+      checks.push({
+        id: `scale:${plural}`,
+        verb: 'patch',
+        group: spec.group,
+        resource: plural,
+        subresource: 'scale',
+        namespace,
+      });
+    }
+  }
+  return checks;
+}
+
+/**
+ * A cluster-wide review answers a different question from a namespaced one, and
+ * §9 says so explicitly. With no namespace selected we can only ask the
+ * cluster-wide form, and a `no` there does not rule out a namespace-scoped
+ * grant — so the disabled control says that rather than implying the operator
+ * lacks the permission everywhere.
+ */
+export function withScopeNote(gate, namespace) {
+  if (gate.allowed || namespace) return gate;
+  return {
+    allowed: false,
+    reason:
+      `${gate.reason} This was checked cluster-wide because no namespace is selected; ` +
+      'a grant that exists in one namespace would not show up here. Select a namespace to check it.',
+  };
+}
+
 /* ── Small shared derivations ───────────────────────────────────────────── */
 
 /** `{a: 1, b: 2}` → a stable `k=v` array, for chips and tooltips. */
