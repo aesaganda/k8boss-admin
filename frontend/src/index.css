@@ -60,6 +60,34 @@ a:focus-visible {
   text-decoration-style: var(--pf-t--global--text-decoration--style--100, solid);
 }
 
+/*
+ * The same reading for an inline link button — "Manage columns", "Show server
+ * messages". A `Button variant="link" isInline` is a link wearing a <button>,
+ * and PatternFly routes its underline through its own `m-link--m-inline`
+ * tokens rather than through the `a` rule above, so it kept the dashes after
+ * the rule above took them off every <a> beside it. Two readings of the same
+ * affordance on one toolbar is worse than either.
+ *
+ * Retargeting the tokens, rather than setting `text-decoration` on the button,
+ * is what keeps PatternFly's own hover, focus and clicked states doing the
+ * switching — a flat `text-decoration-line: none` would have had to be undone
+ * again in each of them.
+ *
+ * `:root` is here for specificity, not for scope: PatternFly declares these on
+ * `.pf-v6-c-button` (0,1,0), and `button.css` arrives from a component import
+ * rather than from main.jsx, so which of the two sheets lands last in the
+ * built bundle is Vite's business and not something to bet a style on. (0,2,0)
+ * wins wherever it lands.
+ */
+:root .pf-v6-c-button {
+  --pf-v6-c-button--m-link--m-inline--TextDecorationLine: none;
+  --pf-v6-c-button--m-link--m-inline--TextDecorationStyle: var(--pf-t--global--text-decoration--style--100, solid);
+  --pf-v6-c-button--m-link--m-inline--hover--TextDecorationLine: underline;
+  --pf-v6-c-button--m-link--m-inline--hover--TextDecorationStyle: var(--pf-t--global--text-decoration--style--100, solid);
+  --pf-v6-c-button--m-link--m-inline--m-clicked--TextDecorationLine: underline;
+  --pf-v6-c-button--m-link--m-inline--m-clicked--TextDecorationStyle: var(--pf-t--global--text-decoration--style--100, solid);
+}
+
 /* ── Shell ──────────────────────────────────────────────────────────────── */
 
 /*
