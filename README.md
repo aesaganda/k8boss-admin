@@ -443,6 +443,13 @@ trying:
 2. **Give the cluster an address that is reachable from the container** and
    register it as a remote cluster. `kind get kubeconfig --internal` prints the
    Docker-network address if the backend is on the same network.
+   `scripts/connect-kind-network.sh --context kind-dev` automates this for
+   `kind`: it attaches the backend container to `kind`'s Docker network and
+   updates the already-registered cluster in place. It is a script, not a
+   `docker-compose.yml` change, on purpose — see its header for why baking
+   that network dependency into the compose file would break onboarding for
+   everyone not using `kind`. Re-run it if the backend container is ever
+   recreated, since the network attachment does not survive that.
 3. Rewriting the URL to `host.docker.internal` does *not* work on its own:
    `kind`'s API server presents a certificate for `127.0.0.1` and `localhost`,
    not for that name, so it fails verification instead of connecting. The console
