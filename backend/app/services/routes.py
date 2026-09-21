@@ -594,19 +594,30 @@ def _managed_by(obj: Any) -> dict[str, Any]:
 # Row shaping — one per backend, all producing the same row
 # --------------------------------------------------------------------------- #
 
-def _target(name: Any, port: Any, weight: Any) -> dict[str, Any]:
-    """One backend Service of an exposure.
+def _target(
+    name: Any, port: Any, weight: Any, namespace: Any = None, kind: Any = None
+) -> dict[str, Any]:
+    """One backend of an exposure.
 
     ``weight`` stays ``None`` when the object does not carry one rather than
     defaulting to 100 or to 1. A single-backend exposure has no weight in any of
     the three APIs, and inventing one would render a "100%" chip on a row where
     the operator never chose a split — which then reads as though a split
     exists.
+
+    ``namespace`` and ``kind`` are ``None`` for an OpenShift Route and an
+    Ingress: neither API's backend has a namespace (both always target a
+    Service in the exposure's own namespace) or a kind other than Service.
+    Only Gateway API's HTTPRoute lets a ``backendRef`` cross namespaces (behind
+    a ReferenceGrant) or name a non-Service kind, so only ``httproute_row``
+    passes them through.
     """
     return {
         "service": None if name is None else str(name),
         "port": port,
         "weight": weight,
+        "namespace": None if namespace is None else str(namespace),
+        "kind": None if kind is None else str(kind),
     }
 
 
@@ -977,7 +988,11 @@ def httproute_row(obj: Any, *, version: str) -> dict[str, Any]:
             name = get_field(ref, "name")
             port = get_field(ref, "port")
             weight = get_field(ref, "weight")
-            targets.append(_target(name, port, weight))
+            targets.append(_target(
+                name, port, weight,
+                namespace=get_field(ref, "namespace"),
+                kind=get_field(ref, "kind"),
+            ))
             for value, kind in matched:
                 paths.append({
                     "path": value,

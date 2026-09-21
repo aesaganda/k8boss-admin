@@ -435,18 +435,6 @@ function ExposurePanel({ node, detail, routes }) {
                   <code>{route.name}</code>
                 )}{' '}
                 <Muted>{route.kind}</Muted>
-                {/* §13's row names the backend Service without a namespace, and
-                    Gateway API lets a backendRef point at another namespace's
-                    Service behind a ReferenceGrant. Said here, beside the
-                    claim, rather than left for the operator to discover. */}
-                {route.backend === 'gateway' && (
-                  <>
-                    {' '}
-                    <Muted title="The §13 row carries the backend Service by name only.">
-                      (matched by Service name; an HTTPRoute backendRef may name another namespace)
-                    </Muted>
-                  </>
-                )}
               </li>
             );
           })}
