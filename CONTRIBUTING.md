@@ -81,6 +81,20 @@ won't be merged as one.
 
 ## Running things locally
 
+Python **3.12** and Node **20** — the versions CI runs, and the only ones
+exercised. `.nvmrc` pins the second; the first is on you.
+
+```bash
+make install                               # pip install backend deps, npm ci the frontend
+```
+
+Do that before anything below, including the first `make test`. Nothing else in
+this file installs a dependency, so without it the first thing you see is `No
+module named pytest`. It installs into whatever Python is on your `PATH` and
+deliberately creates no virtualenv — activate one first if you want one, or use
+`PYTHON=/path/to/python3.12 make install`. The Playwright browsers come down
+with `npm ci`, so there is no separate `playwright install` step.
+
 ```bash
 cd backend && python -m pytest -q          # backend suite, SQLite
 cd frontend && npm run dev                 # dev server on :5174

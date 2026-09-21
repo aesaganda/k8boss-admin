@@ -19,12 +19,33 @@ API_PORT ?= 8020
 # No default target that "does something" — a bare `make` prints the menu.
 .DEFAULT_GOAL := help
 
-.PHONY: help dev-backend dev-frontend test test-backend test-frontend \
+.PHONY: help install dev-backend dev-frontend test test-backend test-frontend \
         lint build docker-build clean router-manifest
 
 help:  ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
 	  | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
+
+# ── Setup ────────────────────────────────────────────────────────────────────
+
+install:  ## Install backend and frontend dependencies (run this first)
+	@# Every other target below assumes this has been run. Without it the first
+	@# thing a new contributor sees is `No module named pytest` from
+	@# `make test-backend`, which reads as a broken repository rather than as a
+	@# missing step — the repository never told them there was a step.
+	@#
+	@# No venv is created here. Whether to isolate is the contributor's call and
+	@# their tooling already has an opinion (venv, uv, conda, pyenv, a container);
+	@# a Makefile that created one would install into a directory the next
+	@# `python3 -m pytest` does not look in, which is a worse failure than this
+	@# one because it looks like it worked. Activate an environment first if you
+	@# want one — PYTHON=path/to/python make install also works.
+	$(PYTHON) -m pip install -r $(BACKEND)/requirements.txt
+	@# `ci`, not `install`: it installs exactly package-lock.json and fails if the
+	@# lockfile and package.json disagree, which is what CI does. The Playwright
+	@# browsers arrive with it through @playwright/test's install script, so
+	@# `make test-frontend` needs nothing further.
+	cd $(FRONTEND) && npm ci
 
 # ── Development ──────────────────────────────────────────────────────────────
 
