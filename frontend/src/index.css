@@ -30,6 +30,36 @@ body {
   margin: 0;
 }
 
+/* ── Links ──────────────────────────────────────────────────────────────── */
+
+/*
+ * A bare <a> — every ResourceLink, every breadcrumb — is the one place this
+ * console diverges from a PatternFly default, and it diverges towards the
+ * OpenShift console rather than away from Red Hat's design language.
+ *
+ * PatternFly 6 styles a standalone link `underline dashed` (its
+ * `text-decoration--style--200` token). Down a Name column that is a hundred
+ * dashed rules stacked one per row, which reads as a broken table before it
+ * reads as a link. The OpenShift console — the same design language, on the
+ * same job — underlines on hover only, and that is what this restores.
+ *
+ * The selector is a bare `a`, specificity (0,0,1), on purpose: PatternFly's own
+ * rule is wrapped in `:where()` and carries zero, so this wins over it, while
+ * every `.pf-v6-c-*` component rule still wins over this. A component that
+ * wants a dashed underline to mean something — help text, editable text —
+ * keeps it.
+ */
+a {
+  text-decoration-line: none;
+  text-decoration-style: var(--pf-t--global--text-decoration--style--100, solid);
+}
+
+a:hover,
+a:focus-visible {
+  text-decoration-line: underline;
+  text-decoration-style: var(--pf-t--global--text-decoration--style--100, solid);
+}
+
 /* ── Shell ──────────────────────────────────────────────────────────────── */
 
 /*
