@@ -110,7 +110,7 @@ const NO_SCALE = {
     'them.',
 };
 
-const MAX_REPLICAS = 10000;
+export const MAX_REPLICAS = 10000;
 
 export function ScaleDialog({
   isOpen,
@@ -121,16 +121,23 @@ export function ScaleDialog({
   name,
   /** `replicas.desired` from the §6 row. `null` means it could not be read. */
   current,
+  /**
+   * A count to open the field at instead of `current` — what `ScaleStepper`
+   * passes when an arrow named a number. It is a *proposal*, so "Currently N"
+   * keeps reporting `current`: a dialog whose two numbers were both the target
+   * would hide the change it is about to preview.
+   */
+  initial,
   onClose,
   onApplied,
 }) {
   // `null` until the operator commits to a number, so an unreadable current
   // count cannot silently become the request.
-  const [replicas, setReplicas] = useState(current ?? null);
+  const [replicas, setReplicas] = useState(initial ?? current ?? null);
 
   useEffect(() => {
-    if (isOpen) setReplicas(current ?? null);
-  }, [isOpen, current]);
+    if (isOpen) setReplicas(initial ?? current ?? null);
+  }, [isOpen, current, initial]);
 
   const unsupported = kind ? NO_SCALE[kind] : null;
   const unknownCurrent = current == null;

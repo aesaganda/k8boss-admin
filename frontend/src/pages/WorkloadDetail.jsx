@@ -37,6 +37,7 @@ import {
   StatusBadge,
 } from '../components/ui';
 import ScaleDialog from '../components/ScaleDialog';
+import ScaleStepper from '../components/ScaleStepper';
 import RestartDialog from '../components/RestartDialog';
 import SuspendDialog from '../components/SuspendDialog';
 import RollbackDialog from '../components/RollbackDialog';
@@ -260,11 +261,27 @@ export default function WorkloadDetail() {
                   {
                     label: 'Replicas',
                     value: (
-                      <UsageCell
-                        used={workload?.replicas?.ready}
-                        total={workload?.replicas?.desired}
-                        reason="The controller has not reported its replica status."
-                      />
+                      // The count and the control that changes it, in one line.
+                      // The arrows do not write: they open the same dialog the
+                      // Scale… button does, already holding the number they
+                      // name, so the diff is still what authorises the change.
+                      <span className="admin-cell-inline">
+                        <UsageCell
+                          used={workload?.replicas?.ready}
+                          total={workload?.replicas?.desired}
+                          reason="The controller has not reported its replica status."
+                        />
+                        <ScaleStepper
+                          kind={kind}
+                          plural={plural}
+                          namespace={namespace}
+                          name={name}
+                          current={workload?.replicas?.desired ?? null}
+                          gate={scaleGate}
+                          onApplied={refreshAll}
+                          testId="workload-scale-stepper"
+                        />
+                      </span>
                     ),
                     help: 'Ready over desired, as the controller reports them.',
                   },

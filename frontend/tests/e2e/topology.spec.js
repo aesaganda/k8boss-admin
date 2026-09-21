@@ -488,6 +488,40 @@ test.describe('the side panel', () => {
     // The write funnel's own control: nothing is applied before a diff.
     await expect(page.getByRole('button', { name: /Preview/ })).toBeVisible();
   });
+
+  test('the replica stepper opens that same dialog already holding the next count', async ({ page }) => {
+    await openTopology(page);
+
+    await node(page, 'prod/Deployment/shop-web').click();
+    const stepper = page.getByTestId('topology-scale-stepper');
+    await stepper.getByRole('button', { name: 'Scale shop-web up to 4' }).click();
+
+    // An arrow is arithmetic, not a write: it lands in the §6 dialog with the
+    // number filled in, and the diff is still what authorises the change.
+    await expect(page.getByRole('dialog')).toContainText('Scale shop-web');
+    await expect(page.getByRole('spinbutton', { name: 'Desired replicas' })).toHaveValue('4');
+    await expect(page.getByRole('button', { name: /Preview/ })).toBeVisible();
+  });
+
+  test('the stepper is disabled for a kind with no scale subresource, and for an unread count', async ({
+    page,
+  }) => {
+    await openTopology(page);
+
+    // Rule 11.4: offered and disabled, never hidden. A CronJob has no replicas
+    // of its own — a fact about the kind, true of every operator.
+    await node(page, 'prod/CronJob/nightly-reindex').click();
+    const cronjob = page.getByTestId('topology-scale-stepper').getByTestId('action-button');
+    await expect(cronjob).toHaveCount(2);
+    await expect(cronjob.first()).toHaveAttribute('data-allowed', 'false');
+
+    // Rule 11.2 as an action: `replicas.desired` was not reported, and `null + 1`
+    // is a guess dressed as an increment.
+    await node(page, 'prod/Deployment/checkout').click();
+    const unread = page.getByTestId('topology-scale-stepper').getByTestId('action-button');
+    await expect(unread.first()).toHaveAttribute('data-allowed', 'false');
+    await expect(unread.last()).toHaveAttribute('data-allowed', 'false');
+  });
 });
 
 test.describe('nothing to draw', () => {
