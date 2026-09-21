@@ -47,6 +47,22 @@ before then; expect breaking changes between minor versions until it does.
 
 ### Fixed
 
+- **`make install`, and the prerequisites it needs.** No document in the
+  repository said to install a dependency before running anything, so a new
+  contributor following README's Development section met `No module named
+  pytest` on their first command — a missing step that reads as a broken
+  repository. README and CONTRIBUTING now state Python 3.12 and Node 20 (the
+  versions CI runs, and the only ones exercised), `.nvmrc` pins the second, and
+  the new target installs both halves.
+- `docker-compose.yml` pointed at `make dev`, which has not existed since the
+  target was split into `dev-backend` and `dev-frontend`. It sat in the comment
+  explaining the `kind`/`127.0.0.1` adoption caveat — read precisely when that
+  caveat has just bitten someone.
+- README's documentation table listed ADR-0007 as **Proposed** when it is
+  accepted and shipped (`app/k8s/impersonation.py`, the
+  `impersonation_unavailable` error code), and omitted ADR-0004, 0005, 0008,
+  0009, 0010 and 0011 — including both bundle-boundary ADRs the project asks
+  people to read before adding a third bundle.
 - The registration form's **Bearer token** option (`bearer_token`) was not in
   the backend's supported set, so choosing it answered `422 Unsupported
   authentication type`. The form was self-consistent, the backend was right

@@ -230,9 +230,9 @@ services:
       # `https://127.0.0.1:<port>` into the kubeconfig, and from inside this
       # container that address is the container. Adoption SKIPS such a context
       # rather than registering one that cannot connect, and the Clusters page
-      # says so beside the candidate. Run the console on the host (`make dev`)
-      # to adopt it, or register the cluster with an address reachable from in
-      # here.
+      # says so beside the candidate. Run the console on the host
+      # (`make dev-backend`) to adopt it, or register the cluster with an
+      # address reachable from in here.
       - ADMIN_AUTO_DISCOVER_LOCAL=${ADMIN_AUTO_DISCOVER_LOCAL:-true}
 
       # ── HTTP ─────────────────────────────────────────────────────────────

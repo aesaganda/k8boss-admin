@@ -1461,6 +1461,27 @@ withholding it, is in [`docs/rbac.md`](docs/rbac.md).
 
 ## Development
 
+Everything above this line runs in Docker and needs nothing installed. Working
+*on* the console does:
+
+| You need | Version | Why that one |
+|---|---|---|
+| Python | **3.12** | What `backend/Dockerfile` builds on and what CI runs. 3.11 is the language floor, but only 3.12 is exercised |
+| Node.js | **20** | What CI runs; also in [`.nvmrc`](.nvmrc), so `nvm use` picks it up |
+| Docker | any current | Only for `make docker-build` and the Compose stack |
+
+```bash
+make install           # pip install backend deps, npm ci the frontend — do this first
+```
+
+`make install` installs into whatever Python is on your `PATH`. It does not
+create a virtualenv, because a Makefile that made one would install into a
+directory your next `python3 -m pytest` does not look in. Activate an
+environment first if you want one, or point the whole Makefile at a specific
+interpreter with `PYTHON=/path/to/python3.12 make install`.
+
+Then:
+
 ```bash
 make dev-backend       # uvicorn on :8020, reload, SQLite, mutations off
 make dev-frontend      # Vite on :5174, proxying /api and /api/ws to :8020
@@ -1507,8 +1528,14 @@ Before enabling the optional Ingress, either enable local/LDAP auth with the
 | [`docs/rbac.md`](docs/rbac.md) | Every permission, by feature, with its degradation |
 | [`docs/adr-0001-dry-run-first.md`](docs/adr-0001-dry-run-first.md) | Why dry-run-then-confirm rather than optimistic-with-undo |
 | [`docs/adr-0002-lineage.md`](docs/adr-0002-lineage.md) | What came from K8Boss, what did not, why they stay separate |
+| [`docs/adr-0004-shipped-router.md`](docs/adr-0004-shipped-router.md) | Why the console installs a router at all, why HAProxy, what it does not serve, and the boundary that keeps "not a deployment engine" true of everything else |
+| [`docs/adr-0005-operator-portal.md`](docs/adr-0005-operator-portal.md) | Why creating one OLM `Subscription` is not a second thing this console installs, and where that line is |
 | [`docs/adr-0006-projects.md`](docs/adr-0006-projects.md) | Why a project is five ordinary writes and not a template engine, and where that line is |
-| [`docs/adr-0007-impersonation.md`](docs/adr-0007-impersonation.md) | **Proposed.** Why the console acts as one ServiceAccount per cluster, what impersonating the operator would fix and cost, and the conditions it would have to meet |
+| [`docs/adr-0007-impersonation.md`](docs/adr-0007-impersonation.md) | **Accepted.** Why every cluster call is made as one ServiceAccount by default, what per-cluster impersonation fixes, what its grant costs, and which sign-in methods may supply a cluster identity at all |
+| [`docs/adr-0008-shipped-olm.md`](docs/adr-0008-shipped-olm.md) | **The boundary ADR-0004 drew at one bundle, re-opened at two.** Why the console installs OLM, why the manifests are vendored rather than fetched, the `*`-on-`*` ClusterRole it creates, and why a third bundle would end the boundary rather than extend it |
+| [`docs/adr-0009-one-yaml-reading.md`](docs/adr-0009-one-yaml-reading.md) | Why the console has one reading of a manifest and it is PyYAML's, measured against what `kubectl` sends, and why the browser adopted it rather than the other way round |
+| [`docs/adr-0010-single-letter-booleans.md`](docs/adr-0010-single-letter-booleans.md) | Why `y` is `true`: the scalars PyYAML declines and `kubectl` reads as booleans, and the one change of reading this console has made on purpose |
+| [`docs/adr-0011-database-backed-identity-providers.md`](docs/adr-0011-database-backed-identity-providers.md) | Why identity providers became configurable from the console, one row per kind, with the environment as the fallback — and which of the original refusal's costs are paid |
 | [`docs/adr-0012-kubeconfig-onboarding.md`](docs/adr-0012-kubeconfig-onboarding.md) | Why the console may read the kubeconfig on its own machine to onboard a cluster, why an import is a copy rather than a live credential source, and what a local cluster's certificate costs compared with a scoped token |
 | [`CLAUDE.md`](CLAUDE.md) | Working agreements for anyone (or anything) changing this repository |
 
