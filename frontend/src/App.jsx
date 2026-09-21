@@ -63,6 +63,7 @@ const NodeDetail = lazyPage('NodeDetail', () => import('./pages/NodeDetail'));
 const Namespaces = lazyPage('Namespaces', () => import('./pages/Namespaces'));
 const NamespaceDetail = lazyPage('NamespaceDetail', () => import('./pages/NamespaceDetail'));
 const Workloads = lazyPage('Workloads', () => import('./pages/Workloads'));
+const Topology = lazyPage('Topology', () => import('./pages/Topology'));
 const WorkloadDetail = lazyPage('WorkloadDetail', () => import('./pages/WorkloadDetail'));
 const Pods = lazyPage('Pods', () => import('./pages/Pods'));
 const PodDetail = lazyPage('PodDetail', () => import('./pages/PodDetail'));
@@ -111,6 +112,12 @@ function ConsoleRoutes() {
                   Not a Workloads page filtered by namespace: that list has one
                   home, and this page shows the objects no other page does. */}
               <Route path="namespaces/:name" element={<NamespaceDetail />} />
+
+              {/* Rule 11.13. Above the workload routes because it is the
+                  view an operator arrives on: the same six kinds, arranged by
+                  the application labels they carry. The selected node is
+                  `?selected=`, so a canvas with a panel open is a link. */}
+              <Route path="topology" element={<Topology />} />
 
               <Route path="workloads" element={<Workloads />} />
               {/* The same page with its kind filter in the path, so the

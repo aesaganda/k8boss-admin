@@ -119,7 +119,12 @@ export default function AppNav() {
           <RouterNavItem to="/events">Events</RouterNavItem>
         </NavSection>
 
-        <NavSection id="workloads" title="Workloads" routes={['/workloads', '/pods']}>
+        <NavSection id="workloads" title="Workloads" routes={['/topology', '/workloads', '/pods']}>
+          {/* Rule 11.13. First in the section: it is the same six kinds as
+              the table below it, drawn rather than listed, and the entry an
+              operator looking for "what is running here" reaches for before
+              they know which kind to filter to. */}
+          <RouterNavItem to="/topology">Topology</RouterNavItem>
           {/* `end`: the kind filter is a path below this one, so without it
               this entry and the kind's own entry both light up at once. */}
           <RouterNavItem to="/workloads" end>

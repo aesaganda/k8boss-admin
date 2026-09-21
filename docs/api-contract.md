@@ -1567,6 +1567,64 @@ trace.
    body with a syntax error at a character offset that is in neither the
    operator's document nor the object they meant.
 
+13. **A view that draws relationships may only draw the ones it can prove, and
+   must say where it could not look.** The topology view (`/topology`) is §6's
+   workload listing, §8's Services and §13's exposures joined **in the browser**
+   — no topology endpoint, no fourth read model. Three properties are contract,
+   because a picture is read as fact in a way a table is not:
+
+   **A drawn connection is a proved connection.** A Service is attached to a
+   workload only when its `spec.selector` is a subset of the workload row's
+   `selector` (§6's `matchLabels`). That direction is sound in one direction
+   only, and that is why it is the one used: the API server requires a
+   controller's `matchLabels` to be present on its pod template, so a selector
+   contained in them really does select these pods. A Service with no selector
+   is never attached — it is backed by hand-managed EndpointSlices and reaches
+   nothing here, which is the same judgement §6's detail makes.
+
+   **The join is therefore three-valued, because the converse does not hold.**
+   `matchLabels` is a *subset* of the pod template's labels and the row does not
+   carry the template, so a Service selecting on a key the row does not carry
+   may really select these pods: it is neither attached nor ruled out, and the
+   node is marked *unknown* rather than drawn bare. What settles the negative is
+   a disagreement — a key the row does carry, with a different value — because
+   the template carries `matchLabels` verbatim. Without the third value the
+   absence of a marker would be an inference from a listing that cannot support
+   it, which is the defect standard in a drawing. The panel is the authority
+   either way: it asks the object's own read, and the exposures it lists are
+   matched against *its* Services, not the node's.
+
+   The same applies to an exposure's target. §13's row carries the backend
+   Service by name only — `_target()` keeps `{service, port, weight}`, and the
+   HTTPRoute shaper drops `backendRefs[].namespace` — so a Gateway API
+   `backendRef` to another namespace's Service of the same name, which a
+   ReferenceGrant permits, is drawn against this namespace's workload. Stated
+   rather than guessed at: the row cannot tell the two apart, and dropping every
+   Gateway exposure to avoid the rare case would lose the ordinary one.
+
+   **An unattributable node is marked, never drawn bare.** A row whose
+   `selector` is empty — an expression-only selector, or a CronJob, which has
+   none — cannot be matched against any Service from the listing. Neither can
+   any node while the Services or Routes listing is unreadable, **has not
+   answered yet**, or **stopped at its limit**: a listing cut off by §4's
+   `continue` cursor or reported in §13's `truncated[]` is a third way to be
+   blind, it is not an `unavailable[]` entry, and a Service past the cursor
+   still selects pods. In each case the node carries the *unknown* marker and
+   the sentence that explains it, because a node drawn with no exposure is the
+   claim that nothing outside the cluster reaches it, and that claim is acted
+   on. `unsupported` (§1.2) is excluded: a cluster that does not serve
+   `route.openshift.io` has no Routes, and marking every node unknown for it
+   would make the marker decoration.
+
+   **The selected node's panel asks the object's own read.** `GET
+   /api/workloads/{plural}/{ns}/{name}` reads the pod template and is the
+   authority on which Services select it; the canvas is a summary of a listing
+   and the panel is the answer. The panel's `Actions` are the same dialogs the
+   workload's own page opens, gated by the same §9 batch — one preflight for the
+   page, over the kinds actually on the canvas, never one per node. **No write
+   is added by this view.** The selection lives in `?selected=`, for rule 8's
+   reason.
+
 ---
 
 ## 12. Console authentication and users

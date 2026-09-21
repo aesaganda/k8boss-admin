@@ -238,7 +238,7 @@ reason.
 | `components/LogViewer.jsx`, `PodTerminal.jsx` | The two WebSocket surfaces. Neither defaults a container on a multi-container pod |
 | `components/NodeDebug{Panel,Dialog}.jsx` | §5.5's node Debug section. Deliberately not shared with `DebugPanel`: one of these can be removed and the other cannot |
 | `components/DebugPanel.jsx` | The Debug tab: what is already attached, the attach action, and a terminal bound to the container it created |
-| `pages/` | One per route; `_data.js` and `_parts.jsx` hold the shared fetch and row helpers |
+| `pages/` | One per route; `_data.js` and `_parts.jsx` hold the shared fetch and row helpers. `topologyGraph.js` is §11.13's grouping, matching and layout, kept pure and free of JSX for the reason `resources/shaping.py` is: a layout that could read from a cluster could also fail to, and then nothing would own the difference between "no Service reaches this" and "we could not look" |
 
 ---
 

@@ -49,6 +49,8 @@ import {
   capabilityGate,
   useAsync,
   useGates,
+  withScopeNote,
+  workloadChecks,
 } from './_data';
 import { ImagesCell, Muted, NoClusterState, UsageCell, menuAction } from './_parts';
 
@@ -62,52 +64,6 @@ const KIND_OPTIONS = Object.entries(WORKLOAD_KINDS).map(([plural, spec]) => ({
   value: plural,
   label: spec.kind,
 }));
-
-/**
- * One §9 check per (kind, action) pair, asked once for the whole table.
- *
- * `patch` is the verb for all four writes — `admin/scale.py` and
- * `admin/rollout.py` both patch — and scaling additionally names the `scale`
- * subresource, which RBAC treats as a separate resource. Asking per row instead
- * would be one SelfSubjectAccessReview per workload, which the API server
- * rate-limits and which would make a large namespace slower to render the more
- * of it the operator can see.
- */
-function buildChecks(namespace) {
-  const checks = [];
-  for (const [plural, spec] of Object.entries(WORKLOAD_KINDS)) {
-    checks.push({ id: `create:${plural}`, verb: 'create', group: spec.group, resource: plural, namespace });
-    checks.push({ id: `patch:${plural}`, verb: 'patch', group: spec.group, resource: plural, namespace });
-    if (spec.scalable) {
-      checks.push({
-        id: `scale:${plural}`,
-        verb: 'patch',
-        group: spec.group,
-        resource: plural,
-        subresource: 'scale',
-        namespace,
-      });
-    }
-  }
-  return checks;
-}
-
-/**
- * A cluster-wide review answers a different question from a namespaced one, and
- * §9 says so explicitly. With no namespace selected we can only ask the
- * cluster-wide form, and a `no` there does not rule out a namespace-scoped
- * grant — so the disabled control says that rather than implying the operator
- * lacks the permission everywhere.
- */
-function withScopeNote(gate, namespace) {
-  if (gate.allowed || namespace) return gate;
-  return {
-    allowed: false,
-    reason:
-      `${gate.reason} This was checked cluster-wide because no namespace is selected; ` +
-      'a grant that exists in one namespace would not show up here. Select a namespace to check it.',
-  };
-}
 
 /**
  * "Create workload" — one button standing in for six, since this page lists
@@ -195,7 +151,7 @@ export default function Workloads() {
     },
   );
 
-  const checks = useMemo(() => buildChecks(namespace), [namespace]);
+  const checks = useMemo(() => workloadChecks(namespace), [namespace]);
   const { gate } = useGates(checks, { enabled: activeClusterId != null });
 
   const rows = data?.items ?? [];

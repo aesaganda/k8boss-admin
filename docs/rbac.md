@@ -119,6 +119,20 @@ remote path in README is the one these tables are about.
 | `get,list,watch apps/controllerrevisions` | §6 rollout history for StatefulSets and DaemonSets | The rollout panel for those two kinds reports that it could not read history. It must **not** be rendered as "this workload has never been rolled out" — that is a different fact. Deployments are unaffected: their history lives in ReplicaSets |
 | `get,list,watch ""/services` | §6 workload detail's related Services; §8 Services | The `services` block of a workload detail is empty with an `unavailable` entry |
 
+## Read: the topology view (§11.13)
+
+It grants nothing new. The page is the three listings above and in
+[Read: the resource browser](#read-the-resource-browser) joined in the browser,
+so what a missing permission costs here is what it costs those listings — plus
+one thing that is specific to a drawing.
+
+| Permission | Feature | Withheld |
+|---|---|---|
+| `get,list,watch apps/…`, `batch/…` | The nodes on the canvas | The kinds vanish and are named in the banner, exactly as in the table. This is the primary read: with all of them refused the page renders the banner and an empty-canvas state that says it is not the whole picture, never "nothing runs here" |
+| `get,list,watch ""/services` | Attaching a Service to the workload whose pods it selects | **Every node is marked *unknown*, not unexposed.** This is the grant whose absence a picture would otherwise lie about: a canvas of bare nodes is the claim that nothing outside reaches any of them, and that claim gets read during an incident as "the front end is down". The marker and the banner both say the listing was refused |
+| `get,list,watch networking.k8s.io/ingresses`, `route.openshift.io/routes`, `gateway.networking.k8s.io/httproutes` | The outward-arrow decorator and the addresses in the panel | Same: unknown rather than unexposed. A cluster that does not *serve* one of these APIs is a different answer — `unsupported`, an ordinary absence, and the nodes keep answering from the backends that did |
+| `create authorization.k8s.io/selfsubjectaccessreviews` | The panel's `Actions` menu | Every item is disabled, saying the permission could not be established — which is not a denial (§9). Already required cluster-wide; listed here because the menu is the one place this page can write from |
+
 ## Read: one pod — logs, environment, usage
 
 | Permission | Feature | Withheld |
