@@ -332,6 +332,50 @@ test.describe('what reaches a workload', () => {
     await expect(node(page, 'prod/CronJob/nightly-reindex')).toHaveAttribute('data-exposure', 'unknown');
   });
 
+  test('a cross-namespace backendRef must not mark the local workload', async ({ page }) => {
+    // The HTTPRoute lives in `prod` and its backendRef names `payments` in
+    // `billing` — a different Service than `prod`'s own `payments`, reachable
+    // only via a ReferenceGrant. `prod/Deployment/payments` must stay at
+    // `service`, never promoted to `route` by a same-named Service elsewhere.
+    await openTopology(page, {
+      routes: {
+        ...ROUTES,
+        items: [
+          ...ROUTES.items,
+          {
+            id: 'gateway/prod/payments-route',
+            backend: 'gateway',
+            kind: 'HTTPRoute',
+            group: 'gateway.networking.k8s.io',
+            version: 'v1',
+            plural: 'httproutes',
+            name: 'payments-route',
+            namespace: 'prod',
+            hosts: ['payments.example.com'],
+            subdomain: null,
+            path: '/',
+            pathType: 'PathPrefix',
+            paths: [{ path: '/', pathType: 'PathPrefix', service: 'payments', port: 80, weight: null }],
+            targets: [{ service: 'payments', port: 80, weight: null, namespace: 'billing', kind: 'Service' }],
+            tls: { termination: null, insecurePolicy: null, inlineCertificate: false, secretName: null },
+            wildcardPolicy: null,
+            admitted: true,
+            admittedDetail: 'Accepted by public.',
+            addresses: [],
+            ingressClass: null,
+            tlsHosts: [],
+            parents: ['public'],
+            age_seconds: 3600,
+            resourceVersion: '99',
+            managedBy: { controller: null, tool: null, marker: null, detail: null },
+          },
+        ],
+      },
+    });
+
+    await expect(node(page, 'prod/Deployment/payments')).toHaveAttribute('data-exposure', 'service');
+  });
+
   test('a refused Services listing makes every node unknown and says so', async ({ page }) => {
     await openTopology(page, {
       services: {

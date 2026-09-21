@@ -1594,13 +1594,14 @@ trace.
    either way: it asks the object's own read, and the exposures it lists are
    matched against *its* Services, not the node's.
 
-   The same applies to an exposure's target. §13's row carries the backend
-   Service by name only — `_target()` keeps `{service, port, weight}`, and the
-   HTTPRoute shaper drops `backendRefs[].namespace` — so a Gateway API
-   `backendRef` to another namespace's Service of the same name, which a
-   ReferenceGrant permits, is drawn against this namespace's workload. Stated
-   rather than guessed at: the row cannot tell the two apart, and dropping every
-   Gateway exposure to avoid the rare case would lose the ordinary one.
+   The same applies to an exposure's target. §13's row carries `namespace` and
+   `kind` beside the backend `service` name, and the HTTPRoute shaper reads
+   both off `backendRefs[]`, so the join matches a Gateway API `backendRef`
+   exactly: `target.namespace ?? route.namespace` is the namespace the target
+   really lives in, and a target whose `kind` is set and is not `Service` (or
+   `null`) is not drawn against any workload. A `backendRef` to another
+   namespace's Service of the same name is no longer drawn against this
+   namespace's workload.
 
    **An unattributable node is marked, never drawn bare.** A row whose
    `selector` is empty — an expression-only selector, or a CronJob, which has
@@ -2331,7 +2332,8 @@ Each row:
   "name": "shop", "namespace": "prod",
   "hosts": ["shop.example.com"], "subdomain": null,
   "path": "/", "pathType": "Prefix", "paths": [ ... ],
-  "targets": [{"service": "shop", "port": 80, "weight": null}],
+  "targets": [{"service": "shop", "port": 80, "weight": null,
+               "namespace": null, "kind": null}],
   "tls": {"termination": "edge", "insecurePolicy": null,
           "inlineCertificate": false, "secretName": "shop-tls"},
   "wildcardPolicy": null,
@@ -2380,6 +2382,20 @@ is why the row carries this and the edit dialog says it before the diff.
 
 `targets[].weight` is `null`, never `100`, on a single-backend exposure. A
 weight rendered where no split was configured reads as one that was.
+
+`targets[].namespace` and `targets[].kind` are `null` for a Route and an
+Ingress — neither backend's target can name another namespace or a kind other
+than Service, so there is nothing to report. For an HTTPRoute, they are read
+straight off `backendRefs[]`: `namespace` is the referenced namespace when the
+`backendRef` sets one (Gateway API requires a ReferenceGrant in the target
+namespace for the write to take effect; this console does not evaluate
+whether one exists — it reports the reference as written) and `null` when the
+`backendRef` omits it, meaning the route's own namespace; `kind` is the
+referenced kind (`Service` unless the `backendRef` names something else) and
+`null` only if the object itself omits `kind`, which the Gateway API default
+resolves to `Service`. A consumer matching a target against a known Service
+should treat `namespace: null` as the route's own namespace and `kind: null`
+as `Service`, never as "unknown".
 
 A Route's `tls` reports `inlineCertificate: true|false` and **never the key**.
 The key lives in the object's own spec — an OpenShift API design fact, not a

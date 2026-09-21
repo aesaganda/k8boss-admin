@@ -618,6 +618,34 @@ def test_a_rule_with_no_matches_renders_as_a_catch_all_not_a_blank():
     assert row["paths"][0]["pathType"] == "PathPrefix"
 
 
+def test_a_same_namespace_backendref_reports_a_null_target_namespace():
+    """No ``namespace`` on the backendRef means the route's own namespace.
+
+    The row echoes that as ``None`` rather than the route's namespace: the
+    object itself did not name one, and a consumer treats ``None`` as "this
+    route's namespace" (see docs/api-contract.md §13.4), never as "unknown".
+    """
+    obj = _httproute(rules=[{"backendRefs": [{"name": "api", "port": 8080}]}])
+
+    row = svc.httproute_row(obj, version="v1")
+
+    assert row["targets"][0]["namespace"] is None
+    assert row["targets"][0]["kind"] is None
+
+
+def test_a_cross_namespace_backendref_reports_its_own_namespace_and_kind():
+    obj = _httproute(rules=[{
+        "backendRefs": [
+            {"name": "api", "namespace": "shared", "kind": "Service", "port": 8080},
+        ],
+    }])
+
+    row = svc.httproute_row(obj, version="v1")
+
+    assert row["targets"][0]["namespace"] == "shared"
+    assert row["targets"][0]["kind"] == "Service"
+
+
 
 
 # --------------------------------------------------------------------------- #

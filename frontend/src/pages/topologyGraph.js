@@ -128,21 +128,21 @@ export function undecidableServices(workload, services) {
 /**
  * The §13 exposures that name any of these Services as a target.
  *
- * Matched by Service *name* within the exposure's own namespace, because that
- * is all the row carries: `_target()` keeps `{service, port, weight}` and the
- * HTTPRoute shaper drops `backendRefs[].namespace`. Gateway API permits a
- * cross-namespace `backendRef` (behind a ReferenceGrant), so an HTTPRoute here
- * pointing at another namespace's Service of the same name would be drawn
- * against this one. Stated in rule 11.13 rather than guessed at: the row cannot
- * tell the two apart, and dropping every Gateway exposure to avoid the rare
- * case would lose the ordinary one.
+ * Matched by Service name **and** namespace: a target's namespace is
+ * `target.namespace ?? route.namespace` (an HTTPRoute `backendRef` with no
+ * namespace targets its own route's namespace), which must equal the
+ * workload's. A target whose `kind` is set to something other than `Service`
+ * is never drawn against a workload — this join only proves Service
+ * attachment.
  */
 export function routesFor(routes, serviceNames, namespace) {
   if (!serviceNames.size) return [];
-  return (routes ?? []).filter(
-    (route) =>
-      route?.namespace === namespace &&
-      (route?.targets ?? []).some((target) => target?.service && serviceNames.has(target.service)),
+  return (routes ?? []).filter((route) =>
+    (route?.targets ?? []).some((target) => {
+      if (!target?.service || !serviceNames.has(target.service)) return false;
+      if (target.kind && target.kind !== 'Service') return false;
+      return (target.namespace ?? route?.namespace) === namespace;
+    }),
   );
 }
 
