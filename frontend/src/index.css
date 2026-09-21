@@ -842,6 +842,35 @@ body.admin-resizing * {
   max-width: 100%;
 }
 
+/* ── Replica stepper ────────────────────────────────────────────────────── */
+
+/*
+ * Two chevrons stacked beside a replica count, close enough together to read as
+ * one control rather than as two unrelated buttons.
+ *
+ * The padding override is not cosmetic: PatternFly's plain button is sized for
+ * a toolbar, and two of them stacked in a description list make that one row
+ * twice the height of every other row in the card — which reads as the value
+ * being emphasised rather than as it having a control attached.
+ */
+.admin-scale-stepper {
+  display: inline-flex;
+  align-items: center;
+}
+
+.admin-scale-stepper__buttons {
+  display: inline-flex;
+  flex-direction: column;
+  /* Kills the descender space between the two stacked buttons. */
+  line-height: 0;
+}
+
+.admin-scale-stepper__buttons .pf-v6-c-button {
+  padding-block: 0;
+  padding-inline: 0.25rem;
+  min-height: 0;
+}
+
 /* ── Nullable values (contract rule 11.2) ───────────────────────────────── */
 
 /*

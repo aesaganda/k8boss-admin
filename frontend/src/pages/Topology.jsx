@@ -65,6 +65,7 @@ import {
   Toolbar,
 } from '../components/ui';
 import ScaleDialog from '../components/ScaleDialog';
+import ScaleStepper from '../components/ScaleStepper';
 import RestartDialog from '../components/RestartDialog';
 import SuspendDialog from '../components/SuspendDialog';
 import RollbackDialog from '../components/RollbackDialog';
@@ -658,11 +659,32 @@ export default function Topology() {
             {
               label: 'Ready',
               value: (
-                <UsageCell
-                  used={selected.workload.replicas?.ready}
-                  total={selected.workload.replicas?.desired}
-                  reason="The controller has not reported its replica status, so how many are ready is unknown."
-                />
+                // Rule 11.13's canvas gets the same step control the workload
+                // page has, gated by the same §9 batch — an operator who found
+                // the workload here should not have to leave to add a replica.
+                // Still not a new write: the arrows open §6's scale dialog.
+                <span className="admin-cell-inline">
+                  <UsageCell
+                    used={selected.workload.replicas?.ready}
+                    total={selected.workload.replicas?.desired}
+                    reason="The controller has not reported its replica status, so how many are ready is unknown."
+                  />
+                  <ScaleStepper
+                    kind={selected.kind}
+                    plural={selected.plural}
+                    namespace={selected.namespace}
+                    name={selected.name}
+                    current={selected.workload.replicas?.desired ?? null}
+                    gate={capabilityGate(
+                      selected.kind,
+                      'scale',
+                      WORKLOAD_KINDS[selected.plural],
+                      withScopeNote(gate(`scale:${selected.plural}`), namespace),
+                    )}
+                    onApplied={reloadAll}
+                    testId="topology-scale-stepper"
+                  />
+                </span>
               ),
             },
             { label: 'Images', value: <ImagesCell images={selected.workload.images} max={3} /> },
