@@ -1,0 +1,262 @@
+# Publish the two runtime images to ghcr.io, multi-arch.
+#
+# It exists so that running this console does not require building it. The
+# compose file already names
+# `ghcr.io/aesaganda/k8boss-admin-{backend,frontend}:${IMAGE_TAG:-latest}` as
+# the image for each service, and `deploy/` names the same two — before this
+# workflow those tags did not exist, so `docker compose pull` failed and the
+# only working path was `--build`, which is a fifteen-minute first run and a
+# toolchain on the laptop of anyone who only wanted to look at the console.
+#
+# **Both architectures, because both are what people have.** The maintainers run
+# Apple silicon and the clusters run amd64. A single-arch amd64 tag on an
+# M-series Mac runs under emulation if it runs at all — the failure is not a
+# clean refusal but a container that starts and is slow, or one that dies inside
+# a native extension with `exec format error`.
+#
+# **Each architecture is built on its own native runner** and pushed by digest;
+# a second job then assembles the two digests into one manifest list under the
+# real tags. That is more machinery than handing `platforms:` a comma-separated
+# list, and it buys the thing the list cannot: no QEMU. The backend's arm64 leg
+# installs wheels through a real interpreter — cryptography, lxml, psycopg2 —
+# and under emulation that is the long pole of the whole workflow by a wide
+# margin. Native, the two legs cost about the same and run at once.
+#
+# **The arm64 runner label is `ubuntu-24.04-arm`, which this repository gets
+# because it is public.** GitHub's hosted arm64 runners are free on public
+# repositories and billed as larger runners anywhere else, and if that ever
+# stops being true the symptom is not a red job — the two arm64 legs sit queued
+# waiting for a runner that never arrives. The recovery is one label: change it
+# to `ubuntu-latest` in the matrix below and that leg builds under emulation
+# again, which is what `Set up QEMU` is still here for.
+name: Publish images
+
+on:
+  # Not `push: branches: [main]`. main is only reached through a pull request,
+  # which CI has already passed — but "already passed" is a fact about the
+  # branch protection settings, not about this file, and a setting that is
+  # relaxed one afternoon would start publishing untested images with nothing
+  # here to say so. Hanging the publish off CI's own completion puts the gate
+  # in the repository, where it is read and reviewed.
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  # Tags publish directly, because ci.yml does not run on tags at all — a
+  # workflow_run gate here would mean a `v*` tag never publishes anything. The
+  # commit a release tag points at reached main through the gate above.
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  # The only write this workflow has. `GITHUB_TOKEN` with `packages: write` is
+  # what logs in to ghcr.io below, so there is no personal access token to
+  # create, store or rotate for the common case.
+  packages: write
+
+jobs:
+  build:
+    # Two images times two architectures. `fail-fast: false` because a frontend
+    # leg that fails tells you nothing about the backend's, and cancelling the
+    # other three to report the first is three builds thrown away.
+    name: ${{ matrix.image.name }} (${{ matrix.platform.arch }})
+    runs-on: ${{ matrix.platform.runner }}
+    # A CI run that failed, was cancelled, or was triggered by a pull request
+    # publishes nothing. The `event == 'push'` clause is the load-bearing one:
+    # `branches: [main]` above filters on the *head* branch of the triggering
+    # run, so a pull request opened from a fork's branch named `main` satisfies
+    # it, and without this clause that fork's code would be built and pushed
+    # over `latest`. CI runs `push` only on this repository's own main.
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push')
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          # The backend's context is the repository ROOT, not ./backend. The
+          # image needs `deploy/olm` — §33's vendored Operator Lifecycle Manager
+          # release, read at run time and pinned by SHA-256 — and that directory
+          # is a sibling of `backend/`. Built from `./backend` the files are
+          # silently absent and the symptom appears only on a deployed
+          # container: `GET /api/portal/olm`, 500, FileNotFoundError. This is
+          # the same pairing ci.yml's `image` job and docker-compose.yml use,
+          # and the three have to stay in step.
+          - name: k8boss-admin-backend
+            context: .
+            dockerfile: backend/Dockerfile
+          - name: k8boss-admin-frontend
+            context: ./frontend
+            dockerfile: ./frontend/Dockerfile
+        platform:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Resolve the commit to publish
+        id: src
+        # Under `workflow_run` the github context describes the default branch
+        # at the moment this run started, NOT the run that triggered it — so
+        # `github.sha` is whatever is on main right now and `head_sha` is the
+        # commit CI actually went green on. They are usually identical and are
+        # not when two merges land close together, and in that window the
+        # unresolved version builds one commit and labels it another. Every
+        # later step takes the sha from here.
+        run: |
+          sha='${{ github.event.workflow_run.head_sha || github.sha }}'
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "short=${sha:0:7}" >> "$GITHUB_OUTPUT"
+          # ghcr.io rejects an uppercase path component and an account's name
+          # carries whatever case it was created with, so lowercase it once
+          # here rather than discovering it as a push failure on a fork.
+          owner=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')
+          echo "image=ghcr.io/$owner/${{ matrix.image.name }}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.src.outputs.sha }}
+
+      - name: Set up QEMU
+        # A no-op on a runner whose architecture already matches the leg it is
+        # building, which is the intended configuration. It is here so that
+        # switching an arm64 runner label back to `ubuntu-latest` — see the note
+        # at the top of this file — is a one-line edit and not a debugging
+        # session about binfmt.
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        # Both Dockerfiles use `RUN --mount=type=cache`, which the legacy
+        # builder rejects with a parse error rather than ignoring.
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.image.context }}
+          file: ${{ matrix.image.dockerfile }}
+          platforms: linux/${{ matrix.platform.arch }}
+          # No tags. Each leg pushes an unnamed manifest and reports its digest;
+          # tagging happens once, in `merge`, over both. A leg that tagged
+          # `latest` itself would leave `latest` pointing at whichever
+          # architecture finished last.
+          outputs: type=image,name=${{ steps.src.outputs.image }},push-by-digest=true,name-canonical=true,push=true
+          # Both Dockerfiles already carry their OCI labels (title, description,
+          # licenses, source), so there is no metadata-action here — it runs in
+          # `merge`, where the tags are.
+          #
+          # Cache scoped per image AND per architecture: one scope shared by two
+          # architectures is two builds evicting each other every run, which
+          # reads as a cache that simply never hits.
+          cache-from: type=gha,scope=${{ matrix.image.name }}-${{ matrix.platform.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image.name }}-${{ matrix.platform.arch }}
+
+      - name: Hand the digest to the merge job
+        run: |
+          mkdir -p "${{ runner.temp }}/digests"
+          digest='${{ steps.build.outputs.digest }}'
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.image.name }}-${{ matrix.platform.arch }}
+          path: ${{ runner.temp }}/digests/*
+          # An empty upload here becomes a merge job that assembles a manifest
+          # list out of one architecture and pushes it as if it were both.
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    # One manifest list per image, from the digests both legs pushed. Skipped
+    # automatically when `build` is skipped or fails, so the `if:` guard lives
+    # in one place.
+    name: ${{ matrix.image }} (manifest)
+    runs-on: ubuntu-latest
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [k8boss-admin-backend, k8boss-admin-frontend]
+    steps:
+      - name: Resolve the commit to publish
+        id: src
+        # Repeated rather than threaded through as a job output: `build` is a
+        # four-way matrix and a matrix job's outputs are whichever leg finished
+        # last, which is a coin toss dressed as a value.
+        run: |
+          sha='${{ github.event.workflow_run.head_sha || github.sha }}'
+          echo "short=${sha:0:7}" >> "$GITHUB_OUTPUT"
+          owner=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')
+          echo "image=ghcr.io/$owner/${{ matrix.image }}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: digests-${{ matrix.image }}-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/digests
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.src.outputs.image }}
+          # `latest` only from the default branch, never from a tag build: a
+          # `v1.2.3` tag cut from an old commit would otherwise move `latest`
+          # backwards, and the compose file's default is `latest`. Under
+          # `workflow_run` github.ref IS the default branch, so this reads true
+          # there and false on a tag push, which is what we want in both cases.
+          #
+          # The sha tag is spelled out rather than left to `type=sha`, which
+          # would take it from github.sha — the value the resolve step above
+          # exists to not trust.
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=sha-${{ steps.src.outputs.short }}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - name: Create and push the manifest list
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ steps.src.outputs.image }}@sha256:%s ' *)
+
+      - name: What was published
+        # So a run's summary answers "is my change in a tag yet, and which one"
+        # without opening the package listing. `imagetools inspect` is the check
+        # as well as the report: it fails if the list is not there, and it names
+        # the platforms it actually contains — which is how a manifest silently
+        # missing an architecture would be caught.
+        run: |
+          {
+            echo "### \`${{ matrix.image }}\`"
+            echo
+            echo '```'
+            docker buildx imagetools inspect '${{ steps.src.outputs.image }}:${{ steps.meta.outputs.version }}'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
