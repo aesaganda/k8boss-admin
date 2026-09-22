@@ -47,7 +47,7 @@ import DeleteDialog from '../components/DeleteDialog';
 import { workloads as workloadsApi } from '../api/client';
 import { useCluster } from '../contexts/ClusterContext';
 import { formatTimestamp, truncate } from '../utils/format';
-import { WORKLOAD_KINDS, capabilityGate, useAsync, useGates } from './_data';
+import { LIVE_POLL_MS, WORKLOAD_KINDS, capabilityGate, useAsync, useGates } from './_data';
 import {
   ActionButton,
   ChipList,
@@ -116,9 +116,16 @@ export default function WorkloadDetail() {
   const [dialog, setDialog] = useState(null); // 'scale' | 'restart' | 'suspend' | 'rollback' | 'edit' | 'delete' | 'labels' | 'annotations' | 'nodeSelector' | 'tolerations'
   const [podConsole, setPodConsole] = useState(null);
 
+  // Polled, because the subject changes without the operator: a scale is
+  // accepted by the API server in the same round trip and reconciled by the
+  // controller over the next several, so the re-read `onApplied` fires shows
+  // the count that was just set beside the pods that existed before it. The
+  // ring and the pod table are the two things an operator watches after a
+  // scale, and both are here.
   const detail = useAsync(() => workloadsApi.detail(plural, namespace, name), {
     key: `workload:${activeClusterId}:${plural}:${namespace}:${name}`,
     enabled: activeClusterId != null && Boolean(spec),
+    pollMs: LIVE_POLL_MS,
   });
 
   const rollout = useAsync(() => workloadsApi.rollout(plural, namespace, name), {
@@ -126,6 +133,7 @@ export default function WorkloadDetail() {
     // Only for kinds that have history. Asking for a Job's rollout would spend a
     // round trip to be told `unsupported`, which the kind table already knows.
     enabled: activeClusterId != null && Boolean(spec?.revisioned),
+    pollMs: LIVE_POLL_MS,
   });
 
   const checks = useMemo(() => buildChecks(spec, plural, namespace), [spec, plural, namespace]);

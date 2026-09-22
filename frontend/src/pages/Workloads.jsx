@@ -46,6 +46,7 @@ import { useNamespace } from '../contexts/NamespaceContext';
 import { truncate } from '../utils/format';
 import {
   KIND_TO_PLURAL,
+  LIVE_POLL_MS,
   WORKLOAD_KINDS,
   capabilityGate,
   useAsync,
@@ -146,11 +147,16 @@ export default function Workloads() {
   const [suspendTarget, setSuspendTarget] = useState(null);
   const [createTarget, setCreateTarget] = useState(null);
 
+  // Polled for the same reason the detail page is: the rows carry ready-over-
+  // desired, and a controller takes seconds to make the scale this page just
+  // confirmed true. Silent — the table never reverts to a skeleton under
+  // someone reading it, and a dropped poll keeps the last good listing.
   const { data, loading, error, reload } = useAsync(
     () => workloadsApi.list({ namespace, kind: kind ?? undefined }),
     {
       key: `workloads:${activeClusterId}:${namespace ?? '*'}:${kind ?? '*'}`,
       enabled: activeClusterId != null,
+      pollMs: LIVE_POLL_MS,
     },
   );
 
