@@ -48,6 +48,7 @@ import {
   Title,
   Tooltip,
 } from '@patternfly/react-core';
+import PencilAltIcon from '@patternfly/react-icons/dist/esm/icons/pencil-alt-icon';
 import SyncAltIcon from '@patternfly/react-icons/dist/esm/icons/sync-alt-icon';
 import {
   ActionButton,
@@ -548,6 +549,23 @@ export function YamlPanel({ group, version, plural, name, namespace, height = 52
  * the one the editor was seeded from, and taking the new manifest is a button
  * the operator presses, labelled with what it costs.
  */
+/**
+ * The edit affordance beside the value it edits, gated like every other write.
+ *
+ * `update` rather than `patch`: the dialogs behind these pencils send the whole
+ * object through §4's `PUT`, so the permission to ask for is the one that call
+ * preflights. Offered and disabled with the reason when the operator lacks it
+ * (rule 11.4) — a pencil that vanished would leave them hunting for a feature
+ * that is there.
+ */
+export function EditLink({ gate, label, onClick }) {
+  return (
+    <ActionButton gate={gate} variant="link" size="sm" icon={<PencilAltIcon />} ariaLabel={label} onClick={onClick}>
+      Edit
+    </ActionButton>
+  );
+}
+
 export function EditYamlDialog({ isOpen, group, version, plural, name, namespace, kind, onClose, onApplied }) {
   const [text, setText] = useState('');
   const [validity, setValidity] = useState({ valid: false, message: 'Loading…' });

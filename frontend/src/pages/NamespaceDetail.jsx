@@ -44,12 +44,13 @@ import {
 import { projects as projectsApi } from '../api/client';
 import DeleteNamespaceDialog from '../components/DeleteNamespaceDialog';
 import QuotaAdvisor from '../components/QuotaAdvisor';
+import MetadataDialog from '../components/MetadataDialog';
 import PodSecurityDialog from '../components/PodSecurityDialog';
 import GrantRoleDialog from '../components/GrantRoleDialog';
 import { useCluster } from '../contexts/ClusterContext';
 import { useNamespace } from '../contexts/NamespaceContext';
 import { useAsync, useGates } from './_data';
-import { ChipList, LabelsCell, Muted, NoClusterState } from './_parts';
+import { ChipList, EditLink, LabelsCell, Muted, NoClusterState } from './_parts';
 
 const MODES = ['enforce', 'audit', 'warn'];
 
@@ -59,6 +60,10 @@ const MODES = ['enforce', 'audit', 'warn'];
 //: set a Pod Security level is very often not one who may delete the namespace.
 const CHECKS = [
   { id: 'patch', verb: 'patch', group: 'core', resource: 'namespaces' },
+  // §11.14's labels and annotations forms send the whole object through §4's
+  // PUT, so `update` is the permission they preflight — not the `patch` the
+  // Pod Security level write above uses.
+  { id: 'update', verb: 'update', group: 'core', resource: 'namespaces' },
   { id: 'delete', verb: 'delete', group: 'core', resource: 'namespaces' },
   // §30. `create` is the one asked for here because it is the harder half: a
   // first grant creates the binding, and a caller who may patch an existing one
@@ -248,6 +253,8 @@ export default function NamespaceDetail() {
   const navigate = useNavigate();
 
   const [settingLevel, setSettingLevel] = useState(false);
+  // 'labels' | 'annotations' | null — which half of the namespace's metadata.
+  const [editingMetadata, setEditingMetadata] = useState(null);
   const [deleting, setDeleting] = useState(false);
   const [granting, setGranting] = useState(false);
 
@@ -316,6 +323,18 @@ export default function NamespaceDetail() {
 
       <PartialBanner unavailable={project.unavailable} />
 
+      {editingMetadata && (
+        <MetadataDialog
+          target={{ group: 'core', version: 'v1', plural: 'namespaces', namespace: null, name, kind: 'Namespace' }}
+          field={editingMetadata}
+          onClose={() => setEditingMetadata(null)}
+          onApplied={() => {
+            setEditingMetadata(null);
+            reload();
+          }}
+        />
+      )}
+
       {settingLevel && (
         <PodSecurityDialog
           namespace={name}
@@ -362,13 +381,34 @@ export default function NamespaceDetail() {
                     ),
                   },
                   { label: 'Age', value: <AgeCell seconds={project.age_seconds} timestamp={project.creationTimestamp} /> },
-                  { label: 'Labels', value: <LabelsCell labels={project.labels} max={6} /> },
+                  {
+                    label: 'Labels',
+                    value: (
+                      <span className="admin-cell-inline">
+                        <LabelsCell labels={project.labels} max={6} />
+                        <EditLink
+                          gate={gate('update')}
+                          label="Edit labels"
+                          onClick={() => setEditingMetadata('labels')}
+                        />
+                      </span>
+                    ),
+                  },
                   {
                     label: 'Annotations',
-                    value: Object.keys(project.annotations ?? {}).length ? (
-                      <LabelsCell labels={project.annotations} max={4} />
-                    ) : (
-                      <Muted>none</Muted>
+                    value: (
+                      <span className="admin-cell-inline">
+                        {Object.keys(project.annotations ?? {}).length ? (
+                          <LabelsCell labels={project.annotations} max={4} />
+                        ) : (
+                          <Muted>none</Muted>
+                        )}
+                        <EditLink
+                          gate={gate('update')}
+                          label="Edit annotations"
+                          onClick={() => setEditingMetadata('annotations')}
+                        />
+                      </span>
                     ),
                   },
                 ]}

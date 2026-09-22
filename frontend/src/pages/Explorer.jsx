@@ -63,6 +63,7 @@ import { realGroup, resources as resourcesApi, wireGroup } from '../api/client';
 import { useCluster } from '../contexts/ClusterContext';
 import { useNamespace } from '../contexts/NamespaceContext';
 import { objectAgeSeconds, objectName, objectNamespace, useAsync, useGates, useResourceList } from './_data';
+import MetadataDialog from '../components/MetadataDialog';
 import {
   ActionButton,
   ChipList,
@@ -222,6 +223,8 @@ export function Listing({ group, version, plural, catalog, initialName, initialN
     initialName ? { metadata: { name: initialName, namespace: initialNamespace } } : null,
   );
   const [editTarget, setEditTarget] = useState(null);
+  // `{row, field}` — which object, and which half of its metadata.
+  const [metadataTarget, setMetadataTarget] = useState(null);
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [creating, setCreating] = useState(false);
 
@@ -402,6 +405,14 @@ export function Listing({ group, version, plural, catalog, initialName, initialN
             setSelected(row);
             setEditTarget(row);
           }),
+          // §11.14, on the page that browses every kind the cluster serves:
+          // labels and annotations are metadata every object has, so the form
+          // over them belongs where every object is reachable rather than only
+          // on the half-dozen kinds with a page of their own.
+          menuAction('Edit labels…', gate('update'), () => setMetadataTarget({ row, field: 'labels' })),
+          menuAction('Edit annotations…', gate('update'), () =>
+            setMetadataTarget({ row, field: 'annotations' }),
+          ),
           menuAction('Delete…', gate('delete'), () => setDeleteTarget(row), { isDanger: true }),
         ]}
         emptyTitle={`No ${plural}`}
@@ -436,6 +447,25 @@ export function Listing({ group, version, plural, catalog, initialName, initialN
             }}
           />
         </Suspense>
+      )}
+
+      {metadataTarget && (
+        <MetadataDialog
+          target={{
+            group,
+            version,
+            plural,
+            name: objectName(metadataTarget.row),
+            namespace: objectNamespace(metadataTarget.row),
+            kind: entry?.kind,
+          }}
+          field={metadataTarget.field}
+          onClose={() => setMetadataTarget(null)}
+          onApplied={() => {
+            setMetadataTarget(null);
+            listing.reload();
+          }}
+        />
       )}
 
       {editTarget && (

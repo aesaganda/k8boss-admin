@@ -201,6 +201,46 @@ test.describe('the Details tab', () => {
     // find out what is wrong, and "Running" at the top of it is the lie.
     await expect(page.getByTestId('status-badge').first()).toHaveText('CrashLoopBackOff');
   });
+
+  test('the labels pencil edits this pod, seeded from its own manifest', async ({ page }) => {
+    let sent = null;
+    await mockApi(page, { preflight: ALLOW_ALL });
+    await page.route('**/resources/core/v1/pods/checkout-7d9f8b6c4-hk2xv**', async (route) => {
+      if (route.request().method() !== 'PUT') return route.fallback();
+      sent = JSON.parse(route.request().postData() ?? '{}');
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          dryRun: true,
+          applied: false,
+          verb: 'update',
+          target: { group: '', version: 'v1', resource: 'pods', namespace: 'prod', name: 'checkout-7d9f8b6c4-hk2xv' },
+          diff: { before: '', after: '', unified: '--- live\n+++ projected\n@@ -1,1 +1,1 @@\n-a\n+b\n', changed: true },
+          resourceVersion: '884214',
+          warnings: [],
+          auditId: 9101,
+        }),
+      });
+    });
+    await openPod(page, 'details');
+
+    // Why this is on the pod page at all: taking one misbehaving pod out of a
+    // Service's selector is a label edit on this object, and the operator is
+    // already here.
+    await page.getByRole('button', { name: 'Edit labels' }).click();
+    await expect(page.getByTestId('metadata-key-0')).toHaveValue('app');
+
+    await page.getByTestId('metadata-value-0').fill('checkout-quarantined');
+    await page.getByRole('button', { name: /Preview/ }).click();
+
+    await expect.poll(() => sent?.yaml, { timeout: 15000 }).toContain('checkout-quarantined');
+    // §4's PUT sends the object it read, so the pod's own spec goes back with
+    // it — and the version it was read at, which is what makes a concurrent
+    // change a 409 rather than an overwrite.
+    expect(sent.yaml).toContain('nodeName: ip-10-0-1-4');
+    expect(sent.resourceVersion).toBe('884213');
+  });
 });
 
 test.describe('the Metrics tab', () => {

@@ -1443,6 +1443,13 @@ def get_workload_detail(plural: str, namespace: str, name: str) -> dict:
 
     return {
         "workload": workload_row(obj, spec.kind, restarts_24h=restarts, now=now),
+        # The object's own annotations, on the detail and not on the row: a
+        # listing carries one `last-applied-configuration` per workload and they
+        # are each the size of the manifest. Here there is one object, and the
+        # page that offers to edit them has to be able to show what it would be
+        # editing. `{}` is a real empty: this read either succeeded or raised
+        # above, so there is no third answer to record.
+        "annotations": dict(_dig(obj, "metadata", "annotations", default={}) or {}),
         "spec": _spec_block(obj, spec.kind),
         # `[]` even when nothing was listed, paired with `partial` and the
         # `unavailable` entry that names the pod read — the convention this

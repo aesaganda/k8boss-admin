@@ -58,6 +58,7 @@ import PodScheduling from '../components/PodScheduling';
 import PodMetrics from '../components/PodMetrics';
 import PodTerminal from '../components/PodTerminal';
 import DeleteDialog from '../components/DeleteDialog';
+import MetadataDialog from '../components/MetadataDialog';
 import { events as eventsApi, pods as podsApi } from '../api/client';
 import { useCluster } from '../contexts/ClusterContext';
 import { formatTimestamp, truncate } from '../utils/format';
@@ -65,6 +66,7 @@ import { useAsync, useGates } from './_data';
 import {
   ActionButton,
   ChipList,
+  EditLink,
   EditYamlDialog,
   Muted,
   NoClusterState,
@@ -200,7 +202,7 @@ function quantities(map) {
   return entries.map(([key, value]) => `${key} ${value}`).join(' · ');
 }
 
-function DetailsTab({ pod }) {
+function DetailsTab({ pod, updateGate, onEdit }) {
   const conditions = pod.conditions ?? [];
   return (
     <Grid hasGutter>
@@ -257,12 +259,20 @@ function DetailsTab({ pod }) {
                 {
                   label: 'Labels',
                   value: (
-                    <ChipList
-                      values={Object.entries(pod.labels ?? {}).map(([key, value]) => `${key}=${value}`)}
-                      max={6}
-                      emptyText="none"
-                    />
+                    // Editable here for the reason an operator opens this page
+                    // at all: pulling one misbehaving pod out of a Service's
+                    // selector, to look at it without traffic on it, is a label
+                    // edit on this object and nothing else.
+                    <span className="admin-cell-inline">
+                      <ChipList
+                        values={Object.entries(pod.labels ?? {}).map(([key, value]) => `${key}=${value}`)}
+                        max={6}
+                        emptyText="none"
+                      />
+                      <EditLink gate={updateGate} label="Edit labels" onClick={() => onEdit('labels')} />
+                    </span>
                   ),
+                  help: 'A pod’s own labels. Removing one its controller selects on makes the controller create a replacement.',
                 },
                 {
                   label: 'Node selector',
@@ -289,7 +299,16 @@ function DetailsTab({ pod }) {
                 },
                 {
                   label: 'Annotations',
-                  value: <Muted>{Object.keys(pod.annotations ?? {}).length} set</Muted>,
+                  value: (
+                    <span className="admin-cell-inline">
+                      <Muted>{Object.keys(pod.annotations ?? {}).length} set</Muted>
+                      <EditLink
+                        gate={updateGate}
+                        label="Edit annotations"
+                        onClick={() => onEdit('annotations')}
+                      />
+                    </span>
+                  ),
                 },
                 {
                   label: 'Status message',
@@ -578,7 +597,7 @@ export default function PodDetail() {
         {!pod ? (
           <LoadingState label="Reading the pod…" />
         ) : tab === 'details' ? (
-          <DetailsTab pod={pod} />
+          <DetailsTab pod={pod} updateGate={gate('update')} onEdit={setDialog} />
         ) : tab === 'metrics' ? (
           <PodMetrics namespace={namespace} name={name} clusterId={activeClusterId} />
         ) : tab === 'yaml' ? (
@@ -616,6 +635,21 @@ export default function PodDetail() {
           />
         )}
       </div>
+
+      {(dialog === 'labels' || dialog === 'annotations') && (
+        <MetadataDialog
+          // `core`, matching the YAML editor below it: both go through §4's
+          // generic path, and the two have to name the group the same way or
+          // one of them reads an object the other cannot write.
+          target={{ group: 'core', version: 'v1', plural: 'pods', namespace, name, kind: 'Pod' }}
+          field={dialog}
+          onClose={() => setDialog(null)}
+          onApplied={() => {
+            setDialog(null);
+            detail.reload();
+          }}
+        />
+      )}
 
       {dialog === 'edit' && (
         <EditYamlDialog

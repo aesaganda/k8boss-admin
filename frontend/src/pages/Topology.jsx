@@ -79,7 +79,9 @@ import {
   Toolbar,
 } from '../components/ui';
 import ScaleDialog from '../components/ScaleDialog';
-import ScaleStepper from '../components/ScaleStepper';
+import PodRing from '../components/PodRing';
+import MetadataDialog from '../components/MetadataDialog';
+import TolerationsDialog from '../components/TolerationsDialog';
 import RestartDialog from '../components/RestartDialog';
 import SuspendDialog from '../components/SuspendDialog';
 import RollbackDialog from '../components/RollbackDialog';
@@ -103,7 +105,6 @@ import {
   ImagesCell,
   Muted,
   NoClusterState,
-  UsageCell,
 } from './_parts';
 import {
   MAX_SCALE,
@@ -302,6 +303,14 @@ function ActionsMenu({ node, gate, namespace, onPick }) {
       capabilityGate(node.kind, 'suspend', spec, scoped(`patch:${node.plural}`)),
     ],
     ['rollback', 'Roll back…', capabilityGate(node.kind, 'rollback', spec, scoped(`patch:${node.plural}`))],
+    // §11.14's three forms over one field. Same permission as Edit YAML,
+    // because they are the same call — and offered here for the same reason
+    // the five above are: an operator who found the workload on the canvas
+    // should not have to leave it to add a label.
+    ['labels', 'Edit labels…', scoped(`update:${node.plural}`)],
+    ['annotations', 'Edit annotations…', scoped(`update:${node.plural}`)],
+    ['nodeSelector', 'Edit node selector…', scoped(`update:${node.plural}`)],
+    ['tolerations', 'Edit tolerations…', scoped(`update:${node.plural}`)],
     ['edit', 'Edit YAML…', scoped(`update:${node.plural}`)],
     ['delete', `Delete ${node.kind}…`, scoped(`delete:${node.plural}`)],
   ];
@@ -877,28 +886,24 @@ export default function Topology() {
                 // page has, gated by the same §9 batch — an operator who found
                 // the workload here should not have to leave to add a replica.
                 // Still not a new write: the arrows open §6's scale dialog.
-                <span className="admin-cell-inline">
-                  <UsageCell
-                    used={selected.workload.replicas?.ready}
-                    total={selected.workload.replicas?.desired}
-                    reason="The controller has not reported its replica status, so how many are ready is unknown."
-                  />
-                  <ScaleStepper
-                    kind={selected.kind}
-                    plural={selected.plural}
-                    namespace={selected.namespace}
-                    name={selected.name}
-                    current={selected.workload.replicas?.desired ?? null}
-                    gate={capabilityGate(
-                      selected.kind,
-                      'scale',
-                      WORKLOAD_KINDS[selected.plural],
-                      withScopeNote(gate(`scale:${selected.plural}`), namespace),
-                    )}
-                    onApplied={reloadAll}
-                    testId="topology-scale-stepper"
-                  />
-                </span>
+                <PodRing
+                  ready={selected.workload.replicas?.ready}
+                  desired={selected.workload.replicas?.desired}
+                  status={selected.workload.status}
+                  kind={selected.kind}
+                  plural={selected.plural}
+                  namespace={selected.namespace}
+                  name={selected.name}
+                  gate={capabilityGate(
+                    selected.kind,
+                    'scale',
+                    WORKLOAD_KINDS[selected.plural],
+                    withScopeNote(gate(`scale:${selected.plural}`), namespace),
+                  )}
+                  onApplied={reloadAll}
+                  testId="topology-pod-ring"
+                  stepperTestId="topology-scale-stepper"
+                />
               ),
             },
             { label: 'Images', value: <ImagesCell images={selected.workload.images} max={3} /> },
@@ -1176,6 +1181,35 @@ export default function Topology() {
           plural={dialog.node.plural}
           namespace={dialog.node.namespace}
           name={dialog.node.name}
+          onClose={() => setDialog(null)}
+          onApplied={reloadAll}
+        />
+      )}
+      {(dialog?.id === 'labels' || dialog?.id === 'annotations' || dialog?.id === 'nodeSelector') && (
+        <MetadataDialog
+          target={{
+            group: WORKLOAD_KINDS[dialog.node.plural]?.group,
+            version: WORKLOAD_KINDS[dialog.node.plural]?.version,
+            plural: dialog.node.plural,
+            namespace: dialog.node.namespace,
+            name: dialog.node.name,
+            kind: dialog.node.kind,
+          }}
+          field={dialog.id}
+          onClose={() => setDialog(null)}
+          onApplied={reloadAll}
+        />
+      )}
+      {dialog?.id === 'tolerations' && (
+        <TolerationsDialog
+          target={{
+            group: WORKLOAD_KINDS[dialog.node.plural]?.group,
+            version: WORKLOAD_KINDS[dialog.node.plural]?.version,
+            plural: dialog.node.plural,
+            namespace: dialog.node.namespace,
+            name: dialog.node.name,
+            kind: dialog.node.kind,
+          }}
           onClose={() => setDialog(null)}
           onApplied={reloadAll}
         />

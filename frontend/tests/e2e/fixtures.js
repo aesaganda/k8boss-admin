@@ -392,6 +392,9 @@ export const FIXTURES = {
       schedule: null,
       last_schedule: null,
     },
+    // The object's own annotations, which §6's detail carries and its row does
+    // not — the detail page counts them beside the pencil that edits them.
+    annotations: { 'deployment.kubernetes.io/revision': '14' },
     spec: {
       containers: [
         {

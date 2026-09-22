@@ -35,6 +35,7 @@ import {
   Toolbar,
 } from '../components/ui';
 import { templatesFor } from '../components/templates';
+import MetadataDialog from '../components/MetadataDialog';
 import ScaleDialog from '../components/ScaleDialog';
 import RestartDialog from '../components/RestartDialog';
 import SuspendDialog from '../components/SuspendDialog';
@@ -139,6 +140,8 @@ export default function Workloads() {
   const setKind = (next) => navigate(next ? `/workloads/${next}` : '/workloads');
   const [search, setSearch] = useState('');
   const [scaleTarget, setScaleTarget] = useState(null);
+  // `{row, plural, field}` — which workload, and which half of its metadata.
+  const [metadataTarget, setMetadataTarget] = useState(null);
   const [restartTarget, setRestartTarget] = useState(null);
   const [suspendTarget, setSuspendTarget] = useState(null);
   const [createTarget, setCreateTarget] = useState(null);
@@ -151,7 +154,13 @@ export default function Workloads() {
     },
   );
 
-  const checks = useMemo(() => workloadChecks(namespace), [namespace]);
+  // `update` is in the batch for §11.14's labels form: it sends the whole
+  // object through §4's PUT, so the permission to ask about is the one that
+  // call preflights, not the `patch` the scale and restart entries use.
+  const checks = useMemo(
+    () => workloadChecks(namespace, { verbs: ['create', 'patch', 'scale', 'update'] }),
+    [namespace],
+  );
   const { gate } = useGates(checks, { enabled: activeClusterId != null });
 
   const rows = data?.items ?? [];
@@ -268,6 +277,12 @@ export default function Workloads() {
       menuAction(row.suspended ? 'Resume…' : 'Suspend…', suspend, () =>
         setSuspendTarget({ row, plural, suspend: !row.suspended }),
       ),
+      menuAction('Edit labels…', withScopeNote(gate(`update:${plural}`), namespace), () =>
+        setMetadataTarget({ row, plural, field: 'labels' }),
+      ),
+      menuAction('Edit annotations…', withScopeNote(gate(`update:${plural}`), namespace), () =>
+        setMetadataTarget({ row, plural, field: 'annotations' }),
+      ),
       { isSeparator: true },
       {
         title: 'Open workload',
@@ -355,6 +370,25 @@ export default function Workloads() {
             : 'The listing succeeded and returned nothing for this namespace and kind filter.'
         }
       />
+
+      {metadataTarget && (
+        <MetadataDialog
+          target={{
+            group: WORKLOAD_KINDS[metadataTarget.plural]?.group,
+            version: WORKLOAD_KINDS[metadataTarget.plural]?.version,
+            plural: metadataTarget.plural,
+            namespace: metadataTarget.row.namespace,
+            name: metadataTarget.row.name,
+            kind: metadataTarget.row.kind,
+          }}
+          field={metadataTarget.field}
+          onClose={() => setMetadataTarget(null)}
+          onApplied={() => {
+            setMetadataTarget(null);
+            reload();
+          }}
+        />
+      )}
 
       {scaleTarget && (
         <ScaleDialog
