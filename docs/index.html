@@ -1,0 +1,443 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>k8boss-admin — a Kubernetes console that never lies about what it did</title>
+<meta name="description" content="A Kubernetes administration console that preflights every permission, dry-runs every write, shows the diff, waits for confirmation, and audits what happened — including what failed.">
+<style>
+  :root{
+    --bg:#0b1220; --bg-alt:#0f1830; --panel:#121b34; --panel-2:#0e1730;
+    --border:#22304f; --border-soft:#1a2540;
+    --text:#e7ecf7; --text-dim:#a7b3cf; --text-faint:#71809f;
+    --brand:#5eb0ff; --brand-2:#7cf5c4; --amber:#f5c26b; --red:#ff8b8b;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --radius: 10px;
+    --maxw: 1080px;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0; background:
+      radial-gradient(1200px 600px at 15% -10%, #17264a 0%, transparent 60%),
+      radial-gradient(900px 500px at 100% 0%, #142244 0%, transparent 55%),
+      var(--bg);
+    color:var(--text); font-family:var(--sans); line-height:1.55;
+    -webkit-font-smoothing:antialiased;
+  }
+  a{color:var(--brand)}
+  .wrap{max-width:var(--maxw); margin:0 auto; padding:0 24px}
+  code, .mono{font-family:var(--mono)}
+
+  header.top{
+    position:sticky; top:0; z-index:20;
+    backdrop-filter: blur(10px);
+    background:rgba(11,18,32,.78);
+    border-bottom:1px solid var(--border-soft);
+  }
+  header.top .wrap{display:flex; align-items:center; justify-content:space-between; height:56px}
+  .brand{display:flex; align-items:center; gap:10px; font-weight:700; letter-spacing:.2px; text-decoration:none; color:var(--text)}
+  .brand .dot{width:9px;height:9px;border-radius:50%;background:var(--brand-2); box-shadow:0 0 10px var(--brand-2)}
+  nav.top-links{display:flex; gap:22px; font-size:14px}
+  nav.top-links a{color:var(--text-dim); text-decoration:none}
+  nav.top-links a:hover{color:var(--text)}
+
+  .hero{padding:88px 0 56px}
+  .kicker{
+    display:inline-flex; align-items:center; gap:8px;
+    font-size:12.5px; color:var(--brand-2); font-family:var(--mono);
+    border:1px solid #1f3a34; background:#0e1c1b; padding:5px 11px; border-radius:999px;
+  }
+  h1{font-size:clamp(30px,4.4vw,50px); line-height:1.1; margin:20px 0 18px; letter-spacing:-.02em}
+  h1 .accent{color:var(--brand)}
+  .lede{font-size:19px; color:var(--text-dim); max-width:700px; margin:0 0 30px}
+  .cta-row{display:flex; gap:12px; flex-wrap:wrap; margin-bottom:46px}
+  .btn{
+    display:inline-flex; align-items:center; gap:8px; padding:11px 18px; border-radius:8px;
+    font-size:14.5px; font-weight:600; text-decoration:none; border:1px solid transparent;
+  }
+  .btn.primary{background:var(--brand); color:#04101f}
+  .btn.primary:hover{background:#7cc2ff}
+  .btn.ghost{border-color:var(--border); color:var(--text)}
+  .btn.ghost:hover{border-color:var(--brand)}
+
+  .not-row{display:flex; flex-wrap:wrap; gap:10px}
+  .not-chip{
+    font-size:13px; color:var(--text-dim); border:1px solid var(--border);
+    background:var(--panel); padding:7px 12px; border-radius:8px;
+  }
+  .not-chip b{color:var(--red); font-weight:600}
+  .not-chip .yes{color:var(--brand-2); font-weight:600}
+
+  section{padding:64px 0; border-top:1px solid var(--border-soft)}
+  .eyebrow{font-family:var(--mono); font-size:12.5px; color:var(--brand-2); text-transform:uppercase; letter-spacing:.14em; margin:0 0 10px}
+  h2{font-size:clamp(22px,3vw,30px); margin:0 0 14px; letter-spacing:-.01em}
+  .section-lede{color:var(--text-dim); max-width:700px; margin:0 0 36px; font-size:15.5px}
+
+  /* Pipeline */
+  .pipeline{
+    display:grid; grid-template-columns:repeat(5,1fr); gap:0;
+    border:1px solid var(--border); border-radius:var(--radius); overflow:hidden;
+  }
+  .pipe-step{
+    padding:22px 18px; background:var(--panel); position:relative;
+    border-right:1px solid var(--border-soft);
+  }
+  .pipe-step:last-child{border-right:none}
+  .pipe-num{font-family:var(--mono); font-size:12px; color:var(--text-faint)}
+  .pipe-title{font-weight:700; margin:6px 0 8px; font-size:15.5px}
+  .pipe-desc{font-size:13px; color:var(--text-dim)}
+  .pipe-step::after{
+    content:"→"; position:absolute; right:-11px; top:50%; transform:translateY(-50%);
+    color:var(--text-faint); font-size:14px; z-index:2;
+  }
+  .pipe-step:last-child::after{content:""}
+  @media (max-width:820px){
+    .pipeline{grid-template-columns:1fr}
+    .pipe-step{border-right:none; border-bottom:1px solid var(--border-soft)}
+    .pipe-step::after{content:"↓"; right:auto; left:18px; top:auto; bottom:-11px}
+    .pipe-step:last-child{border-bottom:none}
+  }
+  .invariant-row{display:flex; gap:10px; flex-wrap:wrap; margin-top:28px}
+  .inv{
+    font-size:13px; color:var(--text-dim); border:1px dashed var(--border);
+    padding:8px 12px; border-radius:8px; font-family:var(--mono);
+  }
+
+  /* Mock UI panels */
+  .screen{
+    border:1px solid var(--border); border-radius:12px; overflow:hidden;
+    background:var(--panel); box-shadow:0 20px 60px -30px rgba(0,0,0,.6);
+  }
+  .screen .chrome{
+    display:flex; align-items:center; gap:7px; padding:10px 14px;
+    background:var(--panel-2); border-bottom:1px solid var(--border-soft);
+  }
+  .screen .chrome i{width:10px;height:10px;border-radius:50%;background:#33415f}
+  .screen .chrome .path{margin-left:8px; font-family:var(--mono); font-size:12px; color:var(--text-faint)}
+  .screen .body{padding:20px}
+
+  .tour-grid{display:grid; grid-template-columns:1fr 1fr; gap:26px}
+  @media (max-width:860px){.tour-grid{grid-template-columns:1fr}}
+
+  .diff-line{font-family:var(--mono); font-size:12.5px; padding:2px 10px; border-radius:3px; white-space:pre}
+  .diff-line.add{background:#0d2318; color:#8fe3ad}
+  .diff-line.rem{background:#2a1414; color:#ff9a9a}
+  .diff-line.ctx{color:var(--text-faint)}
+
+  .kv{display:flex; justify-content:space-between; font-size:13px; padding:7px 0; border-bottom:1px solid var(--border-soft)}
+  .kv:last-child{border-bottom:none}
+  .kv .k{color:var(--text-faint)}
+  .kv .v{font-family:var(--mono); color:var(--text)}
+  .pill{display:inline-block; font-size:11px; font-family:var(--mono); padding:2px 8px; border-radius:999px}
+  .pill.deny{background:#2a1414; color:var(--red)}
+  .pill.ok{background:#0d2318; color:var(--brand-2)}
+  .pill.warn{background:#2a2210; color:var(--amber)}
+
+  .audit-row{display:grid; grid-template-columns:74px 1fr 90px; gap:10px; align-items:start; font-size:12.5px; padding:9px 0; border-bottom:1px solid var(--border-soft)}
+  .audit-row:last-child{border-bottom:none}
+  .audit-row .t{color:var(--text-faint); font-family:var(--mono)}
+  .audit-row .what b{color:var(--text)}
+  .audit-row .what{color:var(--text-dim)}
+  .audit-row .hash{font-family:var(--mono); color:var(--text-faint); text-align:right}
+
+  /* Feature grid */
+  .cards{display:grid; grid-template-columns:repeat(3,1fr); gap:16px}
+  @media (max-width:900px){.cards{grid-template-columns:repeat(2,1fr)}}
+  @media (max-width:620px){.cards{grid-template-columns:1fr}}
+  .card{
+    border:1px solid var(--border); background:var(--panel); border-radius:10px; padding:18px;
+  }
+  .card h3{font-size:15px; margin:0 0 8px}
+  .card p{font-size:13.5px; color:var(--text-dim); margin:0}
+  .group-label{font-family:var(--mono); font-size:12px; color:var(--text-faint); text-transform:uppercase; letter-spacing:.1em; margin:36px 0 14px}
+  .group-label:first-child{margin-top:0}
+
+  /* Two bundles */
+  .bundles{display:grid; grid-template-columns:1fr 1fr; gap:20px}
+  @media (max-width:760px){.bundles{grid-template-columns:1fr}}
+  .bundle{border:1px solid var(--border); background:var(--panel); border-radius:10px; padding:22px}
+  .bundle .num{font-family:var(--mono); color:var(--brand-2); font-size:12.5px}
+  .bundle h3{margin:8px 0 10px; font-size:17px}
+  .bundle p{color:var(--text-dim); font-size:13.5px; margin:0 0 10px}
+  .flag{font-family:var(--mono); font-size:12px; color:var(--amber); background:#241d0c; border:1px solid #3a2f12; padding:3px 8px; border-radius:6px}
+  .boundary-note{margin-top:20px; padding:16px 18px; border-left:3px solid var(--brand); background:var(--panel-2); border-radius:0 8px 8px 0; font-size:13.5px; color:var(--text-dim)}
+
+  /* Architecture */
+  .arch{display:grid; grid-template-columns:repeat(4,1fr); gap:2px; border:1px solid var(--border); border-radius:10px; overflow:hidden}
+  @media (max-width:820px){.arch{grid-template-columns:repeat(2,1fr)}}
+  .arch .cell{background:var(--panel); padding:16px}
+  .arch .cell h4{margin:0 0 6px; font-size:13px; font-family:var(--mono); color:var(--brand)}
+  .arch .cell p{margin:0; font-size:12.5px; color:var(--text-dim)}
+
+  footer{padding:44px 0 70px; border-top:1px solid var(--border-soft)}
+  footer .wrap{display:flex; justify-content:space-between; flex-wrap:wrap; gap:16px; font-size:13px; color:var(--text-faint)}
+  footer a{color:var(--text-dim); text-decoration:none; margin-right:16px}
+  footer a:hover{color:var(--text)}
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="#top"><span class="dot"></span>k8boss-admin</a>
+    <nav class="top-links">
+      <a href="#safety">Safety model</a>
+      <a href="#tour">Product tour</a>
+      <a href="#features">Features</a>
+      <a href="#bundles">What it installs</a>
+      <a href="https://github.com/aesaganda/k8boss-admin">GitHub ↗</a>
+    </nav>
+  </div>
+</header>
+
+<div id="top"></div>
+<section class="hero" style="border-top:none; padding-top:88px">
+  <div class="wrap">
+    <span class="kicker">● read-only by default</span>
+    <h1>A Kubernetes console that<br>never lies about <span class="accent">what it did.</span></h1>
+    <p class="lede">
+      k8boss-admin browses every resource a cluster serves, and changes them through a path
+      that checks the permission first, dry-runs the write, shows you the diff, waits for a
+      confirmation, and records what happened — including what failed. It's the web UI for
+      the work you'd otherwise do with <code>kubectl</code> across several clusters, built on
+      the assumption that the dangerous part was never reading.
+    </p>
+    <div class="cta-row">
+      <a class="btn primary" href="https://github.com/aesaganda/k8boss-admin">View on GitHub</a>
+      <a class="btn ghost" href="https://github.com/aesaganda/k8boss-admin#sixty-second-quickstart">Sixty-second quickstart</a>
+      <a class="btn ghost" href="#safety">See the safety model</a>
+    </div>
+    <div class="not-row">
+      <span class="not-chip"><b>Not</b> a monitoring tool — no metrics storage, no alerting</span>
+      <span class="not-chip"><b>Not</b> a GitOps controller — no reconcile loop, no desired state</span>
+      <span class="not-chip"><b>Not</b> a security posture product — correlates, never claims "enforced"</span>
+      <span class="not-chip"><b>Not</b> a cache — <span class="yes">every page is a live read</span></span>
+    </div>
+  </div>
+</section>
+
+<section id="safety">
+  <div class="wrap">
+    <p class="eyebrow">The safety model</p>
+    <h2>One function. Every write goes through it.</h2>
+    <p class="section-lede">
+      Scale, restart, suspend, rollback, cordon, drain, create, replace, delete — every mutation
+      in the console, no exceptions, in this order:
+    </p>
+    <div class="pipeline">
+      <div class="pipe-step">
+        <div class="pipe-num">01</div>
+        <div class="pipe-title">Preflight</div>
+        <div class="pipe-desc">A <code>SelfSubjectAccessReview</code> for the exact verb, group, resource, namespace and name. A denial names the missing permission — never a bare "forbidden".</div>
+      </div>
+      <div class="pipe-step">
+        <div class="pipe-num">02</div>
+        <div class="pipe-title">Dry-run</div>
+        <div class="pipe-desc"><code>dryRun=All</code> on the same call. The projection comes from the API server's own admission chain — webhooks, defaulting, quota — not a simulation this console wrote.</div>
+      </div>
+      <div class="pipe-step">
+        <div class="pipe-num">03</div>
+        <div class="pipe-title">Diff</div>
+        <div class="pipe-desc">A unified diff with server bookkeeping normalised out. Nothing to change? The UI says so instead of offering a confirm button.</div>
+      </div>
+      <div class="pipe-step">
+        <div class="pipe-num">04</div>
+        <div class="pipe-title">Confirm</div>
+        <div class="pipe-desc"><code>applied: true</code> appears only when the write actually reached the cluster. A successful dry run is <code>applied: false</code> — always.</div>
+      </div>
+      <div class="pipe-step">
+        <div class="pipe-num">05</div>
+        <div class="pipe-title">Audit</div>
+        <div class="pipe-desc">Append-only, hash-chained. Every terminal state — including the denials, the conflicts and the failures.</div>
+      </div>
+    </div>
+    <div class="invariant-row">
+      <span class="inv">empty is never blind — <code>unavailable[]</code> + <code>partial: true</code></span>
+      <span class="inv">a number never derived is <code>null</code>, never <code>0</code></span>
+      <span class="inv"><code>PUT</code> carries the <code>resourceVersion</code> you were looking at</span>
+      <span class="inv">drain plans before it acts — evict / skip / blocked, per pod</span>
+    </div>
+  </div>
+</section>
+
+<section id="tour">
+  <div class="wrap">
+    <p class="eyebrow">Product tour</p>
+    <h2>What confirming a write actually looks like</h2>
+    <p class="section-lede">
+      Four moments from the console, redrawn here to show the shape of the interaction —
+      not a chart, a permission check that names itself.
+    </p>
+
+    <div class="tour-grid">
+      <div class="screen">
+        <div class="chrome"><i></i><i></i><i></i><span class="path">workloads / payments-api / scale</span></div>
+        <div class="body">
+          <div class="kv"><span class="k">verb</span><span class="v">patch</span></div>
+          <div class="kv"><span class="k">resource</span><span class="v">deployments/scale</span></div>
+          <div class="kv"><span class="k">dry run</span><span class="v">All</span></div>
+          <div style="margin-top:14px; display:flex; flex-direction:column; gap:2px">
+            <div class="diff-line ctx">  spec:</div>
+            <div class="diff-line rem">-   replicas: 3</div>
+            <div class="diff-line add">+   replicas: 6</div>
+            <div class="diff-line ctx">  status:</div>
+            <div class="diff-line ctx">    observedGeneration: 41</div>
+          </div>
+          <div style="margin-top:16px"><span class="pill ok">applied: false — dry run</span></div>
+        </div>
+      </div>
+
+      <div class="screen">
+        <div class="chrome"><i></i><i></i><i></i><span class="path">rbac / grant role → alice</span></div>
+        <div class="body">
+          <div class="kv"><span class="k">role</span><span class="v">edit</span></div>
+          <div class="kv"><span class="k">wildcard verb</span><span class="v">no</span></div>
+          <div class="kv"><span class="k">create rolebindings</span><span class="v">no</span></div>
+          <div class="kv"><span class="k">create pods/exec</span><span class="v" style="color:var(--amber)">yes</span></div>
+          <div class="kv"><span class="k">impersonate</span><span class="v">no</span></div>
+          <div style="margin-top:14px; font-size:12.5px; color:var(--text-dim)">
+            <code>create pods/exec</code> reads every Secret mounted into a pod. <code>edit</code>
+            hands over the namespace's credentials without a rule that mentions Secrets at all.
+          </div>
+        </div>
+      </div>
+
+      <div class="screen">
+        <div class="chrome"><i></i><i></i><i></i><span class="path">nodes / worker-3 / drain</span></div>
+        <div class="body">
+          <div class="kv"><span class="k">redis-cache-0</span><span class="v pill ok">evict</span></div>
+          <div class="kv"><span class="k">billing-worker-2</span><span class="v pill warn">skip · tolerates 300s</span></div>
+          <div class="kv"><span class="k">postgres-primary-0</span><span class="v pill deny">blocked · PDB</span></div>
+          <div style="margin-top:14px; font-size:12.5px; color:var(--text-dim)">
+            The blocked pod stops the drain before the node is cordoned. "Drained" over a pod
+            that never evicted is the sentence that gets a machine terminated with a database on it.
+          </div>
+        </div>
+      </div>
+
+      <div class="screen">
+        <div class="chrome"><i></i><i></i><i></i><span class="path">audit / recent</span></div>
+        <div class="body">
+          <div class="audit-row">
+            <span class="t">14:02:11</span>
+            <span class="what"><b>eren@ops</b> scaled deployments/payments-api to 6 — <span class="pill ok">applied</span></span>
+            <span class="hash">a91f…c02e</span>
+          </div>
+          <div class="audit-row">
+            <span class="t">14:01:48</span>
+            <span class="what"><b>ci-bot</b> deleted namespace staging-preview-88 — <span class="pill deny">rbac_denied</span></span>
+            <span class="hash">7bd2…91aa</span>
+          </div>
+          <div class="audit-row">
+            <span class="t">13:58:03</span>
+            <span class="what"><b>eren@ops</b> approved CSR for CN=jenkins-agent — <span class="pill ok">applied</span></span>
+            <span class="hash">3c40…f118</span>
+          </div>
+          <div style="margin-top:12px; font-size:12px; color:var(--text-faint)">
+            Every row is hash-chained to the one before it — not tamper-proof, tamper-<em>evident</em>.
+            A denial is recorded exactly like a success.
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="features">
+  <div class="wrap">
+    <p class="eyebrow">Under the read/write split</p>
+    <h2>A console that answers "unknown" instead of guessing</h2>
+    <p class="section-lede">
+      A sample of the screens that exist because the obvious version of them would have been
+      confidently wrong.
+    </p>
+
+    <div class="group-label">Reads that refuse to guess</div>
+    <div class="cards">
+      <div class="card"><h3>Why is this pod Pending</h3><p>Quotes the scheduler's own event, with the age of the attempt behind it, and a node table that only ever rules a node <em>out</em> — never claims one fits.</p></div>
+      <div class="card"><h3>Network policy, as sentences</h3><p><code>policyTypes: [Ingress]</code> with no egress section restricts nothing. The page says that outright instead of echoing YAML people misread.</p></div>
+      <div class="card"><h3>The certificate behind each route</h3><p>Expiry, and whether the SANs actually cover the hostname — a green row everywhere else in Kubernetes and a browser that refuses to connect.</p></div>
+      <div class="card"><h3>What a PodDisruptionBudget covers</h3><p>Counts live coverage from the pods it actually selects. <code>0 pods</code> is a finding, not a blank.</p></div>
+      <div class="card"><h3>Will this workload be admitted</h3><p>Does the ResourceQuota arithmetic before you submit, and names the one bound that's tight — including the compulsory-resource rule a 403 never mentions.</p></div>
+      <div class="card"><h3>Cluster status, five ways</h3><p>Leader leases, APIService availability, CRD establishment, webhook backends, kubelet skew — no single verdict, because a rollup that could not read one signal should not report the others as healthy.</p></div>
+    </div>
+
+    <div class="group-label">Writes that show their work</div>
+    <div class="cards">
+      <div class="card"><h3>Approve a CSR</h3><p>Decodes the PKCS#10 request and shows what it asks to <em>become</em> — an org of <code>system:masters</code> reads as cluster-admin, not as a routine renewal.</p></div>
+      <div class="card"><h3>Delete a namespace</h3><p>Reads every namespaced kind first: claims that get destroyed, addresses that stop answering, webhooks left without a backend. The diff shows the wrong object on purpose.</p></div>
+      <div class="card"><h3>Taint a node</h3><p><code>NoExecute</code> names the pods it deletes before you confirm — and says plainly that a PodDisruptionBudget does <em>not</em> stop it, unlike a drain.</p></div>
+      <div class="card"><h3>Grow a claim</h3><p>Refuses an arithmetic shrink before sending anything, and separates "the request changed" from "the volume grew" — often two different moments.</p></div>
+      <div class="card"><h3>Act as the signed-in operator</h3><p>Per cluster, per session: the API server checks permissions and writes its own audit log as the actual person — closing the gap ADR-0007 spent a document being honest about.</p></div>
+      <div class="card"><h3>One YAML editor, everywhere</h3><p>Same manifest editor for every kind, including your CRDs — with a warning, not a block, when a scalar reads differently than <code>kubectl</code> would send it.</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="bundles">
+  <div class="wrap">
+    <p class="eyebrow">What it ships, precisely</p>
+    <h2>Two bundles. That's the number being defended.</h2>
+    <p class="section-lede">
+      k8boss-admin is not a deployment engine — with two stated exceptions, and they are
+      different acts. Both go through the same write funnel as everything else: no reconcile
+      loop, no desired state, no watch. Both are off by default.
+    </p>
+    <div class="bundles">
+      <div class="bundle">
+        <div class="num">§14</div>
+        <h3>A pinned HAProxy ingress controller</h3>
+        <p>An exposure written into a cluster with no controller is an object that routes
+        nothing while looking created. Eight objects, one write funnel, live status like
+        every other page.</p>
+        <span class="flag">ADMIN_ROUTER_MANAGE_ENABLED</span>
+      </div>
+      <div class="bundle">
+        <div class="num">§33</div>
+        <h3>Operator Lifecycle Manager itself</h3>
+        <p>Vendored byte-for-byte from upstream's release and pinned by SHA-256. Twenty-six
+        writes in two phases, because §16's operator portal on a cluster with no OLM is
+        empty, correct and useless.</p>
+        <span class="flag">ADMIN_OLM_INSTALL_ENABLED</span>
+      </div>
+    </div>
+    <div class="boundary-note">
+      <strong>What creating an OLM Subscription is not:</strong> §16's operator portal ships no
+      catalog, pins no image and installs nothing. It writes one object into an API the cluster
+      already serves — exactly what the YAML editor could — and Operator Lifecycle Manager, the
+      cluster's own software, does the installing afterwards. <code>applied: true</code> there
+      means one <code>Subscription</code> exists, and never that an operator is running.
+    </div>
+  </div>
+</section>
+
+<section id="architecture">
+  <div class="wrap">
+    <p class="eyebrow">Shape of the thing</p>
+    <h2>FastAPI backend, React/PatternFly SPA</h2>
+    <p class="section-lede">Every write is written once, in one place, and everything else calls it.</p>
+    <div class="arch">
+      <div class="cell"><h4>app/api/</h4><p>Thin FastAPI routers — parse, call, envelope. Logic lives below this layer, never in it.</p></div>
+      <div class="cell"><h4>app/resources/ · app/services/</h4><p>Discovery, generic read/YAML, and the typed read models — workload rows, scheduling, network correlation, TLS coverage, quota arithmetic.</p></div>
+      <div class="cell"><h4>app/admin/</h4><p>Every write. The single funnel — gate → preflight → apply → diff → audit — plus every feature's <code>apply_fn</code>.</p></div>
+      <div class="cell"><h4>app/audit/</h4><p>Append-only, hash-chained trail: <code>record()</code>, <code>query()</code>, <code>verify()</code>, export.</p></div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div>
+      <a href="https://github.com/aesaganda/k8boss-admin">GitHub</a>
+      <a href="https://github.com/aesaganda/k8boss-admin/blob/main/docs/safety-model.md">Safety model</a>
+      <a href="https://github.com/aesaganda/k8boss-admin/blob/main/docs/api-contract.md">API contract</a>
+      <a href="https://github.com/aesaganda/k8boss-admin#readme">README</a>
+    </div>
+    <div>k8boss-admin — split from K8Boss, shares no code with it.</div>
+  </div>
+</footer>
+
+</body>
+</html>
