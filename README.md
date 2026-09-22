@@ -692,7 +692,11 @@ version being that there is no undo for a deleted StatefulSet.
   bare node is the claim that nothing reaches it. Selecting one opens the
   workload's own read beside it, with the same Scale / Restart / Suspend /
   Roll back / Edit / Delete dialogs the workload page offers — and the
-  selection is in the URL, so the panel is a link.
+  selection is in the URL, so the panel is a link. The canvas zooms (the `+`/`-`
+  controls, or the wheel, both aimed at the cursor) and pans (click-drag), with
+  the first zoom aimed at the drawn content rather than at the middle of the
+  fixed-width canvas it sits on — a small namespace otherwise zooms toward its
+  own blank margin.
 * **Pods** — with `phase_detail` for the cases where the phase lies: a `Running`
   pod whose container is in `CrashLoopBackOff` is not reported as Running.
 * **A page per pod**, at `/pods/{namespace}/{name}`, with eight tabs and the

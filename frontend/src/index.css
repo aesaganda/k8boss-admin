@@ -1895,6 +1895,10 @@ body.admin-resizing * {
 
 /* ── Topology (rule 11.13) ──────────────────────────────────────────────── */
 
+.admin-topology__viewport {
+  position: relative;
+}
+
 .admin-topology {
   display: block;
   max-width: 100%;
@@ -1902,7 +1906,37 @@ body.admin-resizing * {
      element. A fixed height plus `meet` reserved space the drawing then
      scaled out of. */
   height: auto;
-  overflow: visible;
+  /* `hidden`, not `visible`: an SVG root clips to its viewBox by default, and
+     at scale 1 the viewBox is the whole drawing, so nothing was ever outside
+     it to clip and `visible` cost nothing. Panning and zooming make that
+     false — most of the drawing is routinely outside the visible rectangle —
+     and `visible` would let it paint past the container's edges into the page
+     around it instead of being cut at the frame the zoom controls promise. */
+  overflow: hidden;
+  cursor: grab;
+  /* Panning is handled entirely by our own pointer events; without this a
+     touchscreen's native scroll gesture fights the drag on every move. */
+  touch-action: none;
+  /* Without this, dragging the canvas across a node's label highlights it as
+     a text selection — the browser's own default drag behaviour for text,
+     fighting the pan every time the pointer passes over a name. */
+  user-select: none;
+}
+
+.admin-topology:active {
+  cursor: grabbing;
+}
+
+.admin-topology__controls {
+  position: absolute;
+  left: var(--admin-gap-sm);
+  bottom: var(--admin-gap-sm);
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--pf-t--global--border--radius--small, 4px);
+  overflow: hidden;
+  border: 1px solid var(--admin-border);
+  background: var(--pf-t--global--background--color--primary--default, #fff);
 }
 
 .admin-topology__truncated {

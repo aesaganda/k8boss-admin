@@ -319,3 +319,91 @@ export function layoutTopology(groups, { width = CANVAS_W } = {}) {
 
   return { groups: placed, width, height: shelfY + shelfHeight + GAP };
 }
+
+/* ── View: zoom & pan ───────────────────────────────────────────────────── */
+
+/**
+ * A view is `{ scale, cx, cy }` — the drawing shown at `scale`, centred on
+ * graph point `(cx, cy)`. It is state a page keeps, not something computed
+ * from the graph, so panning and zooming are pure arithmetic over three
+ * numbers rather than over the SVG's own transform (which a browser exposes
+ * inconsistently across zoom/pan implementations).
+ *
+ * `1` is the floor: the graph fits the viewport exactly there, and letting an
+ * operator zoom out further would show empty margin around a drawing that is
+ * already whole. `6` is an arbitrary ceiling past which a single node fills
+ * more than the screen and zooming stops being useful navigation.
+ */
+export const MIN_SCALE = 1;
+export const MAX_SCALE = 6;
+
+export function clampScale(scale) {
+  return Math.min(MAX_SCALE, Math.max(MIN_SCALE, scale));
+}
+
+/** The view that shows the whole drawing at 1:1 — "Reset view", and what a
+ *  page with no interaction yet renders. */
+export function fitView(graph) {
+  return { scale: MIN_SCALE, cx: graph.width / 2, cy: graph.height / 2 };
+}
+
+/**
+ * The centre of the drawn content — as distinct from the centre of the
+ * canvas it is laid out on.
+ *
+ * `layoutTopology` returns a fixed `graph.width` (`CANVAS_W`, deliberately —
+ * see its own docstring) regardless of how much of it the content actually
+ * uses: a namespace with only a handful of workloads fills a fraction of that
+ * width and leaves the rest blank. Zooming in around `graph.width / 2` in that
+ * case magnifies the blank half rather than anything drawn — the first zoom
+ * click on a small namespace would zoom away from its own content. This is
+ * the point a zoom that has no cursor to anchor on should aim for instead.
+ */
+export function contentCenter(graph) {
+  if (!graph.groups.length) return { x: graph.width / 2, y: graph.height / 2 };
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const group of graph.groups) {
+    minX = Math.min(minX, group.x);
+    minY = Math.min(minY, group.y);
+    maxX = Math.max(maxX, group.x + group.width);
+    maxY = Math.max(maxY, group.y + group.height);
+  }
+  return { x: (minX + maxX) / 2, y: (minY + maxY) / 2 };
+}
+
+/** The visible rectangle, in graph coordinates, for a view over a graph. */
+export function viewBoxFor(view, graph) {
+  const w = graph.width / view.scale;
+  const h = graph.height / view.scale;
+  return { x: view.cx - w / 2, y: view.cy - h / 2, w, h };
+}
+
+/**
+ * Zoom by `factor` (>1 in, <1 out).
+ *
+ * `at` is a point in graph coordinates — the cursor, for a wheel zoom — that
+ * stays under the cursor rather than the drawing recentring under it, which is
+ * the difference between a zoom that feels aimed and one that feels random.
+ * Omitted for the zoom buttons, which zoom on the view's own centre.
+ */
+export function zoomView(view, graph, factor, at = null) {
+  const scale = clampScale(view.scale * factor);
+  if (scale === view.scale) return view;
+  if (!at) return { ...view, scale };
+
+  const before = viewBoxFor(view, graph);
+  const fracX = (at.x - before.x) / before.w;
+  const fracY = (at.y - before.y) / before.h;
+
+  const w = graph.width / scale;
+  const h = graph.height / scale;
+  return { scale, cx: at.x - fracX * w + w / 2, cy: at.y - fracY * h + h / 2 };
+}
+
+/** Pan by a delta already expressed in graph units, not screen pixels. */
+export function panView(view, dx, dy) {
+  return { ...view, cx: view.cx - dx, cy: view.cy - dy };
+}

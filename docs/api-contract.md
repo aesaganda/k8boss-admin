@@ -1626,6 +1626,23 @@ trace.
    is added by this view.** The selection lives in `?selected=`, for rule 8's
    reason.
 
+   **Zoom and pan are view state, never graph state.** A `{scale, cx, cy}`
+   the page keeps to itself — which rectangle of the same drawing the
+   `viewBox` currently shows — and nothing computed from it is fed back into
+   `buildTopology` or `layoutTopology`; the join and the layout are exactly as
+   correct at any zoom level as at the default one. `view === null` means "fit
+   the whole drawing", which is what a page with no interaction yet renders and
+   what a namespace or cluster switch resets to — a manual view aimed at a
+   different scope's layout is aimed at nodes that are no longer there. The one
+   subtlety worth stating: `layoutTopology`'s canvas is a **fixed** width
+   (`CANVAS_W`, its own docstring says why), so a namespace with few workloads
+   uses only a fraction of it, and the first zoom click anchors on the drawn
+   content's own centre rather than on that fixed canvas's nominal middle —
+   otherwise the first zoom on a small namespace would magnify blank canvas
+   instead of anything drawn. Every zoom after that, and every pan, is anchored
+   on wherever the operator has already navigated to instead, so a deliberate
+   pan is never pulled back toward the content by a later zoom click.
+
 ---
 
 ## 12. Console authentication and users
