@@ -39,6 +39,24 @@ import { podSpecOf, putObject, readBlocked, useEditableObject, withPodSpec } fro
 
 const LAST_APPLIED = 'kubectl.kubernetes.io/last-applied-configuration';
 
+/**
+ * Why a Secret cannot be edited this way, stated before the round trip.
+ *
+ * §4's read redacts a Secret — every `data` value comes back `null` and
+ * kubectl's `last-applied-configuration` is dropped, because that annotation
+ * holds a verbatim copy of the values — and this console never asks for the
+ * revealed form. So the object in hand is not the object on the cluster, and
+ * sending it back would either be refused by the API server (null is not
+ * base64) or, for a Secret with no data at all, quietly drop that annotation.
+ *
+ * Rule 11.4 says the action is offered and disabled with the reason rather than
+ * hidden, so the entry stays in the menu and this is what it says.
+ */
+const SECRET_REFUSAL =
+  'A Secret’s values are withheld from this console’s read, so the whole object cannot be sent back ' +
+  'with a label attached — the copy in this dialog has null where every value should be. Use ' +
+  '`kubectl label` (or `kubectl annotate`), which patches the metadata without rewriting the data.';
+
 const FIELDS = {
   labels: {
     noun: 'Labels',
@@ -149,6 +167,7 @@ export function MetadataDialog({ target, field, onClose, onApplied }) {
 
   const blocked =
     readBlocked({ loading, error, object, resourceVersion }) ||
+    (object?.kind === 'Secret' ? SECRET_REFUSAL : null) ||
     (copy.rollout && object && !podSpecOf(object, target.kind)
       ? `A ${target.kind} has no pod template on this object, so there is no node selector to set here.`
       : edited.some((row) => !row.key.trim())
@@ -202,6 +221,12 @@ export function MetadataDialog({ target, field, onClose, onApplied }) {
             This field is part of the pod template, so changing it changes the template hash and the
             controller replaces every pod. A pod whose selector matches no node stays Pending rather
             than being placed somewhere close enough.
+          </Alert>
+        )}
+
+        {object?.kind === 'Secret' && (
+          <Alert isInline variant="warning" title="A Secret cannot be edited here" data-testid="metadata-secret">
+            {SECRET_REFUSAL}
           </Alert>
         )}
 

@@ -1647,9 +1647,20 @@ trace.
 14. **A form over one field of an object is §4's update, and never an endpoint
    of its own.** Labels and annotations are metadata **every** object has, so
    the form over them is offered wherever an object is: the workload page and
-   its listing, the pod page, the namespace page, §11.13's topology panel — and
-   the §4 explorer, which reaches every kind the cluster serves and is what
-   makes the claim general rather than a list of six kinds. The workload page
+   its listing, the pod page, the namespace page, §11.13's topology panel, the
+   §4 explorer — which reaches every kind the cluster serves and is what makes
+   the claim general rather than a list of six kinds — and every typed listing,
+   from the one component they all render through rather than copied into each
+   page. A listing opts out with `metadataForms: false`, which §25's
+   certificate requests do: a decided one is deliberately offered nothing.
+
+   **A Secret is refused before the round trip.** §4 redacts one on every read
+   this console makes — each `data` value comes back `null`, and kubectl's
+   `last-applied-configuration` is dropped because it holds a verbatim copy of
+   those values — so the object in hand is not the object on the cluster, and
+   sending it back would be refused by the API server or would quietly drop
+   that annotation. The entry stays in the menu (rule 11.4) and says to use
+   `kubectl label`, which patches metadata without rewriting data. The workload page
    also edits the pod template's `nodeSelector` and `tolerations` — the same
    control over the same shape, with a different consequence stated on it — and
    the topology panel offers

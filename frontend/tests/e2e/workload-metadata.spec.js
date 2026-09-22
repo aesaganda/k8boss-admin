@@ -316,6 +316,109 @@ test.describe('any kind at all', () => {
   });
 });
 
+test.describe('the typed listings', () => {
+  /** One row per kind, in the §8 shape those tabs list. */
+  async function mockTypedListings(page) {
+    await page.route('**/resources/core/v1/configmaps?**', (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          items: [{ name: 'app-config', namespace: 'prod', keys: ['LOG_LEVEL'], data_bytes: 12, age_seconds: 900 }],
+          continue: null,
+          remaining: null,
+          partial: false,
+          unavailable: [],
+        }),
+      }),
+    );
+    await page.route('**/resources/core/v1/secrets?**', (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          items: [
+            {
+              name: 'checkout-tls',
+              namespace: 'prod',
+              type: 'kubernetes.io/tls',
+              keys: ['tls.crt', 'tls.key'],
+              data_bytes: 2048,
+              age_seconds: 900,
+            },
+          ],
+          continue: null,
+          remaining: null,
+          partial: false,
+          unavailable: [],
+        }),
+      }),
+    );
+  }
+
+  test('a ConfigMap row offers the form, from the listing every typed page renders through', async ({
+    page,
+  }) => {
+    await mockApi(page, {
+      preflight: ALLOW_ALL,
+      yaml: [
+        'apiVersion: v1',
+        'kind: ConfigMap',
+        'metadata:',
+        '  name: app-config',
+        '  namespace: prod',
+        '  resourceVersion: "770"',
+        '  labels:',
+        '    app: shop',
+        '',
+      ].join('\n'),
+    });
+    await mockTypedListings(page);
+
+    await page.goto('/config/configmaps');
+    await expectPageRendered(page, 'ConfigMaps');
+    await page.getByRole('button', { name: 'Kebab toggle' }).first().click();
+    await page.getByRole('menuitem', { name: 'Edit labels…' }).click();
+
+    await expect(page.getByTestId('metadata-key-0')).toHaveValue('app');
+  });
+
+  test('a Secret says why this console cannot write it back, rather than failing at the dry run', async ({
+    page,
+  }) => {
+    await mockApi(page, {
+      preflight: ALLOW_ALL,
+      // §4 redacts a Secret on every read this console makes: the keys are
+      // there and every value is null. That is the object the form would be
+      // sending back.
+      yaml: [
+        'apiVersion: v1',
+        'kind: Secret',
+        'metadata:',
+        '  name: checkout-tls',
+        '  namespace: prod',
+        '  resourceVersion: "771"',
+        'type: kubernetes.io/tls',
+        'data:',
+        '  tls.crt: null',
+        '  tls.key: null',
+        '',
+      ].join('\n'),
+    });
+    await mockTypedListings(page);
+
+    await page.goto('/config/secrets');
+    await expectPageRendered(page, 'Secrets');
+    await page.getByRole('button', { name: 'Kebab toggle' }).first().click();
+    await page.getByRole('menuitem', { name: 'Edit labels…' }).click();
+
+    // Rule 11.4: offered, and refused with the reason — not offered and then
+    // rejected by the API server after a round trip and an audit row.
+    await expect(page.getByTestId('metadata-secret')).toContainText('kubectl label');
+    await expect(page.getByRole('button', { name: /Preview/ })).toBeDisabled();
+  });
+});
+
 test('without update, all three pencils are disabled with the reason', async ({ page }) => {
   await openWorkload(page, { preflight: DENY_UPDATE });
 

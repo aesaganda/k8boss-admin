@@ -339,6 +339,14 @@ export default function Access() {
         version: 'v1',
         plural: 'certificatesigningrequests',
         namespaced: false,
+        // No §11.14 forms here, which is the one listing where they are not
+        // ordinary. A CertificateSigningRequest exists for minutes and is
+        // deleted by the control plane once it is finished; the row for a
+        // decided one deliberately offers nothing at all, because there is no
+        // un-approve and a menu on it would be a menu of things that cannot be
+        // done. Labelling a request nobody will read again is not the exception
+        // worth reopening that for.
+        metadataForms: false,
         refreshToken: csrRefresh,
         rowKey: (row) => row.name,
         emptyDescription:

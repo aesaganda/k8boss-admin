@@ -63,10 +63,12 @@ import {
   SearchInput,
   Skeleton,
   Toolbar,
+  menuAction,
 } from '../components/ui';
 import DebugPanel from '../components/DebugPanel';
 import { load } from '../components/clusterYaml';
 import LogViewer from '../components/LogViewer';
+import MetadataDialog from '../components/MetadataDialog';
 import MutationDialog from '../components/MutationDialog';
 import PodTerminal from '../components/PodTerminal';
 import YamlEditor from '../components/YamlEditor';
@@ -827,20 +829,27 @@ export function ResourceTabsPage({ title, subtitle, tabs, initialTab, basePath }
   // is the masthead's, not absent: a check with no namespace asks whether the
   // caller may create the resource *anywhere*, and an operator holding a grant
   // in one namespace would be told they cannot do something they can.
-  const createChecks = useMemo(
+  //
+  // `update` rides in the same batch, for §11.14's labels and annotations
+  // forms: they are §4's PUT, so that is the verb they preflight — and asking
+  // for it here rather than per row keeps it one call for the page however
+  // many rows the listing returns.
+  const checks = useMemo(
     () =>
       tabs
         .filter((tab) => !tab.render && tab.plural)
-        .map((tab) => ({
-          id: `create:${tab.key}`,
-          verb: 'create',
-          group: tab.group,
-          resource: tab.plural,
-          namespace: tab.namespaced ? namespace : null,
-        })),
+        .flatMap((tab) =>
+          ['create', 'update'].map((verb) => ({
+            id: `${verb}:${tab.key}`,
+            verb,
+            group: tab.group,
+            resource: tab.plural,
+            namespace: tab.namespaced ? namespace : null,
+          })),
+        ),
     [tabs, namespace],
   );
-  const { gate: createGate } = useGates(createChecks, { enabled: activeClusterId != null });
+  const { gate } = useGates(checks, { enabled: activeClusterId != null });
 
   // A section nobody serves is sent to the first one rather than rendered as
   // it: falling back silently would show PersistentVolumeClaims under whatever
@@ -893,7 +902,7 @@ export function ResourceTabsPage({ title, subtitle, tabs, initialTab, basePath }
             key={`${active.key}:${active.refreshToken ?? ''}`}
             tab={active}
             catalog={catalog}
-            createGate={createGate}
+            gate={gate}
           />
         ))}
     </>
@@ -975,12 +984,14 @@ function createCapability(tab, catalog, entry, version) {
   return null;
 }
 
-function ResourceTabBody({ tab, catalog, createGate }) {
+function ResourceTabBody({ tab, catalog, gate }) {
   const { selected } = useNamespace();
   const namespace = tab.namespaced ? selected : null;
   const [search, setSearch] = useState('');
   const [detailRow, setDetailRow] = useState(null);
   const [creating, setCreating] = useState(false);
+  // `{row, field}` — §11.14's form, over whichever row's metadata.
+  const [metadataTarget, setMetadataTarget] = useState(null);
 
   const entry = useCatalogEntry(tab, catalog);
   const version = (tab.resolveVersion && entry?.version) || tab.version;
@@ -1002,6 +1013,32 @@ function ResourceTabBody({ tab, catalog, createGate }) {
 
   const onRowClick = tab.detail ? (row) => setDetailRow(row) : tab.onRowClick;
 
+  // Every §4 listing gets the labels and annotations forms, appended to
+  // whatever the tab's own menu offers. They are metadata every object has, so
+  // this belongs in the one component every typed listing renders through
+  // rather than copied into each page — and a kind whose `update` the caller
+  // does not hold, or that cannot be updated at all, gets rule 11.4's disabled
+  // entry with the reason on it.
+  const updateGate = gate(`update:${tab.key}`);
+  const actions = useCallback(
+    tab.metadataForms === false
+      ? tab.actions
+      : (row) => {
+          const own = tab.actions?.(row) ?? [];
+          return [
+            ...own,
+            // Only when there is something to separate from. A leading
+            // separator in a two-item menu is a rule above the first entry.
+            ...(own.length ? [{ isSeparator: true }] : []),
+            menuAction('Edit labels…', updateGate, () => setMetadataTarget({ row, field: 'labels' })),
+            menuAction('Edit annotations…', updateGate, () =>
+              setMetadataTarget({ row, field: 'annotations' }),
+            ),
+          ];
+        },
+    [tab, updateGate],
+  );
+
   // The kind the button offers to create. Never guessed from the title: until
   // discovery answers, the button says "Create…" and the gate says why, which
   // is the honest version of not knowing yet.
@@ -1009,7 +1046,7 @@ function ResourceTabBody({ tab, catalog, createGate }) {
   const capability = createCapability(tab, catalog, entry, version);
   const createAllowed = capability
     ? { allowed: false, reason: capability }
-    : createGate(`create:${tab.key}`);
+    : gate(`create:${tab.key}`);
 
   const table = (
     <>
@@ -1065,7 +1102,7 @@ function ResourceTabBody({ tab, catalog, createGate }) {
         onRetry={listing.reload}
         filterText={search}
         onRowClick={onRowClick}
-        actions={tab.actions}
+        actions={actions}
         emptyTitle={`No ${tab.title.toLowerCase()} here`}
         emptyDescription={
           listing.partial
@@ -1110,6 +1147,27 @@ function ResourceTabBody({ tab, catalog, createGate }) {
           exists to force is not needed — and a remount would throw away the
           search text, the open drawer and every `continue` page the operator
           loaded, to show one new row that is on the first page anyway. */}
+      {metadataTarget && (
+        <MetadataDialog
+          target={{
+            group: tab.group,
+            // The version discovery resolved, not the tab's nominal one: a CRD
+            // served at `v1beta1` on this cluster is read and written there.
+            version,
+            plural: tab.plural,
+            namespace: tab.namespaced ? (metadataTarget.row.namespace ?? namespace) : null,
+            name: metadataTarget.row.name,
+            kind,
+          }}
+          field={metadataTarget.field}
+          onClose={() => setMetadataTarget(null)}
+          onApplied={() => {
+            setMetadataTarget(null);
+            listing.reload();
+          }}
+        />
+      )}
+
       {creating && (
         <Suspense fallback={null}>
           <ImportYamlDialog
