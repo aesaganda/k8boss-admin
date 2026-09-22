@@ -38,6 +38,21 @@ import { useHealth } from '../contexts/HealthContext';
 export const LIVE_POLL_MS = 10000;
 
 /**
+ * The same thing, slower, for a page that re-reads *several* listings per tick
+ * rather than one subject.
+ *
+ * The interval is not a taste setting, and the two values are not "fast" and
+ * "slow": they are the two different things being watched. `LIVE_POLL_MS` is
+ * for a page open on one object during a change the operator just made, where
+ * ten seconds of staleness is the whole complaint. This is for a survey of a
+ * namespace, where each tick costs a listing per read and nobody is counting
+ * seconds against an action they just confirmed.
+ *
+ * A third value would want a better reason than a third page.
+ */
+export const SURVEY_POLL_MS = 30000;
+
+/**
  * Run `fetcher` whenever `key` changes, on `reload()`, and — with `pollMs` — on
  * an interval.
  *

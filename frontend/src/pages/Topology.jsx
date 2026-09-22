@@ -91,6 +91,8 @@ import { useCluster } from '../contexts/ClusterContext';
 import { useNamespace } from '../contexts/NamespaceContext';
 import {
   KIND_TO_PLURAL,
+  LIVE_POLL_MS,
+  SURVEY_POLL_MS,
   WORKLOAD_KINDS,
   capabilityGate,
   useAsync,
@@ -530,9 +532,24 @@ export default function Topology() {
 
   const enabled = activeClusterId != null;
 
+  // Polled, like the workload pages: the rows carry ready-over-desired, and a
+  // scale confirmed in this drawer is reconciled by a controller over the
+  // following seconds rather than in the round trip that accepted it.
+  //
+  // This does not disturb a manual zoom or pan. `view` is a concrete
+  // `{scale, cx, cy}` once an operator touches the canvas and is cleared only
+  // by a cluster or namespace change (the effect below `useState`), so new
+  // rows re-draw *inside* the rectangle they chose. A page still on the
+  // default `null` is asking to be fitted to whatever is drawn, and a node
+  // appearing does change that fit — which is the request, not a side effect.
+  //
+  // The other two are left reading once. A scale moves neither a Service nor
+  // an exposure, and three listings a tick to re-answer a question nothing
+  // asked is the cost this interval exists to avoid.
   const workloads = useAsync(() => workloadsApi.list({ namespace }), {
     key: `topology:${activeClusterId}:${namespace ?? '*'}`,
     enabled,
+    pollMs: SURVEY_POLL_MS,
   });
   const services = useResourceList('core', 'v1', 'services', { namespace, enabled });
   const exposures = useAsync(() => routesApi.list({ namespace }), {
@@ -786,11 +803,14 @@ export default function Topology() {
   );
   const { gate } = useGates(checks, { enabled: enabled && plurals.length > 0 });
 
+  // One object, open in front of someone who is probably watching it change:
+  // `LIVE_POLL_MS`, not the canvas's survey interval.
   const detail = useAsync(
     () => workloadsApi.detail(selected.plural, selected.namespace, selected.name),
     {
       key: `topology-detail:${activeClusterId}:${selectedId ?? ''}`,
       enabled: enabled && selected != null && selected.plural != null,
+      pollMs: LIVE_POLL_MS,
     },
   );
 
