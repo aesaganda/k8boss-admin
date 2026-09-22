@@ -341,6 +341,51 @@ def test_exec_preflight_names_the_exec_subresource(client, fake_k8s, allow_mutat
     assert attributes.namespace == "prod"
 
 
+def test_exec_open_failure_unfolds_a_handshake_status_into_the_real_code(
+    client, fake_k8s, allow_mutations, monkeypatch,
+):
+    """A 403 the API server answered in full is `rbac_denied`, not `unreachable`.
+
+    ``kubernetes.stream.ws_client.websocket_call`` catches every exception the
+    websocket upgrade can raise — including a clean, fully-answered 403 from the
+    API server — and re-raises ``ApiException(status=0, reason=str(e))``. Left
+    unhandled, that status-0 reaches ``from_api_exception`` and is reported as
+    `cluster_unreachable`: "no HTTP response was received", sending the operator
+    to check TLS certificates for a permission they lack.
+    """
+    from kubernetes.client.rest import ApiException
+
+    _allow(fake_k8s)
+    fake_k8s.core_v1.returns("read_namespaced_pod", _pod(("app",)))
+
+    body = (
+        '{"kind":"Status","apiVersion":"v1","status":"Failure",'
+        '"message":"pods \\"checkout\\" is forbidden: User '
+        '\\"system:serviceaccount:k8boss-admin:k8boss-admin\\" cannot get '
+        'resource \\"pods/exec\\" in API group \\"\\" in the namespace '
+        '\\"prod\\"","reason":"Forbidden","code":403}'
+    )
+    reason = f"Handshake status 403 Forbidden -+-+- {{}} -+-+- {body}"
+
+    def raise_folded(*_a, **_k):
+        raise ApiException(status=0, reason=reason)
+
+    monkeypatch.setattr(exec_ws, "k8s_stream", raise_folded)
+
+    with client.websocket_connect("/api/ws/pods/prod/checkout/exec") as ws:
+        frames, closed = _drain(ws)
+
+    assert len(frames) == 1
+    assert frames[0]["type"] == "error"
+    assert frames[0]["reason"] == "forbidden"
+    assert "checkout" in frames[0]["detail"]
+    assert closed
+
+    rows = _audit_rows()
+    assert rows[-1].outcome == "failed"
+    assert "rbac_denied" in rows[-1].error
+
+
 # --------------------------------------------------------------------------- #
 # The session
 # --------------------------------------------------------------------------- #

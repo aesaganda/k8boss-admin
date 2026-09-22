@@ -51,6 +51,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import threading
 import time
 from typing import Any
@@ -114,6 +115,39 @@ _CLOSED = "closed"
 _ERROR = "error"
 _CLIENT = "client"
 _DISCONNECT = "disconnect"
+
+
+#: `websocket._handshake._get_resp_headers` builds exactly this message on a
+#: non-101 handshake response, before raising `WebSocketBadStatusException`:
+#: ``f"Handshake status {status} {status_message} -+-+- {resp_headers} -+-+- {body}"``.
+#: `kubernetes.stream.ws_client.websocket_call` then catches that exception —
+#: along with everything else the handshake can raise — and re-raises
+#: ``ApiException(status=0, reason=str(e))``, discarding the real status and
+#: leaving it recoverable only as text inside `reason`. See `_unfold_handshake`.
+_HANDSHAKE_STATUS_RE = re.compile(r"^Handshake status (\d+) (.*)$")
+
+
+def _unfold_handshake_exception(exc: ApiException) -> ApiException:
+    """Recover the real HTTP status of a failed exec websocket upgrade.
+
+    Without this, a 403 the API server answered in full — RBAC denying
+    `pods/exec`, body and all — arrives at :func:`app.errors.from_api_exception`
+    as ``status=0``, which §1.3 reserves for *no HTTP exchange happened at all*.
+    That reports a clean RBAC denial as `cluster_unreachable` and sends the
+    operator to check TLS certificates for a permission they lack, rather than
+    naming the missing grant.
+    """
+    if getattr(exc, "status", None) not in (None, 0) or not exc.reason:
+        return exc
+    head, _, body = exc.reason.partition(" -+-+- ")
+    _, _, body = body.partition(" -+-+- ")
+    match = _HANDSHAKE_STATUS_RE.match(head)
+    if not match:
+        return exc
+    unfolded = ApiException(status=int(match.group(1)), reason=match.group(2))
+    if body and body != "None":
+        unfolded.body = body
+    return unfolded
 
 
 def _target(namespace: str, name: str) -> dict[str, Any]:
@@ -548,7 +582,8 @@ async def exec_in_pod(websocket: WebSocket, namespace: str, name: str) -> None:
             )
         except ApiException as e:
             mapped = from_api_exception(
-                e, context={**_target(namespace, name), "verb": "create"}
+                _unfold_handshake_exception(e),
+                context={**_target(namespace, name), "verb": "create"},
             )
             await asyncio.to_thread(
                 _audit, namespace, name, outcome="failed",
