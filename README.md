@@ -69,8 +69,16 @@ clusters, built on the assumption that the dangerous part is not reading.
 ```bash
 git clone https://github.com/aesaganda/k8boss-admin
 cd k8boss-admin
-docker compose up --build
+docker compose up -d
 ```
+
+That **pulls** the published images rather than building them — they are
+multi-arch (`linux/amd64`, `linux/arm64`), so the same command is the right one
+on an Apple-silicon laptop and on an amd64 server, and a first run is a download
+instead of a fifteen-minute build with a toolchain you may not have. Add
+`--build` to build from your checkout instead; you want that when you are
+changing the code, and not otherwise. `IMAGE_TAG=sha-abc1234 docker compose up -d`
+pins a specific build instead of the floating `latest`.
 
 Open **http://localhost:8021**. The console starts **read-only**: it can read
 every cluster you register and write to none of them. That is deliberate — see
