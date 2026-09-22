@@ -471,6 +471,25 @@ test.describe('the side panel', () => {
     await expect(page.getByTestId('topology-panel-title')).toHaveText('checkout');
   });
 
+  test('the pod ring draws the count, and draws an unread one as unread', async ({ page }) => {
+    await openTopology(page);
+
+    await node(page, 'prod/Deployment/shop-web').click();
+    const ring = page.getByTestId('topology-pod-ring');
+    await expect(ring).toHaveAttribute('data-known', 'true');
+    await expect(ring).toContainText('3');
+    await expect(ring).toContainText('of 3');
+
+    // Rule 11.2 in a ring: `checkout` reports no replica status, and an arc at
+    // `null / null` would be an empty ring around a zero — which is what a
+    // workload scaled to nothing looks like. The track is dashed and the middle
+    // is the em dash instead.
+    await node(page, 'prod/Deployment/checkout').click();
+    await expect(ring).toHaveAttribute('data-known', 'false');
+    await expect(ring).toContainText('—');
+    await expect(ring.locator('.admin-pod-ring__arc')).toHaveCount(0);
+  });
+
   test('the panel answers with the workload’s own read, not the canvas’s guess', async ({ page }) => {
     await openTopology(page);
 
@@ -545,6 +564,21 @@ test.describe('the side panel', () => {
     await expect(page.getByRole('dialog')).toContainText('Scale shop-web');
     await expect(page.getByRole('spinbutton', { name: 'Desired replicas' })).toHaveValue('4');
     await expect(page.getByRole('button', { name: /Preview/ })).toBeVisible();
+  });
+
+  test('the Actions menu offers the three metadata forms, on the same permission as Edit YAML', async ({
+    page,
+  }) => {
+    await openTopology(page);
+
+    await node(page, 'prod/Deployment/shop-web').click();
+    await page.getByTestId('topology-actions').click();
+    await page.getByTestId('topology-action-tolerations').click();
+
+    // §11.14: the same §4 update the YAML editor makes, reached from the
+    // canvas. The rollout sentence is what makes it not a metadata edit.
+    await expect(page.getByRole('dialog')).toContainText('Tolerations on shop-web');
+    await expect(page.getByTestId('tolerations-rollout')).toContainText('rolls every pod');
   });
 
   test('the stepper is disabled for a kind with no scale subresource, and for an unread count', async ({

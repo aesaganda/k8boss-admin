@@ -287,6 +287,10 @@ def test_detail_assembles_pods_conditions_services_and_rollout(client, fake_k8s)
     }]
     assert body["rollout"] == {"revision": 14, "strategy": "RollingUpdate",
                                "maxSurge": "25%", "maxUnavailable": "25%"}
+    # The object's own annotations, which the detail carries and the row does
+    # not: the page that offers to edit them has to be able to count them, and
+    # a listing would carry one last-applied-configuration per row.
+    assert body["annotations"] == {"deployment.kubernetes.io/revision": "14"}
     assert body["partial"] is False
     assert body["unavailable"] == []
 

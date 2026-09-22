@@ -871,6 +871,69 @@ body.admin-resizing * {
   min-height: 0;
 }
 
+/* ── Pod ring ───────────────────────────────────────────────────────────── */
+
+/*
+ * The replica count as a dial, with the stepper beside it.
+ *
+ * The arc's colour is the workload's own status colour, the same four the
+ * topology canvas paints its discs with — one status must not be green here and
+ * blue two screens away.
+ *
+ * `data-known="false"` dashes the track, which is the ring's version of the
+ * dotted em dash: an unreported count must not be drawn as an empty ring, which
+ * is exactly what a workload scaled to zero looks like.
+ */
+.admin-pod-ring {
+  display: flex;
+  align-items: center;
+  gap: var(--admin-gap-sm);
+}
+
+.admin-pod-ring__track {
+  fill: none;
+  stroke: var(--admin-border);
+  stroke-width: 8;
+}
+
+.admin-pod-ring[data-known="false"] .admin-pod-ring__track {
+  stroke-dasharray: 4 6;
+}
+
+.admin-pod-ring__arc {
+  fill: none;
+  stroke-width: 8;
+  stroke-linecap: round;
+  stroke: var(--admin-muted);
+}
+
+.admin-pod-ring[data-status="Healthy"] .admin-pod-ring__arc {
+  stroke: var(--pf-t--global--color--status--success--default, #3e8635);
+}
+
+.admin-pod-ring[data-status="Progressing"] .admin-pod-ring__arc {
+  stroke: var(--pf-t--global--color--status--info--default, #2b9af3);
+}
+
+.admin-pod-ring[data-status="Degraded"] .admin-pod-ring__arc {
+  stroke: var(--pf-t--global--color--status--danger--default, #c9190b);
+}
+
+.admin-pod-ring[data-status="Suspended"] .admin-pod-ring__arc {
+  stroke: var(--pf-t--global--color--status--custom--default, #5752d1);
+}
+
+.admin-pod-ring__count {
+  fill: var(--pf-t--global--text--color--regular, #151515);
+  font-size: 1.5rem;
+  font-weight: 600;
+}
+
+.admin-pod-ring__label {
+  fill: var(--admin-muted);
+  font-size: 0.75rem;
+}
+
 /* ── Nullable values (contract rule 11.2) ───────────────────────────────── */
 
 /*

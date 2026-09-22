@@ -37,7 +37,9 @@ import {
   StatusBadge,
 } from '../components/ui';
 import ScaleDialog from '../components/ScaleDialog';
-import ScaleStepper from '../components/ScaleStepper';
+import PodRing from '../components/PodRing';
+import MetadataDialog from '../components/MetadataDialog';
+import TolerationsDialog from '../components/TolerationsDialog';
 import RestartDialog from '../components/RestartDialog';
 import SuspendDialog from '../components/SuspendDialog';
 import RollbackDialog from '../components/RollbackDialog';
@@ -49,6 +51,7 @@ import { WORKLOAD_KINDS, capabilityGate, useAsync, useGates } from './_data';
 import {
   ActionButton,
   ChipList,
+  EditLink,
   EditYamlDialog,
   ImagesCell,
   Muted,
@@ -110,7 +113,7 @@ export default function WorkloadDetail() {
   const kind = spec?.kind;
 
   const [tab, setTab] = useState('pods');
-  const [dialog, setDialog] = useState(null); // 'scale' | 'restart' | 'suspend' | 'rollback' | 'edit' | 'delete'
+  const [dialog, setDialog] = useState(null); // 'scale' | 'restart' | 'suspend' | 'rollback' | 'edit' | 'delete' | 'labels' | 'annotations' | 'nodeSelector' | 'tolerations'
   const [podConsole, setPodConsole] = useState(null);
 
   const detail = useAsync(() => workloadsApi.detail(plural, namespace, name), {
@@ -135,6 +138,10 @@ export default function WorkloadDetail() {
   // Without this check the table would print "no pods" over a listing we were
   // refused, which is the same wrong answer §5 goes to the trouble of nulling.
   const podsUnreadable = unavailable.some((entry) => entry.resource === 'pods');
+  // `null` while the detail is unread, never 0: "this object has no
+  // annotations" and "we have not looked yet" are different sentences, and only
+  // one of them is a fact about the cluster.
+  const annotationCount = detail.data ? Object.keys(detail.data.annotations ?? {}).length : null;
 
   const podColumns = useMemo(
     () => [
@@ -261,27 +268,24 @@ export default function WorkloadDetail() {
                   {
                     label: 'Replicas',
                     value: (
-                      // The count and the control that changes it, in one line.
-                      // The arrows do not write: they open the same dialog the
-                      // Scale… button does, already holding the number they
-                      // name, so the diff is still what authorises the change.
-                      <span className="admin-cell-inline">
-                        <UsageCell
-                          used={workload?.replicas?.ready}
-                          total={workload?.replicas?.desired}
-                          reason="The controller has not reported its replica status."
-                        />
-                        <ScaleStepper
-                          kind={kind}
-                          plural={plural}
-                          namespace={namespace}
-                          name={name}
-                          current={workload?.replicas?.desired ?? null}
-                          gate={scaleGate}
-                          onApplied={refreshAll}
-                          testId="workload-scale-stepper"
-                        />
-                      </span>
+                      // The count and the control that changes it, in one
+                      // control. The arrows do not write: they open the same
+                      // dialog the Scale… button does, already holding the
+                      // number they name, so the diff is still what authorises
+                      // the change.
+                      <PodRing
+                        ready={workload?.replicas?.ready}
+                        desired={workload?.replicas?.desired}
+                        status={workload?.status}
+                        kind={kind}
+                        plural={plural}
+                        namespace={namespace}
+                        name={name}
+                        gate={scaleGate}
+                        onApplied={refreshAll}
+                        testId="workload-pod-ring"
+                        stepperTestId="workload-scale-stepper"
+                      />
                     ),
                     help: 'Ready over desired, as the controller reports them.',
                   },
@@ -303,6 +307,46 @@ export default function WorkloadDetail() {
                   { label: 'Why', value: workload?.status_reason ?? null, hidden: !workload?.status_reason },
                   { label: 'Images', value: <ImagesCell images={workload?.images} max={4} /> },
                   { label: 'Age', value: <AgeCell seconds={workload?.age_seconds} /> },
+                  {
+                    // Shown here and editable from here, because the operator
+                    // who wants to add one label should not have to find two
+                    // lines in the manifest to do it. The pencil opens §4's
+                    // update with a form over one field — not a second write
+                    // path; see `objectEdit.js`.
+                    label: 'Labels',
+                    value: (
+                      <span className="admin-cell-inline">
+                        <ChipList
+                          values={Object.entries(workload?.labels ?? {}).map(([k, v]) => `${k}=${v}`)}
+                          max={4}
+                          emptyText="none"
+                        />
+                        <EditLink
+                          gate={gate('update')}
+                          label="Edit labels"
+                          onClick={() => setDialog('labels')}
+                        />
+                      </span>
+                    ),
+                    help: 'The object’s own labels, not its pod template’s — changing them starts no rollout.',
+                  },
+                  {
+                    label: 'Annotations',
+                    value: (
+                      <span className="admin-cell-inline">
+                        <NullableCell
+                          value={annotationCount}
+                          format={(n) => `${n} ${n === 1 ? 'annotation' : 'annotations'}`}
+                          reason="The workload could not be read, so its annotations are unknown."
+                        />
+                        <EditLink
+                          gate={gate('update')}
+                          label="Edit annotations"
+                          onClick={() => setDialog('annotations')}
+                        />
+                      </span>
+                    ),
+                  },
                   {
                     label: 'Schedule',
                     value: workload?.schedule ?? null,
@@ -334,24 +378,40 @@ export default function WorkloadDetail() {
                   {
                     label: 'Node selector',
                     value: (
-                      <ChipList
-                        values={Object.entries(detail.data?.spec?.nodeSelector ?? {}).map(([k, v]) => `${k}=${v}`)}
-                        max={3}
-                        emptyText="any node"
-                      />
+                      <span className="admin-cell-inline">
+                        <ChipList
+                          values={Object.entries(detail.data?.spec?.nodeSelector ?? {}).map(([k, v]) => `${k}=${v}`)}
+                          max={3}
+                          emptyText="any node"
+                        />
+                        <EditLink
+                          gate={gate('update')}
+                          label="Edit node selector"
+                          onClick={() => setDialog('nodeSelector')}
+                        />
+                      </span>
                     ),
+                    help: 'Part of the pod template: changing it replaces every running pod, and a pod matching no node stays Pending.',
                   },
                   {
                     label: 'Tolerations',
                     value: (
-                      <ChipList
-                        values={(detail.data?.spec?.tolerations ?? []).map(
-                          (t) => `${t.key ?? '*'}${t.value ? `=${t.value}` : ''}${t.effect ? `:${t.effect}` : ''}`,
-                        )}
-                        max={2}
-                        emptyText="none"
-                      />
+                      <span className="admin-cell-inline">
+                        <ChipList
+                          values={(detail.data?.spec?.tolerations ?? []).map(
+                            (t) => `${t.key ?? '*'}${t.value ? `=${t.value}` : ''}${t.effect ? `:${t.effect}` : ''}`,
+                          )}
+                          max={2}
+                          emptyText="none"
+                        />
+                        <EditLink
+                          gate={gate('update')}
+                          label="Edit tolerations"
+                          onClick={() => setDialog('tolerations')}
+                        />
+                      </span>
                     ),
+                    help: 'Part of the pod template: changing these replaces every running pod.',
                   },
                   {
                     label: 'Volumes',
@@ -715,6 +775,29 @@ export default function WorkloadDetail() {
           namespace={namespace}
           name={name}
           kind={kind}
+          onClose={() => setDialog(null)}
+          onApplied={() => {
+            setDialog(null);
+            refreshAll();
+          }}
+        />
+      )}
+
+      {(dialog === 'labels' || dialog === 'annotations' || dialog === 'nodeSelector') && (
+        <MetadataDialog
+          target={{ group: spec.group, version: spec.version, plural, namespace, name, kind }}
+          field={dialog}
+          onClose={() => setDialog(null)}
+          onApplied={() => {
+            setDialog(null);
+            refreshAll();
+          }}
+        />
+      )}
+
+      {dialog === 'tolerations' && (
+        <TolerationsDialog
+          target={{ group: spec.group, version: spec.version, plural, namespace, name, kind }}
           onClose={() => setDialog(null)}
           onApplied={() => {
             setDialog(null);

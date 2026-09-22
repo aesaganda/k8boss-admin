@@ -639,6 +639,7 @@ Row:
 
 ```json
 { "workload": WorkloadRow,
+  "annotations": {"deployment.kubernetes.io/revision": "14"},
   "spec": { "containers": [{"name","image","ports","resources","env_count","probes":{"liveness":true,"readiness":true,"startup":false}}],
             "serviceAccount": "checkout", "nodeSelector": {}, "tolerations": [], "volumes": [] },
   "pods": [PodRow],
@@ -1642,6 +1643,47 @@ trace.
    instead of anything drawn. Every zoom after that, and every pan, is anchored
    on wherever the operator has already navigated to instead, so a deliberate
    pan is never pulled back toward the content by a later zoom click.
+
+14. **A form over one field of an object is §4's update, and never an endpoint
+   of its own.** Labels and annotations are metadata **every** object has, so
+   the form over them is offered wherever an object is: the workload page and
+   its listing, the pod page, the namespace page, §11.13's topology panel — and
+   the §4 explorer, which reaches every kind the cluster serves and is what
+   makes the claim general rather than a list of six kinds. The workload page
+   also edits the pod template's `nodeSelector` and `tolerations` — the same
+   control over the same shape, with a different consequence stated on it — and
+   the topology panel offers
+   all three from the same Actions menu as its other five dialogs, which is
+   still no write added by that view. Each
+   one reads the live object with §4's YAML read, changes its own field and
+   sends **the whole object back** with `PUT` — the call the YAML editor
+   already makes, with the same preflight (`update`), the same dry run and
+   diff, the same `resourceVersion`, the same 409 and the same audit row. A
+   labels endpoint would have been a second path to the cluster with its own
+   opportunity to skip one of those; a new place to click is not a new write.
+
+   Three properties follow and are contract:
+
+   **The object that goes back is the object that came in.** A form that sent
+   only its own field would be sending a Deployment with no containers, and the
+   API server would take it literally. The read, the edit and the dump are
+   ADR-0009's one reading of a manifest in both directions.
+
+   **The form judges only what a form can judge.** A row with no key, and two
+   rows with the same key — where only one would be written and which is not a
+   question to settle by accident. Key syntax, value limits and whether a
+   toleration is coherent are the API server's rulings, delivered by the dry
+   run: a second opinion here would eventually refuse something the cluster
+   accepts.
+
+   **An edit under `spec.template` says that it restarts the workload.**
+   `nodeSelector` and `tolerations` are part of the pod template, so saving
+   changes the template hash and the controller replaces every running pod —
+   and a pod whose selector matches no node stays Pending rather than being
+   placed somewhere close enough. The object's own
+   `metadata.labels` are not, and restart nothing — the two are one indentation
+   level apart, and an operator who confuses them either restarts production to
+   add a label or waits for a rollout that is not coming.
 
 ---
 
