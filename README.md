@@ -1534,6 +1534,20 @@ Anything engine-divergent needs a deliberate Postgres check.
 
 ## Deployment
 
+Same two images (`backend/Dockerfile` builds both, and the frontend's nginx
+config is rendered from `BACKEND_URL` at container start) either way — the
+choice is where the console itself runs, not which console you get.
+
+| | Docker Compose | Kubernetes (`deploy/`) |
+|---|---|---|
+| **Command** | `docker compose up --build` | `kubectl apply -k deploy/` |
+| **What it's for** | The sixty-second quickstart; local and small-scale use | Running the console as a long-lived workload in a cluster |
+| **How the console reaches a cluster** | Your host kubeconfig, mounted read-only (`KUBECONFIG`) — local clusters (`kind`, `k3d`, minikube, …) are found and registered automatically | `IN_CLUSTER_MODE: "true"` by default: the pod's own ServiceAccount, scoped by `deploy/rbac.yaml`. Reads the cluster it runs in with no setup; register others through the UI |
+| **State** | Named Docker volume | `PersistentVolumeClaim` (`deploy/deployment.yaml`) — same volume holds the SQLite DB and the Fernet key that decrypts stored cluster tokens, on purpose |
+| **Exposure** | `UI_PORT` published on the host (`8021` by default); API bound to loopback (`API_BIND`) unless you change it | `ClusterIP` Services only; reach it with `kubectl port-forward`, or apply the optional `ingress.yaml` (commented out by default — it ships a placeholder host and needs auth or a trusted proxy in front before you publish it) |
+| **Writes** | Off until `ADMIN_ALLOW_MUTATIONS=true` | Off until `ADMIN_ALLOW_MUTATIONS: "true"` **and** the writer `ClusterRoleBinding` in `rbac.yaml` is applied — two independent gates, one in the app and one in RBAC |
+| **Scaling** | Single container per service | Backend is pinned to one replica (SQLite); frontend (stateless nginx) scales freely |
+
 ```bash
 kubectl apply -k deploy/
 kubectl -n k8boss-admin port-forward svc/k8boss-admin-frontend 8021:8021
