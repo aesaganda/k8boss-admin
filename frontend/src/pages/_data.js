@@ -30,19 +30,35 @@ import { useHealth } from '../contexts/HealthContext';
 /* ── Async reads ────────────────────────────────────────────────────────── */
 
 /**
- * Run `fetcher` whenever `key` changes, and on `reload()`.
+ * How often a page that asked to stay live re-reads. The same ten seconds
+ * `useObjectYaml` watches at, for the same reason: it is short enough that a
+ * rollout is watchable and long enough that a namespace of workloads is not a
+ * load generator.
+ */
+export const LIVE_POLL_MS = 10000;
+
+/**
+ * Run `fetcher` whenever `key` changes, on `reload()`, and — with `pollMs` — on
+ * an interval.
  *
  *   const { data, loading, error, reload } = useAsync(
  *     () => nodes.list(),
- *     { key: `nodes:${clusterId}` },
+ *     { key: `nodes:${clusterId}`, pollMs: LIVE_POLL_MS },
  *   );
  *
  * The fetcher is held in a ref and never appears in a dependency array, so a
  * caller can pass an inline arrow (they all do) without the effect re-firing on
  * every render. `key` is the single declared input: if a value changes what the
  * request asks for, it belongs in the key, and if it does not, it does not.
+ *
+ * `pollMs` is off by default, and a poll differs from a read the operator asked
+ * for in two ways that matter: it does not raise `loading` (so a table the
+ * operator is reading never reverts to a skeleton under them), and it does not
+ * replace good data with an error. Pages whose subject changes on its own after
+ * a write — a scale, a restart, a rollback — pass it; a page that only changes
+ * when someone changes it does not need to.
  */
-export function useAsync(fetcher, { key, enabled = true } = {}) {
+export function useAsync(fetcher, { key, enabled = true, pollMs = 0 } = {}) {
   const fetcherRef = useRef(fetcher);
   // Synced in an effect rather than during render: React 19 treats render-phase
   // ref writes as a side effect, and this effect is declared first so it lands
@@ -68,35 +84,86 @@ export function useAsync(fetcher, { key, enabled = true } = {}) {
     keyRef.current = key;
 
     let cancelled = false;
-    const controller = typeof AbortController === 'function' ? new AbortController() : null;
+    let inFlight = false;
+    const controllers = new Set();
 
-    // Drop the previous answer only when the question changed. See the file
-    // docstring: a refresh must not blank the table, a re-scope must.
-    setState((previous) => ({
-      data: isNewKey ? null : previous.data,
-      loading: true,
-      error: null,
-    }));
+    const read = (silent) => {
+      // One read at a time. Overlapping polls resolve in whatever order the
+      // network returns them, and the loser writing last would put an older
+      // cluster on screen than the one already there.
+      if (inFlight) return;
+      inFlight = true;
 
-    Promise.resolve()
-      .then(() => fetcherRef.current(controller?.signal))
-      .then((data) => {
-        if (cancelled) return;
-        setState({ data, loading: false, error: null });
-      })
-      .catch((error) => {
-        // An abort is us cancelling, not a failure. Rendering it as one made a
-        // page that the operator navigated away from and back to show "could
-        // not reach the backend" over perfectly good data.
-        if (cancelled || error?.name === 'AbortError') return;
-        setState({ data: null, loading: false, error });
-      });
+      const controller = typeof AbortController === 'function' ? new AbortController() : null;
+      if (controller) controllers.add(controller);
+
+      // Drop the previous answer only when the question changed. See the file
+      // docstring: a refresh must not blank the table, a re-scope must.
+      if (!silent) {
+        setState((previous) => ({
+          data: isNewKey ? null : previous.data,
+          loading: true,
+          error: null,
+        }));
+      }
+
+      Promise.resolve()
+        .then(() => fetcherRef.current(controller?.signal))
+        .then((data) => {
+          if (cancelled) return;
+          setState({ data, loading: false, error: null });
+        })
+        .catch((error) => {
+          // An abort is us cancelling, not a failure. Rendering it as one made a
+          // page that the operator navigated away from and back to show "could
+          // not reach the backend" over perfectly good data.
+          if (cancelled || error?.name === 'AbortError') return;
+          // A poll nobody asked for keeps the last good answer rather than
+          // replacing the page with an error panel: one dropped request during
+          // a rollout would otherwise wipe the very thing being watched. A read
+          // the operator asked for still reports its failure.
+          setState((previous) =>
+            silent && previous.data != null ? { ...previous, loading: false } : { data: null, loading: false, error },
+          );
+        })
+        .finally(() => {
+          inFlight = false;
+          if (controller) controllers.delete(controller);
+        });
+    };
+
+    read(false);
+
+    const stop = () => {
+      cancelled = true;
+      controllers.forEach((c) => c.abort());
+    };
+
+    if (!pollMs) return stop;
+
+    // A write is accepted by the API server long before its controller has
+    // acted on it: the re-read a dialog fires on `onApplied` sees the replica
+    // count it just set and the *old* pods, and with nothing reading again the
+    // page stays that way until someone presses reload. Polling is what makes
+    // the scale the operator just confirmed appear without one.
+    const handle = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      read(true);
+    }, pollMs);
+
+    // Coming back to a tab that has been hidden for an hour must not show what
+    // the cluster looked like an hour ago for another ten seconds.
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') read(true);
+    };
+    document.addEventListener('visibilitychange', onVisible);
 
     return () => {
-      cancelled = true;
-      controller?.abort();
+      clearInterval(handle);
+      document.removeEventListener('visibilitychange', onVisible);
+      stop();
     };
-  }, [key, enabled, tick]);
+  }, [key, enabled, tick, pollMs]);
 
   return { data: state.data, loading: state.loading, error: state.error, reload };
 }
