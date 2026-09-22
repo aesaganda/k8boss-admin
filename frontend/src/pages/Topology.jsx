@@ -31,8 +31,19 @@
  * dialogs, gated by the same §9 batch through rule 11.4's `ActionButton` and
  * `menuAction`. Nothing here posts to a cluster: a new place to click is not a
  * new write.
+ *
+ * Zoom and pan are pure view state (`topologyGraph.js`'s `{scale, cx, cy}`,
+ * §11.13's "View"), not the graph. `view === null` means "fit the whole
+ * drawing", which is what a freshly loaded page renders and what a namespace
+ * or cluster switch falls back to — a manual view left over from a different
+ * scope's layout is a view of nodes that are no longer there. Pan is a
+ * click-drag read through the SVG's own `getScreenCTM()`, and zoom is the two
+ * `+`/`-` controls plus the wheel, both centred on the cursor for the wheel
+ * and on the view's own centre for the buttons. Neither touches the DOM
+ * outside this component: they only ever change which rectangle of the same
+ * drawing the `viewBox` shows.
  */
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Alert,
@@ -52,6 +63,9 @@ import {
   Title,
 } from '@patternfly/react-core';
 import SyncAltIcon from '@patternfly/react-icons/dist/esm/icons/sync-alt-icon';
+import ExpandArrowsAltIcon from '@patternfly/react-icons/dist/esm/icons/expand-arrows-alt-icon';
+import SearchMinusIcon from '@patternfly/react-icons/dist/esm/icons/search-minus-icon';
+import SearchPlusIcon from '@patternfly/react-icons/dist/esm/icons/search-plus-icon';
 import {
   AgeCell,
   DescriptionList,
@@ -92,13 +106,20 @@ import {
   UsageCell,
 } from './_parts';
 import {
+  MAX_SCALE,
+  MIN_SCALE,
   NODE_H,
   NODE_W,
   abbreviate,
   buildTopology,
+  contentCenter,
+  fitView,
   layoutTopology,
+  panView,
   routeUrl,
   routesFor,
+  viewBoxFor,
+  zoomView,
 } from './topologyGraph';
 
 // A shared empty array, like `_data.js` keeps: `?? []` mints a new one on every
@@ -459,12 +480,44 @@ export default function Topology() {
   // back button with selections.
   const [params, setParams] = useSearchParams();
   const selectedId = params.get('selected');
-  const setSelectedId = (id) => {
-    const next = new URLSearchParams(params);
-    if (id) next.set('selected', id);
-    else next.delete('selected');
-    setParams(next, { replace: true });
-  };
+  // The functional-update form, so this closes over no outside value and
+  // stays referentially stable — `onCanvasPointerUp` below reads it from a
+  // `useCallback` dependency array, and a version rebuilt from `params` on
+  // every render would rebuild that handler (and re-attach it to the SVG) on
+  // every render too.
+  const setSelectedId = useCallback((id) => {
+    setParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        if (id) next.set('selected', id);
+        else next.delete('selected');
+        return next;
+      },
+      { replace: true },
+    );
+  }, [setParams]);
+
+  // `null` means "fit the whole drawing", which is also what a page with no
+  // interaction yet renders and what namespace and cluster changes fall back
+  // to — a manual pan or zoom left over from a different scope's layout means
+  // nothing once the nodes it was aimed at are gone. `view` becomes a concrete
+  // `{scale, cx, cy}` only once an operator zooms or pans, at which point it
+  // stops tracking the graph's own size.
+  const [view, setView] = useState(null);
+  useEffect(() => {
+    setView(null);
+  }, [activeClusterId, namespace]);
+
+  const svgRef = useRef(null);
+  // Drag state lives in a ref rather than in `view` writes on every pixel of
+  // movement: it is read by the pointer handlers between renders and is never
+  // itself rendered, and putting it in state would mean every field on it —
+  // including `moved`, which only the next event needs — triggers a re-render
+  // it does not want. `moved` is what tells a click from a drag: dragging the
+  // canvas and clicking the node under the cursor are different gestures, and
+  // only the pointer's own travel distinguishes them (`onCanvasClickCapture`
+  // below is where that distinction gets enforced).
+  const dragRef = useRef(null);
 
   const enabled = activeClusterId != null;
 
@@ -537,6 +590,179 @@ export default function Topology() {
 
   const nodes = useMemo(() => graph.groups.flatMap((group) => group.nodes), [graph]);
   const selected = nodes.find((node) => node.id === selectedId) ?? null;
+
+  const activeView = view ?? fitView(graph);
+  const box = viewBoxFor(activeView, graph);
+
+  const zoomBy = useCallback(
+    (factor) =>
+      setView((current) => {
+        // From a fresh page, aim at the drawn content rather than at the
+        // fixed-width canvas's own middle (`contentCenter`'s docstring says
+        // why: a sparse namespace leaves most of that canvas blank, and the
+        // first zoom-in would otherwise magnify the blank half). Once the
+        // operator has already zoomed or panned, anchor on their own current
+        // view instead — a deliberate pan must not be pulled back toward the
+        // content every time they zoom again.
+        const at = current == null ? contentCenter(graph) : null;
+        return zoomView(current ?? fitView(graph), graph, factor, at);
+      }),
+    [graph],
+  );
+  const resetView = useCallback(() => setView(null), []);
+
+  // Wheel-zoom needs `preventDefault()` to stop the page itself scrolling
+  // under the cursor, and a JSX `onWheel` prop cannot be trusted not to be
+  // registered passive — browsers vary, and a passive listener silently drops
+  // the call rather than erroring. A plain `addEventListener` with
+  // `{ passive: false }` is the one way to be sure it takes effect.
+  useEffect(() => {
+    const svg = svgRef.current;
+    if (!svg) return undefined;
+    const onWheel = (event) => {
+      event.preventDefault();
+      const ctm = svg.getScreenCTM();
+      if (!ctm) return;
+      const point = svg.createSVGPoint();
+      point.x = event.clientX;
+      point.y = event.clientY;
+      const at = point.matrixTransform(ctm.inverse());
+      const factor = event.deltaY < 0 ? 1.15 : 1 / 1.15;
+      setView((current) => zoomView(current ?? fitView(graph), graph, factor, at));
+    };
+    svg.addEventListener('wheel', onWheel, { passive: false });
+    return () => svg.removeEventListener('wheel', onWheel);
+  }, [graph]);
+
+  // Panning: click-drag anywhere on the canvas, including over a node — a
+  // drag that starts on a node is a pan, not a click.
+  //
+  // `unitsPerPixel` is read once, at drag start, from the CTM's own scale
+  // factor (`ctm.a`) rather than recomputed every move: under
+  // `preserveAspectRatio="meet"` the CTM's x and y scale are equal (a uniform
+  // scale is what "meet" means), and freezing it is what lets every subsequent
+  // move be computed from the drag's own start point rather than compounding
+  // rounding error move over move — the same reason the column-resize drag in
+  // `components/ui/columnWidths.js` freezes its own starting width.
+  //
+  // Pointer capture is acquired only once the drag threshold is crossed, in
+  // `onCanvasPointerMove` below — **not** here. A browser that has captured a
+  // pointer retargets that pointer's compatibility mouse events to the
+  // capturing element: grabbing capture on `pointerdown` meant every plain
+  // click fired on the `<svg>` instead of on whatever was actually under the
+  // cursor. An ordinary click, which never crosses the threshold, now never
+  // touches capture at all.
+  const onCanvasPointerDown = useCallback(
+    (event) => {
+      if (event.pointerType === 'mouse' && event.button !== 0) return;
+      const svg = svgRef.current;
+      const ctm = svg?.getScreenCTM();
+      if (!ctm || !ctm.a) return;
+      dragRef.current = {
+        pointerId: event.pointerId,
+        startClientX: event.clientX,
+        startClientY: event.clientY,
+        startView: activeView,
+        unitsPerPixel: 1 / ctm.a,
+        moved: false,
+        captured: false,
+      };
+    },
+    [activeView],
+  );
+
+  const onCanvasPointerMove = useCallback((event) => {
+    const state = dragRef.current;
+    if (!state || state.pointerId !== event.pointerId) return;
+    const dxPx = event.clientX - state.startClientX;
+    const dyPx = event.clientY - state.startClientY;
+    // A four-pixel threshold before it counts as a drag: a click has some
+    // jitter between press and release, and a pan that fired on that jitter
+    // would make an ordinary click on a node also nudge the canvas.
+    if (!state.moved && Math.hypot(dxPx, dyPx) < 4) return;
+    if (!state.moved) {
+      state.moved = true;
+      try {
+        event.currentTarget.setPointerCapture(event.pointerId);
+        state.captured = true;
+      } catch {
+        // An optimisation, not a requirement: without it the drag ends early
+        // if the pointer leaves the SVG rather than misbehaving.
+      }
+    }
+    setView(panView(state.startView, dxPx * state.unitsPerPixel, dyPx * state.unitsPerPixel));
+  }, []);
+
+  // Selection for a plain click is decided **here**, from `pointerup`'s own
+  // target, rather than from a node's own `onClick` — `pointerup`'s target is
+  // simply whatever is under the pointer at release, which is exactly the
+  // question "was a node just clicked" is asking, and reading it here means
+  // selection does not depend on how a `click` event's own target ends up
+  // resolving (see `onCanvasClickCapture` below for why that resolution is not
+  // trustworthy once a drag has happened). `TopologyNode` keeps its own
+  // `onClick` (see there) for activation paths that raise a `click` with no
+  // preceding pointer sequence at all — a screen reader's own "activate"
+  // command, say — and the two agreeing on an ordinary mouse click is
+  // redundant, not conflicting: the same id, set twice.
+  const onCanvasPointerUp = useCallback(
+    (event) => {
+      const state = dragRef.current;
+      if (!state || state.pointerId !== event.pointerId) return;
+      if (state.captured) {
+        try {
+          event.currentTarget.releasePointerCapture(event.pointerId);
+        } catch {
+          // Already released — the pointer left the document, or the browser
+          // released it on its own when the button came up.
+        }
+      }
+      if (!state.moved) {
+        const nodeEl = event.target.closest?.('[data-node]');
+        if (nodeEl) setSelectedId(nodeEl.dataset.node);
+      }
+      // `dragRef.current` is deliberately left in place, not cleared here:
+      // `onCanvasClickCapture` below still reads `moved` from it. An
+      // uncancelled pointerup is always followed, synchronously and in the
+      // same task, by the `click` that handler runs on — that is where the
+      // cleanup happens.
+    },
+    [setSelectedId],
+  );
+
+  const onCanvasPointerCancel = useCallback((event) => {
+    const state = dragRef.current;
+    if (!state || state.pointerId !== event.pointerId) return;
+    // A cancelled pointer raises no compatibility mouse events at all — no
+    // `click` is coming, so nothing downstream is left to read this.
+    dragRef.current = null;
+    if (state.captured) {
+      try {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      } catch {
+        // Already released.
+      }
+    }
+  }, []);
+
+  // Belt and suspenders on top of what `setPointerCapture` above already
+  // guarantees. Once a pointer is captured, the browser retargets every
+  // remaining compatibility mouse event for it — `mouseup` and the `click`
+  // that follows included — to the *capturing* element for the rest of that
+  // action, regardless of where the pointer geometrically ends up; a `click`
+  // after a drag that stayed on the very node it started from was still
+  // observed targeting the bare `<svg>` in testing, never that node. That
+  // alone is why a drag does not select whatever it passed over. This handler
+  // does not depend on it: if some pointer type or engine ever leaves a
+  // click's target inside a node regardless (or `setPointerCapture` itself
+  // failed — see its own `catch`), stopping the click here, before it can
+  // reach that node's `onClick`, is what still catches it. A plain click's own
+  // selection already happened in `onCanvasPointerUp` above, so there is
+  // nothing left for this handler to do in that case beyond clearing the ref
+  // for the next interaction.
+  const onCanvasClickCapture = useCallback((event) => {
+    if (dragRef.current?.moved) event.stopPropagation();
+    dragRef.current = null;
+  }, []);
 
   // Only the kinds actually on the canvas, so a namespace of Deployments does
   // not spend five more SelfSubjectAccessReviews asking about kinds nobody can
@@ -798,63 +1024,111 @@ export default function Topology() {
             )}
 
             {nodes.length > 0 && (
-              <svg
-                className="admin-topology"
-                data-testid="topology-canvas"
-                viewBox={`0 0 ${graph.width} ${graph.height}`}
-                width="100%"
-                // No `height`: with a viewBox and `height: auto` in CSS the
-                // element takes its height from the drawing's own ratio. A
-                // fixed pixel height reserved the unscaled height while
-                // `meet` scaled the picture down — with the drawer open, a
-                // fifth of the canvas was blank space nothing could be in.
-                // Left-aligned, because a shrunk drawing floating in the
-                // middle of the page reads as a rendering fault.
-                preserveAspectRatio="xMinYMin meet"
-                role="group"
-                aria-label="Workload topology"
-              >
-                {graph.groups.map((group) => (
-                  <g key={group.key}>
-                    {group.boxed && (
-                      <>
-                        <rect
-                          className="admin-topology__group"
-                          x={group.x}
-                          y={group.y}
-                          width={group.width}
-                          height={group.height}
-                          rx={12}
-                        >
-                          {/* On the rect, not on the enclosing <g>: a <title>
-                              there is the tooltip for every node inside the box
-                              as well, and the nodes have their own. */}
-                          <title>{`Grouped by ${group.label}=${group.title}`}</title>
-                        </rect>
-                        <text
-                          className="admin-topology__group-title"
-                          x={group.x + 14}
-                          y={group.y + 20}
-                          data-testid="topology-group"
-                        >
-                          {/* Clipped to the box it titles: a one-workload
-                              application is 140px wide, and an unclipped
-                              heading ran across the group beside it. */}
-                          {clip(group.title, Math.max(8, Math.floor((group.width - 28) / 7)))}
-                        </text>
-                      </>
-                    )}
-                    {group.nodes.map((node) => (
-                      <TopologyNode
-                        key={node.id}
-                        node={node}
-                        isSelected={node.id === selectedId}
-                        onSelect={setSelectedId}
-                      />
-                    ))}
-                  </g>
-                ))}
-              </svg>
+              <div className="admin-topology__viewport">
+                <svg
+                  ref={svgRef}
+                  className="admin-topology"
+                  data-testid="topology-canvas"
+                  viewBox={`${box.x} ${box.y} ${box.w} ${box.h}`}
+                  width="100%"
+                  // No `height`: with a viewBox and `height: auto` in CSS the
+                  // element takes its height from the drawing's own ratio. A
+                  // fixed pixel height reserved the unscaled height while
+                  // `meet` scaled the picture down — with the drawer open, a
+                  // fifth of the canvas was blank space nothing could be in.
+                  // Left-aligned, because a shrunk drawing floating in the
+                  // middle of the page reads as a rendering fault.
+                  //
+                  // Zooming does not change this: `box.w / box.h` is always
+                  // `graph.width / graph.height` (panView never changes the
+                  // box's size, and zoomView scales both dimensions by the same
+                  // factor), so the element's own rendered aspect ratio — driven
+                  // by this same viewBox through `height: auto` — never diverges
+                  // from what `preserveAspectRatio` is fitting. There is no zoom
+                  // level at which this letterboxes.
+                  preserveAspectRatio="xMinYMin meet"
+                  role="group"
+                  aria-label="Workload topology. Scroll to zoom, drag to pan."
+                  onPointerDown={onCanvasPointerDown}
+                  onPointerMove={onCanvasPointerMove}
+                  onPointerUp={onCanvasPointerUp}
+                  onPointerCancel={onCanvasPointerCancel}
+                  onClickCapture={onCanvasClickCapture}
+                >
+                  {graph.groups.map((group) => (
+                    <g key={group.key}>
+                      {group.boxed && (
+                        <>
+                          <rect
+                            className="admin-topology__group"
+                            x={group.x}
+                            y={group.y}
+                            width={group.width}
+                            height={group.height}
+                            rx={12}
+                          >
+                            {/* On the rect, not on the enclosing <g>: a <title>
+                                there is the tooltip for every node inside the box
+                                as well, and the nodes have their own. */}
+                            <title>{`Grouped by ${group.label}=${group.title}`}</title>
+                          </rect>
+                          <text
+                            className="admin-topology__group-title"
+                            x={group.x + 14}
+                            y={group.y + 20}
+                            data-testid="topology-group"
+                          >
+                            {/* Clipped to the box it titles: a one-workload
+                                application is 140px wide, and an unclipped
+                                heading ran across the group beside it. */}
+                            {clip(group.title, Math.max(8, Math.floor((group.width - 28) / 7)))}
+                          </text>
+                        </>
+                      )}
+                      {group.nodes.map((node) => (
+                        <TopologyNode
+                          key={node.id}
+                          node={node}
+                          isSelected={node.id === selectedId}
+                          onSelect={setSelectedId}
+                        />
+                      ))}
+                    </g>
+                  ))}
+                </svg>
+
+                {/* Rule 11.4 does not apply here — this is not a permission gate,
+                    just the ordinary courtesy of not offering a button that
+                    would do nothing. Disabled at the same bounds `zoomView` and
+                    `resetView` already enforce, so the control and the math it
+                    drives cannot disagree about where the limit is. */}
+                <div className="admin-topology__controls" role="group" aria-label="Zoom and pan">
+                  <Button
+                    variant="control"
+                    aria-label="Zoom in"
+                    data-testid="topology-zoom-in"
+                    icon={<SearchPlusIcon />}
+                    isDisabled={activeView.scale >= MAX_SCALE}
+                    onClick={() => zoomBy(1.25)}
+                  />
+                  <Button
+                    variant="control"
+                    aria-label="Zoom out"
+                    data-testid="topology-zoom-out"
+                    icon={<SearchMinusIcon />}
+                    isDisabled={activeView.scale <= MIN_SCALE}
+                    onClick={() => zoomBy(1 / 1.25)}
+                  />
+                  <Button
+                    variant="control"
+                    aria-label="Reset view"
+                    data-testid="topology-reset-view"
+                    icon={<ExpandArrowsAltIcon />}
+                    isDisabled={view == null}
+                    onClick={resetView}
+                  />
+                </div>
+              </div>
             )}
           </DrawerContentBody>
         </DrawerContent>

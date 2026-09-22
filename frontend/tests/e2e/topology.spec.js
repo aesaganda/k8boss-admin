@@ -568,6 +568,183 @@ test.describe('the side panel', () => {
   });
 });
 
+test.describe('zoom and pan', () => {
+  /** The canvas's own `viewBox`, parsed — the one place the current view lives. */
+  async function readViewBox(page) {
+    const raw = await page.getByTestId('topology-canvas').getAttribute('viewBox');
+    const [x, y, w, h] = raw.split(' ').map(Number);
+    return { x, y, w, h };
+  }
+
+  test('zoom in shrinks the visible rectangle; reset restores it exactly', async ({ page }) => {
+    await openTopology(page);
+    await canvas(page);
+
+    const initial = await readViewBox(page);
+    // Reset starts disabled: there is nothing yet to reset from.
+    await expect(page.getByTestId('topology-reset-view')).toBeDisabled();
+
+    await page.getByTestId('topology-zoom-in').click();
+    const zoomed = await readViewBox(page);
+    expect(zoomed.w).toBeLessThan(initial.w);
+    expect(zoomed.h).toBeLessThan(initial.h);
+
+    await expect(page.getByTestId('topology-reset-view')).toBeEnabled();
+    await page.getByTestId('topology-reset-view').click();
+    const reset = await readViewBox(page);
+    expect(reset).toEqual(initial);
+    await expect(page.getByTestId('topology-reset-view')).toBeDisabled();
+  });
+
+  test('the first zoom-in aims at the drawn content, not at the middle of the fixed-width canvas', async ({
+    page,
+  }) => {
+    // This fixture's content — one boxed application plus two loose nodes —
+    // sits on the left of the 960-wide canvas `layoutTopology` always returns
+    // (its own docstring says why the width is fixed rather than measured).
+    // Zooming in "on the view's own centre" from a fresh page would zoom
+    // toward x=480 — past the right edge of everything actually drawn here —
+    // magnifying blank canvas instead of any workload.
+    await openTopology(page);
+    await canvas(page);
+
+    await page.getByTestId('topology-zoom-in').click();
+
+    // The node the fixture places furthest right (checkout, a loose node
+    // after the boxed pair) must still be inside the shrunk rectangle.
+    const box = await readViewBox(page);
+    const checkoutBox = await node(page, 'prod/Deployment/checkout').boundingBox();
+    const canvasBox = await page.getByTestId('topology-canvas').boundingBox();
+    // The node's on-screen box must be within the canvas's own rendered box —
+    // if the zoom had aimed at the canvas's nominal centre instead of the
+    // content, this node would have been clipped out of the visible area.
+    expect(checkoutBox.x).toBeGreaterThanOrEqual(canvasBox.x - 1);
+    expect(checkoutBox.x + checkoutBox.width).toBeLessThanOrEqual(canvasBox.x + canvasBox.width + 1);
+    // And the viewBox's own centre should have moved left, off the canvas's
+    // nominal midpoint (960/2 = 480) and toward the content.
+    expect(box.x + box.w / 2).toBeLessThan(480);
+  });
+
+  test('once the operator has zoomed, a further zoom-in keeps their own view centred, not the content', async ({
+    page,
+  }) => {
+    // A manual pan away from the content must not be pulled back toward it by
+    // a later zoom click — only the very first zoom, from a fresh page,
+    // anchors on the content.
+    await openTopology(page);
+    await canvas(page);
+    await page.getByTestId('topology-zoom-in').click(); // establishes a manual view
+
+    const before = await readViewBox(page);
+    await page.getByTestId('topology-zoom-in').click();
+    const after = await readViewBox(page);
+
+    expect(after.x + after.w / 2).toBeCloseTo(before.x + before.w / 2, 5);
+    expect(after.y + after.h / 2).toBeCloseTo(before.y + before.h / 2, 5);
+  });
+
+  test('zoom out is disabled at the fitted view — there is nothing wider to show', async ({ page }) => {
+    await openTopology(page);
+    await canvas(page);
+
+    // The floor is the whole drawing, and the whole drawing is what a fresh
+    // page already shows: zooming out further would only add empty margin.
+    await expect(page.getByTestId('topology-zoom-out')).toBeDisabled();
+
+    await page.getByTestId('topology-zoom-in').click();
+    await expect(page.getByTestId('topology-zoom-out')).toBeEnabled();
+    await page.getByTestId('topology-zoom-out').click();
+    await expect(page.getByTestId('topology-zoom-out')).toBeDisabled();
+  });
+
+  test('the wheel zooms toward the cursor, not toward the centre of the drawing', async ({ page }) => {
+    await openTopology(page);
+    await canvas(page);
+
+    const initial = await readViewBox(page);
+    const box = await page.getByTestId('topology-canvas').boundingBox();
+    // A point away from centre, so a centred zoom and a cursor-anchored one
+    // would disagree about where the rectangle ends up.
+    const cursor = { x: box.x + box.width * 0.15, y: box.y + box.height * 0.2 };
+    await page.mouse.move(cursor.x, cursor.y);
+    await page.mouse.wheel(0, -200);
+
+    await expect
+      .poll(async () => (await readViewBox(page)).w)
+      .toBeLessThan(initial.w);
+    const zoomed = await readViewBox(page);
+    // A zoom centred on the drawing's own middle would have kept this ratio at
+    // 0.5; a cursor-anchored one moves it toward where the cursor pointed.
+    const initialCentreRatio = 0.5;
+    const zoomedCentreRatio = (initial.x + initial.w / 2 - zoomed.x) / zoomed.w;
+    expect(zoomedCentreRatio).not.toBeCloseTo(initialCentreRatio, 1);
+  });
+
+  test('a drag that starts and ends on the same node pans, and does not select it', async ({ page }) => {
+    await openTopology(page);
+    await canvas(page);
+    await page.getByTestId('topology-zoom-in').click();
+    const before = await readViewBox(page);
+
+    const target = node(page, 'prod/Deployment/shop-web');
+    const box = await target.boundingBox();
+    const start = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+
+    await page.mouse.move(start.x, start.y);
+    await page.mouse.down();
+    // Past the four-pixel drag threshold, but a small enough move that the
+    // release still lands on the *same* node it started from — the case that
+    // actually exercises suppression: mousedown and mouseup share a target, so
+    // an unsuppressed click would fire on that node's own handler rather than
+    // failing to resolve to anything clickable at all. Several steps, so the
+    // browser issues more than one pointermove — a single large jump would
+    // still pass an implementation that only checked the endpoints.
+    await page.mouse.move(start.x + 15, start.y + 10, { steps: 6 });
+    await page.mouse.up();
+
+    const after = await readViewBox(page);
+    expect(after.w).toBeCloseTo(before.w, 5);
+    expect(after.h).toBeCloseTo(before.h, 5);
+    expect(after.x).not.toBeCloseTo(before.x, 3);
+
+    // The gesture that just panned the canvas must not also have opened the
+    // drawer on the node it started from.
+    await expect(page.getByTestId('topology-panel-title')).toHaveCount(0);
+  });
+
+  test('a plain click still selects a node after the view has been panned and zoomed', async ({ page }) => {
+    await openTopology(page);
+    await canvas(page);
+    await page.getByTestId('topology-zoom-in').click();
+
+    const target = node(page, 'prod/Deployment/shop-web');
+    const box = await target.boundingBox();
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.down();
+    await page.mouse.up();
+
+    await expect(page.getByTestId('topology-panel-title')).toHaveText('shop-web');
+  });
+
+  test('switching namespace resets a manual view back to fit', async ({ page }) => {
+    await openTopology(page);
+    await canvas(page);
+    const initial = await readViewBox(page);
+
+    await page.getByTestId('topology-zoom-in').click();
+    expect(await readViewBox(page)).not.toEqual(initial);
+
+    // A different scope is a different drawing; a manual view aimed at the
+    // old one means nothing once its nodes are gone.
+    await page.getByTestId('namespace-selector').click();
+    await page.getByRole('menuitem', { name: 'kube-system', exact: true }).click();
+    await canvas(page);
+
+    await expect.poll(() => readViewBox(page)).toEqual(initial);
+    await expect(page.getByTestId('topology-reset-view')).toBeDisabled();
+  });
+});
+
 test.describe('nothing to draw', () => {
   test('an empty namespace says the listing succeeded', async ({ page }) => {
     await openTopology(page, { workloads: FIXTURES.emptyList });
