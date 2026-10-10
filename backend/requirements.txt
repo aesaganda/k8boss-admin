@@ -30,14 +30,15 @@ ldap3==2.9.1
 # missing exp) are silent, and each one turns the login flow into an open door
 # that works perfectly in testing.
 #
-# 2.13.0 and not 2.10.1: the older release skips the `crit` header check RFC 7515
-# §4.1.11 makes mandatory, verifies with the algorithm bound to a PyJWK rather
-# than the one the allowlist approved, and hands an attacker-supplied `jku` to
-# urllib with `file://` and `ftp://` still registered. Only the first reaches
-# this code (the JWKS URI comes from the configured issuer's discovery document
-# and `jwt.decode` is given a raw key, not a PyJWK), but this is the one
-# dependency on the path that decides who is signed in.
-pyjwt[crypto]==2.13.0
+# 2.15.0 and not 2.13.0: 2.13.0 carries 16 advisories, one critical
+# (GHSA-ffc3-869f-jxw9). The allowlist above closes the algorithm-confusion
+# ones here; two reach this code — PyJWKClient followed redirects when fetching
+# the JWKS (GHSA-9v7f-9g4p-ffgj; 2.14 refuses one, so an issuer whose jwks_uri
+# redirects now fails sign-in, see OIDC_ISSUER in the README) and re-fetched it
+# on every unknown `kid` (GHSA-2gx3-rcp4-g85q). 2.13.0 itself was taken over
+# 2.10.1 for the `crit` header check RFC 7515 §4.1.11 makes mandatory. This is
+# the one dependency on the path that decides who is signed in.
+pyjwt[crypto]==2.15.0
 
 # SAML 2.0 assertion signature verification, and the XML parser it needs.
 #
