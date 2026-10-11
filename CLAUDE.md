@@ -367,6 +367,13 @@ chunk-splitting mistake is invisible in dev and caught there.
   ever said so — `GET /api/portal/olm`, 500, `FileNotFoundError`. **Packaging is
   a thing that can be wrong, so it is a thing that gets built here.**
 
+`.github/workflows/vulns.yml` is **deliberately not a fifth job**: `pip-audit` on
+the backend's resolved dependency tree (`--strict`) and `npm audit` on the
+frontend lockfile, on every PR and push and **nightly**. An advisory published
+today turns it red whatever a PR changed — the gate `ci.yml`'s header says is
+not a gate — so it is a separate, named check, and whether it blocks a merge is
+branch protection's call. Nothing else looks: Dependabot alerts are off here.
+
 **Lint is NOT `continue-on-error`, and that is a decision.** K8Boss runs its
 frontend lint advisory, and real errors accumulated behind a green check because
 nobody reads the output of a job that passed — until someone ran ESLint by hand
