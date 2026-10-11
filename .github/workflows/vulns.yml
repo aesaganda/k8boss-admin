@@ -1,0 +1,51 @@
+name: vulns
+
+# Known vulnerabilities in what this console ships. Nothing else looks:
+# Dependabot alerts are off on this repository, and PyJWT sat at 2.13.0 — 16
+# advisories, one critical, on the sign-in path — and source-map-js at 1.2.1
+# until they were found from another repository's copy of these lockfiles
+# (#121, #122).
+#
+# Its own workflow, not a fifth job in ci.yml: an advisory published today turns
+# this red whatever a pull request changed, which is the gate ci.yml's header
+# says is not a gate. Here it is a separate, named check that also runs
+# nightly, so one published after a merge fails the next night; whether it
+# blocks a merge is branch protection's call.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    name: pip-audit (backend, resolved dependency tree)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"   # backend/Dockerfile's python:3.12-slim
+      - run: python -m pip install pip-audit==2.10.1
+      # -r resolves requirements.txt the way the image's pip install does, so
+      # an unpinned transitive dependency is audited too, not only the pins.
+      # --strict: a package that could not be audited fails the job rather
+      # than being left out of a clean report.
+      - run: pip-audit -r backend/requirements.txt --vulnerability-service osv --strict
+
+  npm:
+    name: npm audit (frontend lockfile)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      # The lockfile alone: no install, so nothing from it runs.
+      - working-directory: frontend
+        run: npm audit --package-lock-only
